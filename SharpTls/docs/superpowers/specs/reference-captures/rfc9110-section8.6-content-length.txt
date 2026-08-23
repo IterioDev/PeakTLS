@@ -1,0 +1,102 @@
+RFC 9110 Section 8.6 - Content-Length (complete: 8.6)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9110.txt on 2026-08-20.
+Captured because RFC 9114 Section 4.1.2's Content-Length rule - the rule task
+C10b implemented - cites "Section 8.6 of [HTTP]" for the field itself, and no
+extract of it existed in this repo. The brief that ordered this capture named
+RFC 9110 Section 6.4.1 as the Content-Length section. It is not; 6.4.1 is
+"Content Semantics" (captured as rfc9110-section6.4.1-content-semantics.txt).
+This is the Content-Length section.
+What 8.6 actually says, where a summary would mislead:
+  - 8.6 never calls a Content-Length that disagrees with the body "malformed",
+    and imposes nothing on a recipient that sees a mismatch. It binds SENDERS
+    and FORWARDERS: "a sender MUST NOT forward a message with a Content-Length
+    header field value that is known to be incorrect." The receiver-side rule
+    for HTTP/3 is RFC 9114 Section 4.1.2's, not this section's.
+  - the MUST NOTs here are what make most never-having-content cases moot on the
+    wire: a server MUST NOT send Content-Length in any 1xx or 204 response, nor
+    in any 2xx response to a CONNECT request. Only a HEAD response and a 304 MAY
+    carry one, each under a MUST NOT unless the value equals the octet count the
+    corresponding GET / 200 (OK) response would have sent.
+  - "Any Content-Length field value greater than or equal to zero is valid", and
+    a recipient MUST anticipate large decimal numerals and prevent integer
+    overflow or precision loss when parsing them.
+  - a comma-separated repeat of one value ("Content-Length: 42, 42") MAY be
+    either rejected as invalid or collapsed to a single instance - a MAY, so
+    both behaviours conform. This is the only duplicate-value licence given.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+8.6.  Content-Length
+
+   The "Content-Length" header field indicates the associated
+   representation's data length as a decimal non-negative integer number
+   of octets.  When transferring a representation as content, Content-
+   Length refers specifically to the amount of data enclosed so that it
+   can be used to delimit framing (e.g., Section 6.2 of [HTTP/1.1]).  In
+   other cases, Content-Length indicates the selected representation's
+   current length, which can be used by recipients to estimate transfer
+   time or to compare with previously stored representations.
+
+     Content-Length = 1*DIGIT
+
+   An example is
+
+   Content-Length: 3495
+
+   A user agent SHOULD send Content-Length in a request when the method
+   defines a meaning for enclosed content and it is not sending
+   Transfer-Encoding.  For example, a user agent normally sends Content-
+   Length in a POST request even when the value is 0 (indicating empty
+   content).  A user agent SHOULD NOT send a Content-Length header field
+   when the request message does not contain content and the method
+   semantics do not anticipate such data.
+
+   A server MAY send a Content-Length header field in a response to a
+   HEAD request (Section 9.3.2); a server MUST NOT send Content-Length
+   in such a response unless its field value equals the decimal number
+   of octets that would have been sent in the content of a response if
+   the same request had used the GET method.
+
+   A server MAY send a Content-Length header field in a 304 (Not
+   Modified) response to a conditional GET request (Section 15.4.5); a
+   server MUST NOT send Content-Length in such a response unless its
+   field value equals the decimal number of octets that would have been
+   sent in the content of a 200 (OK) response to the same request.
+
+   A server MUST NOT send a Content-Length header field in any response
+   with a status code of 1xx (Informational) or 204 (No Content).  A
+   server MUST NOT send a Content-Length header field in any 2xx
+   (Successful) response to a CONNECT request (Section 9.3.6).
+
+   Aside from the cases defined above, in the absence of Transfer-
+   Encoding, an origin server SHOULD send a Content-Length header field
+   when the content size is known prior to sending the complete header
+   section.  This will allow downstream recipients to measure transfer
+   progress, know when a received message is complete, and potentially
+   reuse the connection for additional requests.
+
+   Any Content-Length field value greater than or equal to zero is
+   valid.  Since there is no predefined limit to the length of content,
+   a recipient MUST anticipate potentially large decimal numerals and
+   prevent parsing errors due to integer conversion overflows or
+   precision loss due to integer conversion (Section 17.5).
+
+   Because Content-Length is used for message delimitation in HTTP/1.1,
+   its field value can impact how the message is parsed by downstream
+   recipients even when the immediate connection is not using HTTP/1.1.
+   If the message is forwarded by a downstream intermediary, a Content-
+   Length field value that is inconsistent with the received message
+   framing might cause a security failure due to request smuggling or
+   response splitting.
+
+   As a result, a sender MUST NOT forward a message with a Content-
+   Length header field value that is known to be incorrect.
+
+   Likewise, a sender MUST NOT forward a message with a Content-Length
+   header field value that does not match the ABNF above, with one
+   exception: a recipient of a Content-Length header field value
+   consisting of the same decimal value repeated as a comma-separated
+   list (e.g, "Content-Length: 42, 42") MAY either reject the message as
+   invalid or replace that invalid field value with a single instance of
+   the decimal value, since this likely indicates that a duplicate was
+   generated or combined by an upstream message processor.

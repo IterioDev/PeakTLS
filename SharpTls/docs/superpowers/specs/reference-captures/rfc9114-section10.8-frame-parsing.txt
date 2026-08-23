@@ -1,0 +1,19 @@
+RFC 9114 Section 10.8 - Frame Parsing (complete: 10.8)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9114.txt on 2026-08-19.
+Captured for subsystem C task C0. Seven lines, one MUST, and the reason C's
+frame parsers are written Try-shaped rather than throwing: 10.8 is the RFC's
+own statement that nested length elements "could pose a security risk to an
+incautious implementer", and it requires that "An implementation MUST ensure
+that the length of a frame exactly matches the length of the fields it
+contains." That is an equality check, not a bounds check - a frame whose
+declared Length exceeds its contents is as invalid as one that overruns.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+10.8.  Frame Parsing
+
+   Several protocol elements contain nested length elements, typically
+   in the form of frames with an explicit length containing variable-
+   length integers.  This could pose a security risk to an incautious
+   implementer.  An implementation MUST ensure that the length of a
+   frame exactly matches the length of the fields it contains.

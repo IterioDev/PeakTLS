@@ -1,0 +1,164 @@
+{
+  "_capture": {
+    "endpoint": "https://tls3.peet.ws/api/all",
+    "preset": "okhttp4-android-11",
+    "observed_utc": "2026-08-16",
+    "note": "Verbatim third-party observation, captured by Http2LiveParityTests with TLSCLIENT_LIVE_CAPTURE_DIR set. Regenerate the same way. Fields that vary per connection (client_random, session_id, TLS_GREASE code points, key_share public keys, tcpip.*) are recorded here as evidence but are NOT asserted by the test.",
+    "redacted": [
+      "ip",
+      "tcpip.ip.src_ip",
+      "tcpip.src_port",
+      "donate"
+    ]
+  },
+  "response": {
+    "ip": "<redacted>",
+    "http_version": "h2",
+    "method": "GET",
+    "user_agent": "okhttp/4.10.0",
+    "tls": {
+      "ciphers": [
+        "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+        "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+        "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+        "TLS_RSA_WITH_AES_128_GCM_SHA256",
+        "TLS_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_RSA_WITH_AES_128_CBC_SHA",
+        "TLS_RSA_WITH_AES_256_CBC_SHA"
+      ],
+      "extensions": [
+        {
+          "name": "server_name (0)",
+          "server_name": "tls3.peet.ws"
+        },
+        {
+          "name": "extended_master_secret (23)",
+          "master_secret_data": "",
+          "extended_master_secret_data": ""
+        },
+        {
+          "name": "extensionRenegotiationInfo (boringssl) (65281)",
+          "data": "00"
+        },
+        {
+          "name": "supported_groups (10)",
+          "supported_groups": [
+            "X25519 (29)",
+            "P-256 (23)",
+            "P-384 (24)"
+          ]
+        },
+        {
+          "name": "ec_point_formats (11)",
+          "elliptic_curves_point_formats": [
+            "0x00"
+          ]
+        },
+        {
+          "name": "status_request (5)",
+          "status_request": {
+            "certificate_status_type": "OSCP (1)",
+            "responder_id_list_length": 0,
+            "request_extensions_length": 0
+          }
+        },
+        {
+          "name": "signature_algorithms (13)",
+          "signature_algorithms": [
+            "ecdsa_secp256r1_sha256",
+            "rsa_pss_rsae_sha256",
+            "rsa_pkcs1_sha256",
+            "ecdsa_secp384r1_sha384",
+            "rsa_pss_rsae_sha384",
+            "rsa_pkcs1_sha384",
+            "rsa_pss_rsae_sha512",
+            "rsa_pkcs1_sha512",
+            "rsa_pkcs1_sha1"
+          ]
+        },
+        {
+          "name": "application_layer_protocol_negotiation (16)",
+          "protocols": [
+            "h2",
+            "http/1.1"
+          ]
+        }
+      ],
+      "tls_version_record": "771",
+      "tls_version_negotiated": "771",
+      "ja3": "771,49195-49196-52393-49199-49200-52392-49171-49172-156-157-47-53,0-23-65281-10-11-5-13-16,29-23-24,0",
+      "ja3_hash": "d23e3382987561b51c127e59b27f836e",
+      "ja4": "t12d128h2_d34a8e72043a_036209cd1ead",
+      "ja4_r": "t12d128h2_002f,0035,009c,009d,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0017,ff01_0403,0804,0401,0503,0805,0501,0806,0601,0201",
+      "peetprint": "|2-1.1|29-23-24|1027-2052-1025-1283-2053-1281-2054-1537-513|0||49195-49196-52393-49199-49200-52392-49171-49172-156-157-47-53|0-10-11-13-16-23-5-65281",
+      "peetprint_hash": "695ca346b683dd573d4e23ca6e069c76",
+      "client_random": "efd2e0b9117b98c01814f40a843d3c40fc66d8b7265a7ca661ec6f05c0097e63",
+      "session_id": "da53a2c72e54fa76b35cfb78c789c084c8d239a349b1555ac7f3fb5a814cd2e7"
+    },
+    "http2": {
+      "akamai_fingerprint": "4:16777216|16711681|0|m,p,a,s",
+      "akamai_fingerprint_hash": "605a1154008045d7e3cb3c6fb062c0ce",
+      "sent_frames": [
+        {
+          "frame_type": "SETTINGS",
+          "length": 6,
+          "settings": [
+            "INITIAL_WINDOW_SIZE = 16777216"
+          ]
+        },
+        {
+          "frame_type": "WINDOW_UPDATE",
+          "length": 4,
+          "increment": 16711681
+        },
+        {
+          "frame_type": "HEADERS",
+          "stream_id": 1,
+          "length": 58,
+          "headers": [
+            ":method: GET",
+            ":path: /api/all",
+            ":authority: tls3.peet.ws",
+            ":scheme: https",
+            "user-agent: okhttp/4.10.0",
+            "accept-encoding: gzip, deflate, br",
+            "accept: */*"
+          ],
+          "flags": [
+            "EndStream (0x1)",
+            "EndHeaders (0x4)",
+            "Priority (0x20)"
+          ],
+          "priority": {
+            "weight": 1,
+            "depends_on": 0,
+            "exclusive": 0
+          }
+        }
+      ]
+    },
+    "tcpip": {
+      "cap_length": 135,
+      "dst_port": 443,
+      "src_port": "<redacted>",
+      "ip": {
+        "id": 37184,
+        "ttl": 116,
+        "ip_version": 4,
+        "dst_ip": "134.209.246.126",
+        "src_ip": "<redacted>"
+      },
+      "tcp": {
+        "ack": 248917067,
+        "checksum": 38459,
+        "seq": 1456888973,
+        "window": 253
+      }
+    }
+  }
+}

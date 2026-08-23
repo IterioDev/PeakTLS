@@ -1,0 +1,283 @@
+{
+  "capture": "scripts/fingerprints/spotify-ios26-capture.pcapng",
+  "client_ip": "192.168.137.83",
+  "client_datagrams": [
+    {
+      "datagram": 1,
+      "udp_payload_bytes": 1350,
+      "coalesced_packets": [
+        {
+          "type": "Initial",
+          "version": "0x00000001",
+          "dcid_len": 8,
+          "scid_len": 8,
+          "dcid": "26650979dd3bcb0d",
+          "token_len": 0,
+          "length_varint_width": 2,
+          "packet_number": 0,
+          "pn_encoded_length": 1,
+          "wire_size": 1350,
+          "frame_order": [
+            "CRYPTO(off=0,len=1149)",
+            "PADDING x154"
+          ]
+        }
+      ]
+    },
+    {
+      "datagram": 2,
+      "udp_payload_bytes": 1350,
+      "coalesced_packets": [
+        {
+          "type": "Initial",
+          "version": "0x00000001",
+          "dcid_len": 8,
+          "scid_len": 8,
+          "dcid": "26650979dd3bcb0d",
+          "token_len": 0,
+          "length_varint_width": 2,
+          "packet_number": 1,
+          "pn_encoded_length": 1,
+          "wire_size": 1350,
+          "frame_order": [
+            "CRYPTO(off=1149,len=246)",
+            "PADDING x1056"
+          ]
+        }
+      ]
+    },
+    {
+      "datagram": 3,
+      "udp_payload_bytes": 114,
+      "coalesced_packets": [
+        {
+          "type": "Handshake",
+          "version": "0x00000001",
+          "dcid_len": 20,
+          "scid_len": 8,
+          "dcid": "3d0757c3e8c15636b0b4006c5e3f80f388a97c24",
+          "token_len": 0,
+          "length_varint_width": 2,
+          "packet_number": -1,
+          "pn_encoded_length": 0,
+          "wire_size": 114,
+          "frame_order": []
+        }
+      ]
+    },
+    {
+      "datagram": 4,
+      "udp_payload_bytes": 1350,
+      "coalesced_packets": [
+        {
+          "type": "Initial",
+          "version": "0x00000001",
+          "dcid_len": 20,
+          "scid_len": 8,
+          "dcid": "3d0757c3e8c15636b0b4006c5e3f80f388a97c24",
+          "token_len": 0,
+          "length_varint_width": 2,
+          "packet_number": 2,
+          "pn_encoded_length": 1,
+          "wire_size": 1350,
+          "frame_order": [
+            "ACK",
+            "PADDING x1290"
+          ]
+        }
+      ]
+    },
+    {
+      "datagram": 5,
+      "udp_payload_bytes": 1337,
+      "coalesced_packets": [
+        {
+          "type": "1-RTT/short",
+          "version": "0x00000000",
+          "dcid_len": 0,
+          "scid_len": 0,
+          "dcid": "",
+          "token_len": 0,
+          "length_varint_width": 0,
+          "packet_number": -1,
+          "pn_encoded_length": 0,
+          "wire_size": 1337,
+          "frame_order": []
+        }
+      ]
+    },
+    {
+      "datagram": 6,
+      "udp_payload_bytes": 43,
+      "coalesced_packets": [
+        {
+          "type": "1-RTT/short",
+          "version": "0x00000000",
+          "dcid_len": 0,
+          "scid_len": 0,
+          "dcid": "",
+          "token_len": 0,
+          "length_varint_width": 0,
+          "packet_number": -1,
+          "pn_encoded_length": 0,
+          "wire_size": 43,
+          "frame_order": []
+        }
+      ]
+    },
+    {
+      "datagram": 7,
+      "udp_payload_bytes": 43,
+      "coalesced_packets": [
+        {
+          "type": "1-RTT/short",
+          "version": "0x00000000",
+          "dcid_len": 0,
+          "scid_len": 0,
+          "dcid": "",
+          "token_len": 0,
+          "length_varint_width": 0,
+          "packet_number": -1,
+          "pn_encoded_length": 0,
+          "wire_size": 43,
+          "frame_order": []
+        }
+      ]
+    }
+  ],
+  "initial_crypto_frame_byte_counts": [
+    1149,
+    246
+  ],
+  "initial_crypto_frames_per_datagram": [
+    1,
+    1
+  ],
+  "crypto_offset_varint_widths": [
+    1,
+    2
+  ],
+  "crypto_length_varint_widths": [
+    2
+  ],
+  "client_hello": {
+    "sni": "mask.icloud.com",
+    "alpn": [
+      "h3"
+    ],
+    "cipher_suites": [
+      "0x1302"
+    ],
+    "extensions_in_order": [
+      {
+        "id": "0x000a",
+        "len": 4
+      },
+      {
+        "id": "0x002b",
+        "len": 3
+      },
+      {
+        "id": "0x0033",
+        "len": 1222
+      },
+      {
+        "id": "0x000d",
+        "len": 4
+      },
+      {
+        "id": "0x0014",
+        "len": 2
+      },
+      {
+        "id": "0x002d",
+        "len": 2
+      },
+      {
+        "id": "0x0000",
+        "len": 20
+      },
+      {
+        "id": "0x0039",
+        "len": 50
+      },
+      {
+        "id": "0x0010",
+        "len": 5
+      }
+    ],
+    "quic_transport_parameters_in_order": [
+      {
+        "id": "0xe",
+        "name": "active_connection_id_limit",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "4040",
+        "value": 64
+      },
+      {
+        "id": "0xf",
+        "name": "initial_source_connection_id",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "8638855a7fd36ead"
+      },
+      {
+        "id": "0x4",
+        "name": "initial_max_data",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "81000000",
+        "value": 16777216
+      },
+      {
+        "id": "0x5",
+        "name": "initial_max_stream_data_bidi_local",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "80200000",
+        "value": 2097152
+      },
+      {
+        "id": "0x6",
+        "name": "initial_max_stream_data_bidi_remote",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "80200000",
+        "value": 2097152
+      },
+      {
+        "id": "0x7",
+        "name": "initial_max_stream_data_uni",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "80200000",
+        "value": 2097152
+      },
+      {
+        "id": "0x8",
+        "name": "initial_max_streams_bidi",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "08",
+        "value": 8
+      },
+      {
+        "id": "0x9",
+        "name": "initial_max_streams_uni",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "08",
+        "value": 8
+      },
+      {
+        "id": "0x20",
+        "name": "max_datagram_frame_size",
+        "id_varint_width": 1,
+        "len_varint_width": 1,
+        "raw": "8000ffff",
+        "value": 65535
+      }
+    ]
+  }
+}

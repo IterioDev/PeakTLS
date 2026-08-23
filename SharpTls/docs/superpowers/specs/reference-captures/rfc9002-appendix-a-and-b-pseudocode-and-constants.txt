@@ -1,0 +1,654 @@
+RFC 9002 Appendix A and Appendix B - Loss Recovery and Congestion Control
+Pseudocode (complete: A, A.1 with A.1.1-A.1.3, A.2-A.11, B, B.1-B.9)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9002.txt on 2026-08-21.
+Captured for subsystem A3 as every later task's recomputation base: A.2 and B.1
+are where kPacketThreshold, kTimeThreshold, kGranularity, kInitialRtt,
+kInitialWindow, kMinimumWindow, kLossReductionFactor and
+kPersistentCongestionThreshold are defined.
+
+RFC 9002 PUBLISHES NO TEST VECTORS. There is nothing in this document
+corresponding to RFC 9001 Appendix A or RFC 9204 Appendix B - no published
+(sequence of ACKs, expected congestion window) pair anywhere. An implementer
+reaching for "the published vector" must find this sentence before inventing one
+from a round trip, because a transcription error is invisible to a round trip:
+the encoder and the decoder would share it. A3's evidence therefore comes from
+three substitutes, in descending strength: (1) an independent implementation -
+System.Net.Quic.QuicListener over MsQuic, which is genuinely foreign code;
+(2) invariants recomputed rather than compared - smoothed_rtt lies between
+min_rtt and the largest sample, the window never falls below the minimum,
+bytes-in-flight returns to zero when everything is acknowledged; (3) a packet
+capture, which is the only thing that settles the knobs.
+
+THE PSEUDOCODE IS NOT SELF-CONTAINED. Seven functions are called and never
+defined anywhere in this document: DetectAndRemoveAckedPackets (A.7),
+InPersistentCongestion (B.8), IsAppOrFlowControlLimited (B.5),
+MaybeSendOnePacket (B.6), SendOneAckElicitingPaddedInitialPacket,
+SendOneAckElicitingHandshakePacket and SendOneOrTwoAckElicitingPackets (A.9).
+Pacing (Section 7.7) and the persistent congestion duration (Section 7.6.1) have
+no pseudocode at all - they are prose plus a formula, in
+rfc9002-section7-congestion-control.txt.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+Appendix A.  Loss Recovery Pseudocode
+
+   We now describe an example implementation of the loss detection
+   mechanisms described in Section 6.
+
+   The pseudocode segments in this section are licensed as Code
+   Components; see the copyright notice.
+
+A.1.  Tracking Sent Packets
+
+   To correctly implement congestion control, a QUIC sender tracks every
+   ack-eliciting packet until the packet is acknowledged or lost.  It is
+   expected that implementations will be able to access this information
+   by packet number and crypto context and store the per-packet fields
+   (Appendix A.1.1) for loss recovery and congestion control.
+
+   After a packet is declared lost, the endpoint can still maintain
+   state for it for an amount of time to allow for packet reordering;
+   see Section 13.3 of [QUIC-TRANSPORT].  This enables a sender to
+   detect spurious retransmissions.
+
+   Sent packets are tracked for each packet number space, and ACK
+   processing only applies to a single space.
+
+A.1.1.  Sent Packet Fields
+
+   packet_number:  The packet number of the sent packet.
+
+   ack_eliciting:  A Boolean that indicates whether a packet is ack-
+      eliciting.  If true, it is expected that an acknowledgment will be
+      received, though the peer could delay sending the ACK frame
+      containing it by up to the max_ack_delay.
+
+   in_flight:  A Boolean that indicates whether the packet counts toward
+      bytes in flight.
+
+   sent_bytes:  The number of bytes sent in the packet, not including
+      UDP or IP overhead, but including QUIC framing overhead.
+
+   time_sent:  The time the packet was sent.
+
+A.2.  Constants of Interest
+
+   Constants used in loss recovery are based on a combination of RFCs,
+   papers, and common practice.
+
+   kPacketThreshold:  Maximum reordering in packets before packet
+      threshold loss detection considers a packet lost.  The value
+      recommended in Section 6.1.1 is 3.
+
+   kTimeThreshold:  Maximum reordering in time before time threshold
+      loss detection considers a packet lost.  Specified as an RTT
+      multiplier.  The value recommended in Section 6.1.2 is 9/8.
+
+   kGranularity:  Timer granularity.  This is a system-dependent value,
+      and Section 6.1.2 recommends a value of 1 ms.
+
+   kInitialRtt:  The RTT used before an RTT sample is taken.  The value
+      recommended in Section 6.2.2 is 333 ms.
+
+   kPacketNumberSpace:  An enum to enumerate the three packet number
+      spaces:
+
+   enum kPacketNumberSpace {
+     Initial,
+     Handshake,
+     ApplicationData,
+   }
+
+A.3.  Variables of Interest
+
+   Variables required to implement the congestion control mechanisms are
+   described in this section.
+
+   latest_rtt:  The most recent RTT measurement made when receiving an
+      acknowledgment for a previously unacknowledged packet.
+
+   smoothed_rtt:  The smoothed RTT of the connection, computed as
+      described in Section 5.3.
+
+   rttvar:  The RTT variation, computed as described in Section 5.3.
+
+   min_rtt:  The minimum RTT seen over a period of time, ignoring
+      acknowledgment delay, as described in Section 5.2.
+
+   first_rtt_sample:  The time that the first RTT sample was obtained.
+
+   max_ack_delay:  The maximum amount of time by which the receiver
+      intends to delay acknowledgments for packets in the Application
+      Data packet number space, as defined by the eponymous transport
+      parameter (Section 18.2 of [QUIC-TRANSPORT]).  Note that the
+      actual ack_delay in a received ACK frame may be larger due to late
+      timers, reordering, or loss.
+
+   loss_detection_timer:  Multi-modal timer used for loss detection.
+
+   pto_count:  The number of times a PTO has been sent without receiving
+      an acknowledgment.
+
+   time_of_last_ack_eliciting_packet[kPacketNumberSpace]:  The time the
+      most recent ack-eliciting packet was sent.
+
+   largest_acked_packet[kPacketNumberSpace]:  The largest packet number
+      acknowledged in the packet number space so far.
+
+   loss_time[kPacketNumberSpace]:  The time at which the next packet in
+      that packet number space can be considered lost based on exceeding
+      the reordering window in time.
+
+   sent_packets[kPacketNumberSpace]:  An association of packet numbers
+      in a packet number space to information about them.  Described in
+      detail above in Appendix A.1.
+
+A.4.  Initialization
+
+   At the beginning of the connection, initialize the loss detection
+   variables as follows:
+
+   loss_detection_timer.reset()
+   pto_count = 0
+   latest_rtt = 0
+   smoothed_rtt = kInitialRtt
+   rttvar = kInitialRtt / 2
+   min_rtt = 0
+   first_rtt_sample = 0
+   for pn_space in [ Initial, Handshake, ApplicationData ]:
+     largest_acked_packet[pn_space] = infinite
+     time_of_last_ack_eliciting_packet[pn_space] = 0
+     loss_time[pn_space] = 0
+
+A.5.  On Sending a Packet
+
+   After a packet is sent, information about the packet is stored.  The
+   parameters to OnPacketSent are described in detail above in
+   Appendix A.1.1.
+
+   Pseudocode for OnPacketSent follows:
+
+   OnPacketSent(packet_number, pn_space, ack_eliciting,
+                in_flight, sent_bytes):
+     sent_packets[pn_space][packet_number].packet_number =
+                                              packet_number
+     sent_packets[pn_space][packet_number].time_sent = now()
+     sent_packets[pn_space][packet_number].ack_eliciting =
+                                              ack_eliciting
+     sent_packets[pn_space][packet_number].in_flight = in_flight
+     sent_packets[pn_space][packet_number].sent_bytes = sent_bytes
+     if (in_flight):
+       if (ack_eliciting):
+         time_of_last_ack_eliciting_packet[pn_space] = now()
+       OnPacketSentCC(sent_bytes)
+       SetLossDetectionTimer()
+
+A.6.  On Receiving a Datagram
+
+   When a server is blocked by anti-amplification limits, receiving a
+   datagram unblocks it, even if none of the packets in the datagram are
+   successfully processed.  In such a case, the PTO timer will need to
+   be rearmed.
+
+   Pseudocode for OnDatagramReceived follows:
+
+   OnDatagramReceived(datagram):
+     // If this datagram unblocks the server, arm the
+     // PTO timer to avoid deadlock.
+     if (server was at anti-amplification limit):
+       SetLossDetectionTimer()
+       if loss_detection_timer.timeout < now():
+         // Execute PTO if it would have expired
+         // while the amplification limit applied.
+         OnLossDetectionTimeout()
+
+A.7.  On Receiving an Acknowledgment
+
+   When an ACK frame is received, it may newly acknowledge any number of
+   packets.
+
+   Pseudocode for OnAckReceived and UpdateRtt follow:
+
+   IncludesAckEliciting(packets):
+     for packet in packets:
+       if (packet.ack_eliciting):
+         return true
+     return false
+
+   OnAckReceived(ack, pn_space):
+     if (largest_acked_packet[pn_space] == infinite):
+       largest_acked_packet[pn_space] = ack.largest_acked
+     else:
+       largest_acked_packet[pn_space] =
+           max(largest_acked_packet[pn_space], ack.largest_acked)
+
+     // DetectAndRemoveAckedPackets finds packets that are newly
+     // acknowledged and removes them from sent_packets.
+     newly_acked_packets =
+         DetectAndRemoveAckedPackets(ack, pn_space)
+     // Nothing to do if there are no newly acked packets.
+     if (newly_acked_packets.empty()):
+       return
+
+     // Update the RTT if the largest acknowledged is newly acked
+     // and at least one ack-eliciting was newly acked.
+     if (newly_acked_packets.largest().packet_number ==
+             ack.largest_acked &&
+         IncludesAckEliciting(newly_acked_packets)):
+       latest_rtt =
+         now() - newly_acked_packets.largest().time_sent
+       UpdateRtt(ack.ack_delay)
+
+     // Process ECN information if present.
+     if (ACK frame contains ECN information):
+         ProcessECN(ack, pn_space)
+
+     lost_packets = DetectAndRemoveLostPackets(pn_space)
+     if (!lost_packets.empty()):
+       OnPacketsLost(lost_packets)
+     OnPacketsAcked(newly_acked_packets)
+
+     // Reset pto_count unless the client is unsure if
+     // the server has validated the client's address.
+     if (PeerCompletedAddressValidation()):
+       pto_count = 0
+     SetLossDetectionTimer()
+
+
+   UpdateRtt(ack_delay):
+     if (first_rtt_sample == 0):
+       min_rtt = latest_rtt
+       smoothed_rtt = latest_rtt
+       rttvar = latest_rtt / 2
+       first_rtt_sample = now()
+       return
+
+     // min_rtt ignores acknowledgment delay.
+     min_rtt = min(min_rtt, latest_rtt)
+     // Limit ack_delay by max_ack_delay after handshake
+     // confirmation.
+     if (handshake confirmed):
+       ack_delay = min(ack_delay, max_ack_delay)
+
+     // Adjust for acknowledgment delay if plausible.
+     adjusted_rtt = latest_rtt
+     if (latest_rtt >= min_rtt + ack_delay):
+       adjusted_rtt = latest_rtt - ack_delay
+
+     rttvar = 3/4 * rttvar + 1/4 * abs(smoothed_rtt - adjusted_rtt)
+     smoothed_rtt = 7/8 * smoothed_rtt + 1/8 * adjusted_rtt
+
+A.8.  Setting the Loss Detection Timer
+
+   QUIC loss detection uses a single timer for all timeout loss
+   detection.  The duration of the timer is based on the timer's mode,
+   which is set in the packet and timer events further below.  The
+   function SetLossDetectionTimer defined below shows how the single
+   timer is set.
+
+   This algorithm may result in the timer being set in the past,
+   particularly if timers wake up late.  Timers set in the past fire
+   immediately.
+
+   Pseudocode for SetLossDetectionTimer follows (where the "^" operator
+   represents exponentiation):
+
+   GetLossTimeAndSpace():
+     time = loss_time[Initial]
+     space = Initial
+     for pn_space in [ Handshake, ApplicationData ]:
+       if (time == 0 || loss_time[pn_space] < time):
+         time = loss_time[pn_space];
+         space = pn_space
+     return time, space
+
+   GetPtoTimeAndSpace():
+     duration = (smoothed_rtt + max(4 * rttvar, kGranularity))
+         * (2 ^ pto_count)
+     // Anti-deadlock PTO starts from the current time
+     if (no ack-eliciting packets in flight):
+       assert(!PeerCompletedAddressValidation())
+       if (has handshake keys):
+         return (now() + duration), Handshake
+       else:
+         return (now() + duration), Initial
+     pto_timeout = infinite
+     pto_space = Initial
+     for space in [ Initial, Handshake, ApplicationData ]:
+       if (no ack-eliciting packets in flight in space):
+           continue;
+       if (space == ApplicationData):
+         // Skip Application Data until handshake confirmed.
+         if (handshake is not confirmed):
+           return pto_timeout, pto_space
+         // Include max_ack_delay and backoff for Application Data.
+         duration += max_ack_delay * (2 ^ pto_count)
+
+       t = time_of_last_ack_eliciting_packet[space] + duration
+       if (t < pto_timeout):
+         pto_timeout = t
+         pto_space = space
+     return pto_timeout, pto_space
+
+   PeerCompletedAddressValidation():
+     // Assume clients validate the server's address implicitly.
+     if (endpoint is server):
+       return true
+     // Servers complete address validation when a
+     // protected packet is received.
+     return has received Handshake ACK ||
+          handshake confirmed
+
+   SetLossDetectionTimer():
+     earliest_loss_time, _ = GetLossTimeAndSpace()
+     if (earliest_loss_time != 0):
+       // Time threshold loss detection.
+       loss_detection_timer.update(earliest_loss_time)
+       return
+
+     if (server is at anti-amplification limit):
+       // The server's timer is not set if nothing can be sent.
+       loss_detection_timer.cancel()
+       return
+
+     if (no ack-eliciting packets in flight &&
+         PeerCompletedAddressValidation()):
+       // There is nothing to detect lost, so no timer is set.
+       // However, the client needs to arm the timer if the
+       // server might be blocked by the anti-amplification limit.
+       loss_detection_timer.cancel()
+       return
+
+     timeout, _ = GetPtoTimeAndSpace()
+     loss_detection_timer.update(timeout)
+
+A.9.  On Timeout
+
+   When the loss detection timer expires, the timer's mode determines
+   the action to be performed.
+
+   Pseudocode for OnLossDetectionTimeout follows:
+
+   OnLossDetectionTimeout():
+     earliest_loss_time, pn_space = GetLossTimeAndSpace()
+     if (earliest_loss_time != 0):
+       // Time threshold loss Detection
+       lost_packets = DetectAndRemoveLostPackets(pn_space)
+       assert(!lost_packets.empty())
+       OnPacketsLost(lost_packets)
+       SetLossDetectionTimer()
+       return
+
+     if (no ack-eliciting packets in flight):
+       assert(!PeerCompletedAddressValidation())
+       // Client sends an anti-deadlock packet: Initial is padded
+       // to earn more anti-amplification credit,
+       // a Handshake packet proves address ownership.
+       if (has Handshake keys):
+         SendOneAckElicitingHandshakePacket()
+       else:
+         SendOneAckElicitingPaddedInitialPacket()
+     else:
+       // PTO. Send new data if available, else retransmit old data.
+       // If neither is available, send a single PING frame.
+       _, pn_space = GetPtoTimeAndSpace()
+       SendOneOrTwoAckElicitingPackets(pn_space)
+
+     pto_count++
+     SetLossDetectionTimer()
+
+A.10.  Detecting Lost Packets
+
+   DetectAndRemoveLostPackets is called every time an ACK is received or
+   the time threshold loss detection timer expires.  This function
+   operates on the sent_packets for that packet number space and returns
+   a list of packets newly detected as lost.
+
+   Pseudocode for DetectAndRemoveLostPackets follows:
+
+   DetectAndRemoveLostPackets(pn_space):
+     assert(largest_acked_packet[pn_space] != infinite)
+     loss_time[pn_space] = 0
+     lost_packets = []
+     loss_delay = kTimeThreshold * max(latest_rtt, smoothed_rtt)
+
+     // Minimum time of kGranularity before packets are deemed lost.
+     loss_delay = max(loss_delay, kGranularity)
+
+     // Packets sent before this time are deemed lost.
+     lost_send_time = now() - loss_delay
+
+     foreach unacked in sent_packets[pn_space]:
+       if (unacked.packet_number > largest_acked_packet[pn_space]):
+         continue
+
+       // Mark packet as lost, or set time when it should be marked.
+       // Note: The use of kPacketThreshold here assumes that there
+       // were no sender-induced gaps in the packet number space.
+       if (unacked.time_sent <= lost_send_time ||
+           largest_acked_packet[pn_space] >=
+             unacked.packet_number + kPacketThreshold):
+         sent_packets[pn_space].remove(unacked.packet_number)
+         lost_packets.insert(unacked)
+       else:
+         if (loss_time[pn_space] == 0):
+           loss_time[pn_space] = unacked.time_sent + loss_delay
+         else:
+           loss_time[pn_space] = min(loss_time[pn_space],
+                                     unacked.time_sent + loss_delay)
+     return lost_packets
+
+A.11.  Upon Dropping Initial or Handshake Keys
+
+   When Initial or Handshake keys are discarded, packets from the space
+   are discarded and loss detection state is updated.
+
+   Pseudocode for OnPacketNumberSpaceDiscarded follows:
+
+   OnPacketNumberSpaceDiscarded(pn_space):
+     assert(pn_space != ApplicationData)
+     RemoveFromBytesInFlight(sent_packets[pn_space])
+     sent_packets[pn_space].clear()
+     // Reset the loss detection and PTO timer
+     time_of_last_ack_eliciting_packet[pn_space] = 0
+     loss_time[pn_space] = 0
+     pto_count = 0
+     SetLossDetectionTimer()
+
+Appendix B.  Congestion Control Pseudocode
+
+   We now describe an example implementation of the congestion
+   controller described in Section 7.
+
+   The pseudocode segments in this section are licensed as Code
+   Components; see the copyright notice.
+
+B.1.  Constants of Interest
+
+   Constants used in congestion control are based on a combination of
+   RFCs, papers, and common practice.
+
+   kInitialWindow:  Default limit on the initial bytes in flight as
+      described in Section 7.2.
+
+   kMinimumWindow:  Minimum congestion window in bytes as described in
+      Section 7.2.
+
+   kLossReductionFactor:  Scaling factor applied to reduce the
+      congestion window when a new loss event is detected.  Section 7
+      recommends a value of 0.5.
+
+   kPersistentCongestionThreshold:  Period of time for persistent
+      congestion to be established, specified as a PTO multiplier.
+      Section 7.6 recommends a value of 3.
+
+B.2.  Variables of Interest
+
+   Variables required to implement the congestion control mechanisms are
+   described in this section.
+
+   max_datagram_size:  The sender's current maximum payload size.  This
+      does not include UDP or IP overhead.  The max datagram size is
+      used for congestion window computations.  An endpoint sets the
+      value of this variable based on its Path Maximum Transmission Unit
+      (PMTU; see Section 14.2 of [QUIC-TRANSPORT]), with a minimum value
+      of 1200 bytes.
+
+   ecn_ce_counters[kPacketNumberSpace]:  The highest value reported for
+      the ECN-CE counter in the packet number space by the peer in an
+      ACK frame.  This value is used to detect increases in the reported
+      ECN-CE counter.
+
+   bytes_in_flight:  The sum of the size in bytes of all sent packets
+      that contain at least one ack-eliciting or PADDING frame and have
+      not been acknowledged or declared lost.  The size does not include
+      IP or UDP overhead, but does include the QUIC header and
+      Authenticated Encryption with Associated Data (AEAD) overhead.
+      Packets only containing ACK frames do not count toward
+      bytes_in_flight to ensure congestion control does not impede
+      congestion feedback.
+
+   congestion_window:  Maximum number of bytes allowed to be in flight.
+
+   congestion_recovery_start_time:  The time the current recovery period
+      started due to the detection of loss or ECN.  When a packet sent
+      after this time is acknowledged, QUIC exits congestion recovery.
+
+   ssthresh:  Slow start threshold in bytes.  When the congestion window
+      is below ssthresh, the mode is slow start and the window grows by
+      the number of bytes acknowledged.
+
+   The congestion control pseudocode also accesses some of the variables
+   from the loss recovery pseudocode.
+
+B.3.  Initialization
+
+   At the beginning of the connection, initialize the congestion control
+   variables as follows:
+
+   congestion_window = kInitialWindow
+   bytes_in_flight = 0
+   congestion_recovery_start_time = 0
+   ssthresh = infinite
+   for pn_space in [ Initial, Handshake, ApplicationData ]:
+     ecn_ce_counters[pn_space] = 0
+
+B.4.  On Packet Sent
+
+   Whenever a packet is sent and it contains non-ACK frames, the packet
+   increases bytes_in_flight.
+
+   OnPacketSentCC(sent_bytes):
+     bytes_in_flight += sent_bytes
+
+B.5.  On Packet Acknowledgment
+
+   This is invoked from loss detection's OnAckReceived and is supplied
+   with the newly acked_packets from sent_packets.
+
+   In congestion avoidance, implementers that use an integer
+   representation for congestion_window should be careful with division
+   and can use the alternative approach suggested in Section 2.1 of
+   [RFC3465].
+
+   InCongestionRecovery(sent_time):
+     return sent_time <= congestion_recovery_start_time
+
+   OnPacketsAcked(acked_packets):
+     for acked_packet in acked_packets:
+       OnPacketAcked(acked_packet)
+
+   OnPacketAcked(acked_packet):
+     if (!acked_packet.in_flight):
+       return;
+     // Remove from bytes_in_flight.
+     bytes_in_flight -= acked_packet.sent_bytes
+     // Do not increase congestion_window if application
+     // limited or flow control limited.
+     if (IsAppOrFlowControlLimited())
+       return
+     // Do not increase congestion window in recovery period.
+     if (InCongestionRecovery(acked_packet.time_sent)):
+       return
+     if (congestion_window < ssthresh):
+       // Slow start.
+       congestion_window += acked_packet.sent_bytes
+     else:
+       // Congestion avoidance.
+       congestion_window +=
+         max_datagram_size * acked_packet.sent_bytes
+         / congestion_window
+
+B.6.  On New Congestion Event
+
+   This is invoked from ProcessECN and OnPacketsLost when a new
+   congestion event is detected.  If not already in recovery, this
+   starts a recovery period and reduces the slow start threshold and
+   congestion window immediately.
+
+   OnCongestionEvent(sent_time):
+     // No reaction if already in a recovery period.
+     if (InCongestionRecovery(sent_time)):
+       return
+
+     // Enter recovery period.
+     congestion_recovery_start_time = now()
+     ssthresh = congestion_window * kLossReductionFactor
+     congestion_window = max(ssthresh, kMinimumWindow)
+     // A packet can be sent to speed up loss recovery.
+     MaybeSendOnePacket()
+
+B.7.  Process ECN Information
+
+   This is invoked when an ACK frame with an ECN section is received
+   from the peer.
+
+   ProcessECN(ack, pn_space):
+     // If the ECN-CE counter reported by the peer has increased,
+     // this could be a new congestion event.
+     if (ack.ce_counter > ecn_ce_counters[pn_space]):
+       ecn_ce_counters[pn_space] = ack.ce_counter
+       sent_time = sent_packets[ack.largest_acked].time_sent
+       OnCongestionEvent(sent_time)
+
+B.8.  On Packets Lost
+
+   This is invoked when DetectAndRemoveLostPackets deems packets lost.
+
+   OnPacketsLost(lost_packets):
+     sent_time_of_last_loss = 0
+     // Remove lost packets from bytes_in_flight.
+     for lost_packet in lost_packets:
+       if lost_packet.in_flight:
+         bytes_in_flight -= lost_packet.sent_bytes
+         sent_time_of_last_loss =
+           max(sent_time_of_last_loss, lost_packet.time_sent)
+     // Congestion event if in-flight packets were lost
+     if (sent_time_of_last_loss != 0):
+       OnCongestionEvent(sent_time_of_last_loss)
+
+     // Reset the congestion window if the loss of these
+     // packets indicates persistent congestion.
+     // Only consider packets sent after getting an RTT sample.
+     if (first_rtt_sample == 0):
+       return
+     pc_lost = []
+     for lost in lost_packets:
+       if lost.time_sent > first_rtt_sample:
+         pc_lost.insert(lost)
+     if (InPersistentCongestion(pc_lost)):
+       congestion_window = kMinimumWindow
+       congestion_recovery_start_time = 0
+
+B.9.  Removing Discarded Packets from Bytes in Flight
+
+   When Initial or Handshake keys are discarded, packets sent in that
+   space no longer count toward bytes in flight.
+
+   Pseudocode for RemoveFromBytesInFlight follows:
+
+   RemoveFromBytesInFlight(discarded_packets):
+     // Remove any unacknowledged packets from flight.
+     foreach packet in discarded_packets:
+       if packet.in_flight
+         bytes_in_flight -= size

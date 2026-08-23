@@ -1,0 +1,98 @@
+RFC 9204 Sections 4-4.2 - Wire Format primitives and the QPACK streams
+(complete: 4, 4.1 Primitives, 4.1.1 Prefixed Integers, 4.1.2 String Literals,
+4.2 Encoder and Decoder Streams; stops before 4.3 Encoder Instructions)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9204.txt on 2026-08-19.
+Captured for subsystem C task C0. 4.1.1 and 4.1.2 are the two primitives every
+QPACK representation is built from; 4.1.2 is where the Huffman flag lives and
+is the clause that defers to RFC 7541 Section 5.2 and states that the Huffman
+table from Appendix B of RFC 7541 is used without modification.
+4.2 gives stream types 0x02 (encoder) and 0x03 (decoder), and is the answer to
+"which QPACK streams must exist even if unused". The answer is asymmetric and
+is easy to get wrong from a truncated read - there are two MAY-omit clauses and
+they have DIFFERENT conditions:
+  - the encoder stream MAY be omitted "if it will not be used (for example, if
+    its encoder does not wish to use the dynamic table or if the maximum size
+    of the dynamic table permitted by the peer is zero)" - keyed on the PEER's
+    setting or on our own choice;
+  - the decoder stream MAY be omitted "if its decoder sets the maximum capacity
+    of the dynamic table to zero" - keyed on OUR OWN setting only.
+And they are followed by a clause that is not optional at all: "An endpoint
+MUST allow its peer to create an encoder stream and a decoder stream even if
+the connection's settings prevent their use." Omitting our own two streams does
+not reduce what we must accept from the server, and does not reduce the
+at-least-three-unidirectional-streams MUST of RFC 9114 Section 6.2.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+4.  Wire Format
+
+4.1.  Primitives
+
+4.1.1.  Prefixed Integers
+
+   The prefixed integer from Section 5.1 of [RFC7541] is used heavily
+   throughout this document.  The format from [RFC7541] is used
+   unmodified.  Note, however, that QPACK uses some prefix sizes not
+   actually used in HPACK.
+
+   QPACK implementations MUST be able to decode integers up to and
+   including 62 bits long.
+
+4.1.2.  String Literals
+
+   The string literal defined by Section 5.2 of [RFC7541] is also used
+   throughout.  This string format includes optional Huffman encoding.
+
+   HPACK defines string literals to begin on a byte boundary.  They
+   begin with a single bit flag, denoted as 'H' in this document
+   (indicating whether the string is Huffman encoded), followed by the
+   string length encoded as a 7-bit prefix integer, and finally the
+   indicated number of bytes of data.  When Huffman encoding is enabled,
+   the Huffman table from Appendix B of [RFC7541] is used without
+   modification and the indicated length is the size of the string after
+   encoding.
+
+   This document expands the definition of string literals by permitting
+   them to begin other than on a byte boundary.  An "N-bit prefix string
+   literal" begins mid-byte, with the first (8-N) bits allocated to a
+   previous field.  The string uses one bit for the Huffman flag,
+   followed by the length of the encoded string as a (N-1)-bit prefix
+   integer.  The prefix size, N, can have a value between 2 and 8,
+   inclusive.  The remainder of the string literal is unmodified.
+
+   A string literal without a prefix length noted is an 8-bit prefix
+   string literal and follows the definitions in [RFC7541] without
+   modification.
+
+4.2.  Encoder and Decoder Streams
+
+   QPACK defines two unidirectional stream types:
+
+   *  An encoder stream is a unidirectional stream of type 0x02.  It
+      carries an unframed sequence of encoder instructions from encoder
+      to decoder.
+
+   *  A decoder stream is a unidirectional stream of type 0x03.  It
+      carries an unframed sequence of decoder instructions from decoder
+      to encoder.
+
+   HTTP/3 endpoints contain a QPACK encoder and decoder.  Each endpoint
+   MUST initiate, at most, one encoder stream and, at most, one decoder
+   stream.  Receipt of a second instance of either stream type MUST be
+   treated as a connection error of type H3_STREAM_CREATION_ERROR.
+
+   The sender MUST NOT close either of these streams, and the receiver
+   MUST NOT request that the sender close either of these streams.
+   Closure of either unidirectional stream type MUST be treated as a
+   connection error of type H3_CLOSED_CRITICAL_STREAM.
+
+   An endpoint MAY avoid creating an encoder stream if it will not be
+   used (for example, if its encoder does not wish to use the dynamic
+   table or if the maximum size of the dynamic table permitted by the
+   peer is zero).
+
+   An endpoint MAY avoid creating a decoder stream if its decoder sets
+   the maximum capacity of the dynamic table to zero.
+
+   An endpoint MUST allow its peer to create an encoder stream and a
+   decoder stream even if the connection's settings prevent their use.

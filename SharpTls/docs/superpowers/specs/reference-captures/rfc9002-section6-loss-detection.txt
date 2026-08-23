@@ -1,0 +1,112 @@
+RFC 9002 Section 6 - Loss Detection (6, 6.1, 6.1.1 packet threshold, 6.1.2 time
+threshold; 6.2 Probe Timeout onward is a separate extract, see
+rfc9002-section6.2-probe-timeout.txt)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9002.txt on 2026-08-21.
+Captured for subsystem A3 task A3-6 (acknowledgment-based loss detection).
+6.1.1 recommends kPacketThreshold = 3 and 6.1.2 recommends kTimeThreshold = 9/8
+and kGranularity = 1 ms; both recommendations are in this range, so A3's
+thresholds are recomputable from the extract rather than recalled from a table.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+6.  Loss Detection
+
+   QUIC senders use acknowledgments to detect lost packets and a PTO to
+   ensure acknowledgments are received; see Section 6.2.  This section
+   provides a description of these algorithms.
+
+   If a packet is lost, the QUIC transport needs to recover from that
+   loss, such as by retransmitting the data, sending an updated frame,
+   or discarding the frame.  For more information, see Section 13.3 of
+   [QUIC-TRANSPORT].
+
+   Loss detection is separate per packet number space, unlike RTT
+   measurement and congestion control, because RTT and congestion
+   control are properties of the path, whereas loss detection also
+   relies upon key availability.
+
+6.1.  Acknowledgment-Based Detection
+
+   Acknowledgment-based loss detection implements the spirit of TCP's
+   Fast Retransmit [RFC5681], Early Retransmit [RFC5827], Forward
+   Acknowledgment [FACK], SACK loss recovery [RFC6675], and RACK-TLP
+   [RFC8985].  This section provides an overview of how these algorithms
+   are implemented in QUIC.
+
+   A packet is declared lost if it meets all of the following
+   conditions:
+
+   *  The packet is unacknowledged, in flight, and was sent prior to an
+      acknowledged packet.
+
+   *  The packet was sent kPacketThreshold packets before an
+      acknowledged packet (Section 6.1.1), or it was sent long enough in
+      the past (Section 6.1.2).
+
+   The acknowledgment indicates that a packet sent later was delivered,
+   and the packet and time thresholds provide some tolerance for packet
+   reordering.
+
+   Spuriously declaring packets as lost leads to unnecessary
+   retransmissions and may result in degraded performance due to the
+   actions of the congestion controller upon detecting loss.
+   Implementations can detect spurious retransmissions and increase the
+   packet or time reordering threshold to reduce future spurious
+   retransmissions and loss events.  Implementations with adaptive time
+   thresholds MAY choose to start with smaller initial reordering
+   thresholds to minimize recovery latency.
+
+6.1.1.  Packet Threshold
+
+   The RECOMMENDED initial value for the packet reordering threshold
+   (kPacketThreshold) is 3, based on best practices for TCP loss
+   detection [RFC5681] [RFC6675].  In order to remain similar to TCP,
+   implementations SHOULD NOT use a packet threshold less than 3; see
+   [RFC5681].
+
+   Some networks may exhibit higher degrees of packet reordering,
+   causing a sender to detect spurious losses.  Additionally, packet
+   reordering could be more common with QUIC than TCP because network
+   elements that could observe and reorder TCP packets cannot do that
+   for QUIC and also because QUIC packet numbers are encrypted.
+   Algorithms that increase the reordering threshold after spuriously
+   detecting losses, such as RACK [RFC8985], have proven to be useful in
+   TCP and are expected to be at least as useful in QUIC.
+
+6.1.2.  Time Threshold
+
+   Once a later packet within the same packet number space has been
+   acknowledged, an endpoint SHOULD declare an earlier packet lost if it
+   was sent a threshold amount of time in the past.  To avoid declaring
+   packets as lost too early, this time threshold MUST be set to at
+   least the local timer granularity, as indicated by the kGranularity
+   constant.  The time threshold is:
+
+   max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity)
+
+   If packets sent prior to the largest acknowledged packet cannot yet
+   be declared lost, then a timer SHOULD be set for the remaining time.
+
+   Using max(smoothed_rtt, latest_rtt) protects from the two following
+   cases:
+
+   *  the latest RTT sample is lower than the smoothed RTT, perhaps due
+      to reordering where the acknowledgment encountered a shorter path;
+
+   *  the latest RTT sample is higher than the smoothed RTT, perhaps due
+      to a sustained increase in the actual RTT, but the smoothed RTT
+      has not yet caught up.
+
+   The RECOMMENDED time threshold (kTimeThreshold), expressed as an RTT
+   multiplier, is 9/8.  The RECOMMENDED value of the timer granularity
+   (kGranularity) is 1 millisecond.
+
+      |  Note: TCP's RACK [RFC8985] specifies a slightly larger
+      |  threshold, equivalent to 5/4, for a similar purpose.
+      |  Experience with QUIC shows that 9/8 works well.
+
+   Implementations MAY experiment with absolute thresholds, thresholds
+   from previous connections, adaptive thresholds, or the including of
+   RTT variation.  Smaller thresholds reduce reordering resilience and
+   increase spurious retransmissions, and larger thresholds increase
+   loss detection delay.

@@ -1,0 +1,354 @@
+RFC 9000 Section 12 - Packets and Frames (complete)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9000.txt on 2026-08-17.
+Covers 12.1 protected packets, 12.2 coalescing, 12.3 packet numbers,
+12.4 frames and frame types, 12.5 frames and number spaces.
+Ground truth for phase A1 task 8 and phase A2. Copy values; do not retype them.
+----------------------------------------------------------------------
+
+12.  Packets and Frames
+
+   QUIC endpoints communicate by exchanging packets.  Packets have
+   confidentiality and integrity protection; see Section 12.1.  Packets
+   are carried in UDP datagrams; see Section 12.2.
+
+   This version of QUIC uses the long packet header during connection
+   establishment; see Section 17.2.  Packets with the long header are
+   Initial (Section 17.2.2), 0-RTT (Section 17.2.3), Handshake
+   (Section 17.2.4), and Retry (Section 17.2.5).  Version negotiation
+   uses a version-independent packet with a long header; see
+   Section 17.2.1.
+
+   Packets with the short header are designed for minimal overhead and
+   are used after a connection is established and 1-RTT keys are
+   available; see Section 17.3.
+
+12.1.  Protected Packets
+
+   QUIC packets have different levels of cryptographic protection based
+   on the type of packet.  Details of packet protection are found in
+   [QUIC-TLS]; this section includes an overview of the protections that
+   are provided.
+
+   Version Negotiation packets have no cryptographic protection; see
+   [QUIC-INVARIANTS].
+
+   Retry packets use an AEAD function [AEAD] to protect against
+   accidental modification.
+
+   Initial packets use an AEAD function, the keys for which are derived
+   using a value that is visible on the wire.  Initial packets therefore
+   do not have effective confidentiality protection.  Initial protection
+   exists to ensure that the sender of the packet is on the network
+   path.  Any entity that receives an Initial packet from a client can
+   recover the keys that will allow them to both read the contents of
+   the packet and generate Initial packets that will be successfully
+   authenticated at either endpoint.  The AEAD also protects Initial
+   packets against accidental modification.
+
+   All other packets are protected with keys derived from the
+   cryptographic handshake.  The cryptographic handshake ensures that
+   only the communicating endpoints receive the corresponding keys for
+   Handshake, 0-RTT, and 1-RTT packets.  Packets protected with 0-RTT
+   and 1-RTT keys have strong confidentiality and integrity protection.
+
+   The Packet Number field that appears in some packet types has
+   alternative confidentiality protection that is applied as part of
+   header protection; see Section 5.4 of [QUIC-TLS] for details.  The
+   underlying packet number increases with each packet sent in a given
+   packet number space; see Section 12.3 for details.
+
+12.2.  Coalescing Packets
+
+   Initial (Section 17.2.2), 0-RTT (Section 17.2.3), and Handshake
+   (Section 17.2.4) packets contain a Length field that determines the
+   end of the packet.  The length includes both the Packet Number and
+   Payload fields, both of which are confidentiality protected and
+   initially of unknown length.  The length of the Payload field is
+   learned once header protection is removed.
+
+   Using the Length field, a sender can coalesce multiple QUIC packets
+   into one UDP datagram.  This can reduce the number of UDP datagrams
+   needed to complete the cryptographic handshake and start sending
+   data.  This can also be used to construct Path Maximum Transmission
+   Unit (PMTU) probes; see Section 14.4.1.  Receivers MUST be able to
+   process coalesced packets.
+
+   Coalescing packets in order of increasing encryption levels (Initial,
+   0-RTT, Handshake, 1-RTT; see Section 4.1.4 of [QUIC-TLS]) makes it
+   more likely that the receiver will be able to process all the packets
+   in a single pass.  A packet with a short header does not include a
+   length, so it can only be the last packet included in a UDP datagram.
+   An endpoint SHOULD include multiple frames in a single packet if they
+   are to be sent at the same encryption level, instead of coalescing
+   multiple packets at the same encryption level.
+
+   Receivers MAY route based on the information in the first packet
+   contained in a UDP datagram.  Senders MUST NOT coalesce QUIC packets
+   with different connection IDs into a single UDP datagram.  Receivers
+   SHOULD ignore any subsequent packets with a different Destination
+   Connection ID than the first packet in the datagram.
+
+   Every QUIC packet that is coalesced into a single UDP datagram is
+   separate and complete.  The receiver of coalesced QUIC packets MUST
+   individually process each QUIC packet and separately acknowledge
+   them, as if they were received as the payload of different UDP
+   datagrams.  For example, if decryption fails (because the keys are
+   not available or for any other reason), the receiver MAY either
+   discard or buffer the packet for later processing and MUST attempt to
+   process the remaining packets.
+
+   Retry packets (Section 17.2.5), Version Negotiation packets
+   (Section 17.2.1), and packets with a short header (Section 17.3) do
+   not contain a Length field and so cannot be followed by other packets
+   in the same UDP datagram.  Note also that there is no situation where
+   a Retry or Version Negotiation packet is coalesced with another
+   packet.
+
+12.3.  Packet Numbers
+
+   The packet number is an integer in the range 0 to 2^62-1.  This
+   number is used in determining the cryptographic nonce for packet
+   protection.  Each endpoint maintains a separate packet number for
+   sending and receiving.
+
+   Packet numbers are limited to this range because they need to be
+   representable in whole in the Largest Acknowledged field of an ACK
+   frame (Section 19.3).  When present in a long or short header,
+   however, packet numbers are reduced and encoded in 1 to 4 bytes; see
+   Section 17.1.
+
+   Version Negotiation (Section 17.2.1) and Retry (Section 17.2.5)
+   packets do not include a packet number.
+
+   Packet numbers are divided into three spaces in QUIC:
+
+   Initial space:  All Initial packets (Section 17.2.2) are in this
+      space.
+
+   Handshake space:  All Handshake packets (Section 17.2.4) are in this
+      space.
+
+   Application data space:  All 0-RTT (Section 17.2.3) and 1-RTT
+      (Section 17.3.1) packets are in this space.
+
+   As described in [QUIC-TLS], each packet type uses different
+   protection keys.
+
+   Conceptually, a packet number space is the context in which a packet
+   can be processed and acknowledged.  Initial packets can only be sent
+   with Initial packet protection keys and acknowledged in packets that
+   are also Initial packets.  Similarly, Handshake packets are sent at
+   the Handshake encryption level and can only be acknowledged in
+   Handshake packets.
+
+   This enforces cryptographic separation between the data sent in the
+   different packet number spaces.  Packet numbers in each space start
+   at packet number 0.  Subsequent packets sent in the same packet
+   number space MUST increase the packet number by at least one.
+
+   0-RTT and 1-RTT data exist in the same packet number space to make
+   loss recovery algorithms easier to implement between the two packet
+   types.
+
+   A QUIC endpoint MUST NOT reuse a packet number within the same packet
+   number space in one connection.  If the packet number for sending
+   reaches 2^62-1, the sender MUST close the connection without sending
+   a CONNECTION_CLOSE frame or any further packets; an endpoint MAY send
+   a Stateless Reset (Section 10.3) in response to further packets that
+   it receives.
+
+   A receiver MUST discard a newly unprotected packet unless it is
+   certain that it has not processed another packet with the same packet
+   number from the same packet number space.  Duplicate suppression MUST
+   happen after removing packet protection for the reasons described in
+   Section 9.5 of [QUIC-TLS].
+
+   Endpoints that track all individual packets for the purposes of
+   detecting duplicates are at risk of accumulating excessive state.
+   The data required for detecting duplicates can be limited by
+   maintaining a minimum packet number below which all packets are
+   immediately dropped.  Any minimum needs to account for large
+   variations in round-trip time, which includes the possibility that a
+   peer might probe network paths with much larger round-trip times; see
+   Section 9.
+
+   Packet number encoding at a sender and decoding at a receiver are
+   described in Section 17.1.
+
+12.4.  Frames and Frame Types
+
+   The payload of QUIC packets, after removing packet protection,
+   consists of a sequence of complete frames, as shown in Figure 11.
+   Version Negotiation, Stateless Reset, and Retry packets do not
+   contain frames.
+
+   Packet Payload {
+     Frame (8..) ...,
+   }
+
+                          Figure 11: QUIC Payload
+
+   The payload of a packet that contains frames MUST contain at least
+   one frame, and MAY contain multiple frames and multiple frame types.
+   An endpoint MUST treat receipt of a packet containing no frames as a
+   connection error of type PROTOCOL_VIOLATION.  Frames always fit
+   within a single QUIC packet and cannot span multiple packets.
+
+   Each frame begins with a Frame Type, indicating its type, followed by
+   additional type-dependent fields:
+
+   Frame {
+     Frame Type (i),
+     Type-Dependent Fields (..),
+   }
+
+                      Figure 12: Generic Frame Layout
+
+   Table 3 lists and summarizes information about each frame type that
+   is defined in this specification.  A description of this summary is
+   included after the table.
+
+    +============+======================+===============+======+======+
+    | Type Value | Frame Type Name      | Definition    | Pkts | Spec |
+    +============+======================+===============+======+======+
+    | 0x00       | PADDING              | Section 19.1  | IH01 | NP   |
+    +------------+----------------------+---------------+------+------+
+    | 0x01       | PING                 | Section 19.2  | IH01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x02-0x03  | ACK                  | Section 19.3  | IH_1 | NC   |
+    +------------+----------------------+---------------+------+------+
+    | 0x04       | RESET_STREAM         | Section 19.4  | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x05       | STOP_SENDING         | Section 19.5  | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x06       | CRYPTO               | Section 19.6  | IH_1 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x07       | NEW_TOKEN            | Section 19.7  | ___1 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x08-0x0f  | STREAM               | Section 19.8  | __01 | F    |
+    +------------+----------------------+---------------+------+------+
+    | 0x10       | MAX_DATA             | Section 19.9  | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x11       | MAX_STREAM_DATA      | Section 19.10 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x12-0x13  | MAX_STREAMS          | Section 19.11 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x14       | DATA_BLOCKED         | Section 19.12 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x15       | STREAM_DATA_BLOCKED  | Section 19.13 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x16-0x17  | STREAMS_BLOCKED      | Section 19.14 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x18       | NEW_CONNECTION_ID    | Section 19.15 | __01 | P    |
+    +------------+----------------------+---------------+------+------+
+    | 0x19       | RETIRE_CONNECTION_ID | Section 19.16 | __01 |      |
+    +------------+----------------------+---------------+------+------+
+    | 0x1a       | PATH_CHALLENGE       | Section 19.17 | __01 | P    |
+    +------------+----------------------+---------------+------+------+
+    | 0x1b       | PATH_RESPONSE        | Section 19.18 | ___1 | P    |
+    +------------+----------------------+---------------+------+------+
+    | 0x1c-0x1d  | CONNECTION_CLOSE     | Section 19.19 | ih01 | N    |
+    +------------+----------------------+---------------+------+------+
+    | 0x1e       | HANDSHAKE_DONE       | Section 19.20 | ___1 |      |
+    +------------+----------------------+---------------+------+------+
+
+                            Table 3: Frame Types
+
+   The format and semantics of each frame type are explained in more
+   detail in Section 19.  The remainder of this section provides a
+   summary of important and general information.
+
+   The Frame Type in ACK, STREAM, MAX_STREAMS, STREAMS_BLOCKED, and
+   CONNECTION_CLOSE frames is used to carry other frame-specific flags.
+   For all other frames, the Frame Type field simply identifies the
+   frame.
+
+   The "Pkts" column in Table 3 lists the types of packets that each
+   frame type could appear in, indicated by the following characters:
+
+   I:   Initial (Section 17.2.2)
+
+   H:   Handshake (Section 17.2.4)
+
+   0:   0-RTT (Section 17.2.3)
+
+   1:   1-RTT (Section 17.3.1)
+
+   ih:  Only a CONNECTION_CLOSE frame of type 0x1c can appear in Initial
+        or Handshake packets.
+
+   For more details about these restrictions, see Section 12.5.  Note
+   that all frames can appear in 1-RTT packets.  An endpoint MUST treat
+   receipt of a frame in a packet type that is not permitted as a
+   connection error of type PROTOCOL_VIOLATION.
+
+   The "Spec" column in Table 3 summarizes any special rules governing
+   the processing or generation of the frame type, as indicated by the
+   following characters:
+
+   N:   Packets containing only frames with this marking are not ack-
+        eliciting; see Section 13.2.
+
+   C:   Packets containing only frames with this marking do not count
+        toward bytes in flight for congestion control purposes; see
+        [QUIC-RECOVERY].
+
+   P:   Packets containing only frames with this marking can be used to
+        probe new network paths during connection migration; see
+        Section 9.1.
+
+   F:   The contents of frames with this marking are flow controlled;
+        see Section 4.
+
+   The "Pkts" and "Spec" columns in Table 3 do not form part of the IANA
+   registry; see Section 22.4.
+
+   An endpoint MUST treat the receipt of a frame of unknown type as a
+   connection error of type FRAME_ENCODING_ERROR.
+
+   All frames are idempotent in this version of QUIC.  That is, a valid
+   frame does not cause undesirable side effects or errors when received
+   more than once.
+
+   The Frame Type field uses a variable-length integer encoding (see
+   Section 16), with one exception.  To ensure simple and efficient
+   implementations of frame parsing, a frame type MUST use the shortest
+   possible encoding.  For frame types defined in this document, this
+   means a single-byte encoding, even though it is possible to encode
+   these values as a two-, four-, or eight-byte variable-length integer.
+   For instance, though 0x4001 is a legitimate two-byte encoding for a
+   variable-length integer with a value of 1, PING frames are always
+   encoded as a single byte with the value 0x01.  This rule applies to
+   all current and future QUIC frame types.  An endpoint MAY treat the
+   receipt of a frame type that uses a longer encoding than necessary as
+   a connection error of type PROTOCOL_VIOLATION.
+
+12.5.  Frames and Number Spaces
+
+   Some frames are prohibited in different packet number spaces.  The
+   rules here generalize those of TLS, in that frames associated with
+   establishing the connection can usually appear in packets in any
+   packet number space, whereas those associated with transferring data
+   can only appear in the application data packet number space:
+
+   *  PADDING, PING, and CRYPTO frames MAY appear in any packet number
+      space.
+
+   *  CONNECTION_CLOSE frames signaling errors at the QUIC layer (type
+      0x1c) MAY appear in any packet number space.  CONNECTION_CLOSE
+      frames signaling application errors (type 0x1d) MUST only appear
+      in the application data packet number space.
+
+   *  ACK frames MAY appear in any packet number space but can only
+      acknowledge packets that appeared in that packet number space.
+      However, as noted below, 0-RTT packets cannot contain ACK frames.
+
+   *  All other frame types MUST only be sent in the application data
+      packet number space.
+
+   Note that it is not possible to send the following frames in 0-RTT
+   packets for various reasons: ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN,
+   PATH_RESPONSE, and RETIRE_CONNECTION_ID.  A server MAY treat receipt
+   of these frames in 0-RTT packets as a connection error of type
+   PROTOCOL_VIOLATION.
+

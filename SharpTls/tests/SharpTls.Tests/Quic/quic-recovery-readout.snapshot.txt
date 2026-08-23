@@ -1,0 +1,110 @@
+# QUIC recovery and congestion readout - SNAPSHOT
+
+SNAPSHOT. Every figure below was produced by TlsQuicRecoveryReadout from a live
+connection driven through induced loss, two probe timeouts and a blackout long
+enough to establish RFC 9002 s7.6's persistent congestion. NONE of it has an
+external source in the sense the Brave capture is one. Per A2's standing rule, a
+checked-in number with no external source is a snapshot and is labelled one.
+
+THE VERDICT COLUMN SCORES AGAINST RFC 9002 AND NEVER AGAINST THE CAPTURE. No
+endpoint this project can reach observes any of these knobs: the perk string's
+four segments are h3 SETTINGS, pseudo-header order, transport parameters in wire
+order and CID lengths, and not one of them is a timing field. So a `match` here
+says "this build does what RFC 9002 says" and says nothing whatever about
+Chromium. The third column is the list of what task A3-14 must go and capture,
+and it is the most valuable thing on this page.
+
+EVERY CELL IS READ OFF LIVE RECOVERY STATE OR OFF AN EMITTED FRAME. Describe's
+signature does not admit a spec of any kind, so no row here can be a restatement
+of what a caller typed in.
+
+| # | knob | observed on the wire or in the run | source | verdict |
+| --- | --- | --- | --- | --- |
+| 1 | initial_rtt | 333.0 ms | rfc9002-appendix-a-and-b-pseudocode-and-constants.txt kInitialRtt = 333 ms; the PRESET's RANGE is invented - FINGERPRINT-KNOBS markers 5 and 13, task B12 - the capture request | not-yet-known-from-the-capture |
+| 2 | initial_congestion_window_bytes | 12000 | App. B states min(10 * max_datagram, max(14720, 2 * max_datagram)); what CHROMIUM uses is unmeasured - FINGERPRINT-KNOBS markers 3, 6, 8, task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 3 | minimum_congestion_window_bytes | 2400 | rfc9002-section7-congestion-control.txt s7.6 / App. B kMinimumWindow = 2 * max_datagram_size, and this recording's max_datagram_size is 1200 bytes as the transport reported it -> 2400 | match |
+| 4 | congestion_controller | NewReno | rfc9002-section7-congestion-control.txt s7 makes the controller replaceable; which one CHROMIUM runs is unmeasured - FINGERPRINT-KNOBS markers 2, 9, task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 5 | loss_reduction_factor | 0.500 | rfc9002-appendix-a-and-b-pseudocode-and-constants.txt kLossReductionFactor = 0.5 -> 0.500 | match |
+| 6 | packet_threshold | 3 | rfc9002-section6-loss-detection.txt s6.1.1 kPacketThreshold = 3 -> 3 | match |
+| 7 | time_threshold | 1.125 | rfc9002-section6-loss-detection.txt s6.1.2 kTimeThreshold = 9/8 -> 1.125 | match |
+| 8 | persistent_congestion_threshold | 3 | rfc9002-section7-congestion-control.txt s7.6 kPersistentCongestionThreshold = 3 -> 3 | match |
+| 9 | pto_backoff_factor | 2.000 | rfc9002-section6.2-probe-timeout.txt s6.2.1's backoff doubles; its CAP is an implementation choice the RFC does not state, and this recording did not run long enough to reach one -> 2.000 | match |
+| 10 | probe_packets_per_pto | 2 | rfc9002-section6.2-probe-timeout.txt s6.2.4 permits one or two, so this row matches on MEMBERSHIP of that set and not on equality with either -> one of [1, 2] | match |
+| 11 | probe_contents | retransmitted-data | rfc9002-section6.2-probe-timeout.txt s6.2.4 leaves the contents open; the three shapes it names are the cited set. TASK A3-13's LIVE RUN FOUND THIS IS NOT A FREE CHOICE IN PRACTICE: fp.impersonate.pro answered a PING-only probe with CONNECTION_CLOSE 0x0a PROTOCOL_VIOLATION 4/4 while tls3.peet.ws ACKed the identical probe and completed 4/4, and commit 2195e93 moved the shipped default to RetransmittedData because of it. THE RUN BEHIND THIS TABLE SETS THE KNOB EXPLICITLY AND DID SO BEFORE THAT COMMIT, so this row measures the probe rather than the default of the day -> one of [PING-only, PING-with-padding, retransmitted-data] | match |
+| 12 | ack_policy | immediate - every ACK this recording built was available in the same instant the packet eliciting it arrived | Chromium's is unmeasured - FINGERPRINT-KNOBS marker 10, task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 13 | ack_range_limit | 32 ranges in the largest ACK frame this recording built | the Brave capture says nothing about ACK ranges and no published vector does either - FINGERPRINT-KNOBS' PLACEHOLDER table, and TlsQuicFingerprintReadout.cs's deviation note 4 | not-yet-known-from-the-capture |
+| 14 | pacing_burst_datagrams | 10 datagrams of burst capacity, which deferred 0 passes in this recording; at most 1 datagram was offered to the transport without the clock advancing | rfc9002-section7-congestion-control.txt s7.7 is a SHOULD, not a MUST; that Chromium paces at all is a widely repeated claim this project has not measured - FINGERPRINT-KNOBS markers 7, 11, task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 15 | pacing_interval_scale | not-witnessed-by-this-recording - the pacer gates the 1-RTT queue and this run never completed a handshake, so no release was scheduled; the terms it would have used are a window of 2400 bytes and a smoothed RTT of 20.0 ms | rfc9002-section7-congestion-control.txt s7.7's rate = N * congestion_window / smoothed_rtt, whose only stated bound is "small, but at least 1 (for example, 1.25)" - FINGERPRINT-KNOBS knob 15, task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 16 | congestion_controller_in_force | NewReno, which held a window of 2400 bytes against 6000 bytes in flight after 6 declared losses and 1 persistent-congestion event | no fingerprint endpoint this project can reach sees a send-rate curve - task A3-14 - acquire the timing capture | not-yet-known-from-the-capture |
+| 17 | ack_policy_in_force | the scheduler's behaviour MOVED when the knob moved, so the knob is wired | the wiring is this project's to fix; the VALUE is task A3-14 - acquire the timing capture's | not-yet-known-from-the-capture |
+
+## Verdict counts, derived from the rows above
+
+    rows                            17
+    match                           8
+    MISMATCH                        0
+    not-yet-known-from-the-capture  9
+    8 + 0 + 9 = 17
+
+## The run the rows above were read off (measured)
+
+  opened                   cwnd=12000 in_flight=0 lost=0 pc=0 pto=0 probes=0 repairs=0 pto_in=none loss_delay=none
+  first-probe              cwnd=12000 in_flight=3600 lost=0 pc=0 pto=1 probes=2 repairs=2 pto_in=1998.0 ms loss_delay=none
+  second-probe             cwnd=12000 in_flight=6000 lost=0 pc=0 pto=2 probes=4 repairs=4 pto_in=3996.0 ms loss_delay=none
+  before-loss              cwnd=12000 in_flight=6000 lost=0 pc=0 pto=2 probes=4 repairs=4 pto_in=3996.0 ms loss_delay=none
+  packet-threshold-loss    cwnd=6000 in_flight=6200 lost=2 pc=0 pto=0 probes=4 repairs=4 pto_in=none loss_delay=374.6 ms
+  time-threshold-loss      cwnd=6000 in_flight=6200 lost=2 pc=0 pto=0 probes=4 repairs=4 pto_in=none loss_delay=374.6 ms
+  persistent-congestion    cwnd=2400 in_flight=6000 lost=6 pc=1 pto=0 probes=4 repairs=4 pto_in=1.0 ms loss_delay=none
+
+## Notes
+
+A MISMATCH HERE IS ABOUT THIS BUILD AND NOT ABOUT CHROMIUM. The rows score what
+this connection did against what the RFC 9002 extracts in
+docs/superpowers/specs/reference-captures/ state. A row reading MISMATCH means
+this build deviates from the RFC - which a caller reproducing a non-conforming
+client may want deliberately - and a row reading match means nothing more than
+conformance.
+
+AN UNEXERCISED ROW SCORES MISMATCH, DELIBERATELY. `not-witnessed-by-this-recording`
+never equals a cited figure, so a change that stops driving one of these episodes
+turns its row red. The alternative - a fourth verdict value for "not exercised" -
+would let a row go quiet, and a quiet row in a fingerprint readout is the failure
+mode this whole subsystem exists to avoid.
+
+THE THIRD COLUMN IS TIED TO docs/FINGERPRINT-KNOBS.md AND NOT CHOSEN HERE. A row
+is third-column exactly when that file marks its knob UNVERIFIED or PLACEHOLDER.
+Seven rows qualify: initial_rtt (markers 5, 13),
+initial_congestion_window_bytes (3, 6, 8), congestion_controller (2, 9),
+ack_policy (10), ack_range_limit (the PLACEHOLDER table),
+pacing_burst_datagrams (7, 11) and pacing_interval_scale (knob 15, added by
+task A3-11 while this readout was being built). The plan's sentence names five
+of those seven; the two it omits are initial_rtt's invented range and
+AckRangeLimit, and both are marked in the tree.
+
+FINGERPRINT-KNOBS' OWN MARKER COUNT WAS STALE BY THREE FOR THREE COMMITS, AND
+IS NOT ANY MORE. That file stated 13 markers and tabulated thirteen. It returned
+13 at 2769d10 and ebdcc89 and 16 at c9a86cb: task A3-11 added markers for
+PacingIntervalScale in TlsQuicRecoverySpec.cs, for the send gate in
+TlsQuicApplicationSendPath.cs, and a second in TlsQuicRecoverySpec.cs, without
+moving the count. The table now reads 20 hits of which 16 mark a value - the
+other four are this file talking ABOUT the marker word - and carries rows 14-16
+for the three it had been missing.
+
+THE EPISODE IS LEFT RENDERED HERE RATHER THAN DELETED, because it is the whole
+argument for the discriminator above. For three commits this readout and that
+table disagreed about the same set, and the readout was right BECAUSE it counts
+markers in the source rather than rows in a document. A rule that only ever
+agrees with the document it is checked against has never been tested.
+
+THE LAST TWO ROWS ARE OBSERVATIONS AND NOT KNOBS, which is why the table is
+longer than the knob list by exactly two. They exist because a knob's SETTING and
+the behaviour in force can agree BY ACCIDENT, and AckPolicy is the worked example:
+for as long as nothing read TlsQuicRecoverySpec.AckPolicy, `Immediate` and an
+observed immediate ACK agreed for no reason at all, and only the second-to-last
+pair of rows could say so.
+
+TASK A3-13 WIRED IT, AND THE ROWS ARE WHAT SHOWED THE DIFFERENCE. The reader is
+TlsQuicAckTracker.IsWithheldAt; the behaviour-in-force row MOVED when the knob
+moved, which is the whole claim, and it moved without a line of the measurement
+changing. A row that renders the same string whether or not the knob is read
+would have said nothing on either side of that commit.

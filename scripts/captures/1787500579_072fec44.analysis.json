@@ -1,0 +1,308 @@
+{
+  "capture": "scripts/captures/1787500579_072fec44.pcap",
+  "sni_filter": null,
+  "client_connections": 1,
+  "flows_skipped_not_client": 0,
+  "flows_excluded_by_sni_filter": 0,
+  "truncated_datagrams": 0,
+  "aggregate": {
+    "padding_target": {
+      "1200": 1
+    },
+    "cid_len_pair_src_dst": {
+      "[0, 8]": 1
+    },
+    "pn_encoded_length": {
+      "1": 1
+    },
+    "token_len": {
+      "0": 1
+    },
+    "header_length_varint_width": {
+      "2": 1
+    },
+    "initial_crypto_frame_byte_counts": {
+      "[999, 499]": 1
+    },
+    "initial_crypto_frames_per_datagram": {
+      "[1, 1]": 1
+    },
+    "crypto_offset_varint_widths": {
+      "[1, 2]": 1
+    },
+    "crypto_length_varint_widths": {
+      "[2]": 1
+    },
+    "initial_frame_order": {
+      "[\"CRYPTO(off=0,len=999)\", \"PADDING x162\"]": 1
+    },
+    "packets_coalesced_in_first_datagram": {
+      "1": 1
+    },
+    "transport_parameter_order": {
+      "[\"initial_max_stream_data_bidi_local\", \"initial_max_stream_data_bidi_remote\", \"initial_max_stream_data_uni\", \"initial_max_streams_uni\", \"active_connection_id_limit\", \"initial_source_connection_id\", \"initial_max_data\", \"unknown\"]": 1
+    },
+    "extension_order_grease_normalised": {
+      "[\"GREASE\", \"0x0000\", \"0x000a\", \"0x0010\", \"0x0005\", \"0x000d\", \"0x0012\", \"0x0033\", \"0x002d\", \"0x002b\", \"0x0039\", \"0x001b\", \"GREASE\"]": 1
+    },
+    "cipher_suites_grease_normalised": {
+      "[\"GREASE\", \"0x1302\", \"0x1303\", \"0x1301\"]": 1
+    }
+  },
+  "connections": [
+    {
+      "flow": "10.0.0.1:51669 > 35.186.224.28:443",
+      "sni": "gew4-spclient.spotify.com",
+      "alpn": [
+        "h3"
+      ],
+      "datagrams": [
+        {
+          "datagram": 1,
+          "udp_payload_bytes": 1200,
+          "coalesced_packets": [
+            {
+              "type": "Initial",
+              "version": "0x00000001",
+              "dcid_len": 8,
+              "scid_len": 0,
+              "token_len": 0,
+              "length_varint_width": 2,
+              "packet_number": 0,
+              "pn_encoded_length": 1,
+              "wire_size": 1200,
+              "frame_order": [
+                "CRYPTO(off=0,len=999)",
+                "PADDING x162"
+              ]
+            }
+          ]
+        },
+        {
+          "datagram": 2,
+          "udp_payload_bytes": 1200,
+          "coalesced_packets": [
+            {
+              "type": "Initial",
+              "version": "0x00000001",
+              "dcid_len": 8,
+              "scid_len": 0,
+              "token_len": 0,
+              "length_varint_width": 2,
+              "packet_number": 1,
+              "pn_encoded_length": 1,
+              "wire_size": 1200,
+              "frame_order": [
+                "CRYPTO(off=999,len=499)",
+                "PADDING x661"
+              ]
+            }
+          ]
+        },
+        {
+          "datagram": 3,
+          "udp_payload_bytes": 1200,
+          "coalesced_packets": [
+            {
+              "type": "Initial",
+              "version": "0x00000001",
+              "dcid_len": 8,
+              "scid_len": 0,
+              "token_len": 0,
+              "length_varint_width": 2,
+              "packet_number": 2,
+              "pn_encoded_length": 1,
+              "wire_size": 1200,
+              "frame_order": [
+                "ACK",
+                "PADDING x1160"
+              ]
+            }
+          ]
+        },
+        {
+          "datagram": 4,
+          "udp_payload_bytes": 39,
+          "coalesced_packets": [
+            {
+              "type": "Handshake",
+              "version": "0x00000001",
+              "dcid_len": 8,
+              "scid_len": 0,
+              "token_len": 0,
+              "length_varint_width": 2,
+              "packet_number": -1,
+              "pn_encoded_length": 0,
+              "wire_size": 39,
+              "frame_order": []
+            }
+          ]
+        },
+        {
+          "datagram": 5,
+          "udp_payload_bytes": 89,
+          "coalesced_packets": [
+            {
+              "type": "Handshake",
+              "version": "0x00000001",
+              "dcid_len": 8,
+              "scid_len": 0,
+              "token_len": 0,
+              "length_varint_width": 2,
+              "packet_number": -1,
+              "pn_encoded_length": 0,
+              "wire_size": 89,
+              "frame_order": []
+            }
+          ]
+        }
+      ],
+      "initial_crypto_frame_byte_counts": [
+        999,
+        499
+      ],
+      "initial_crypto_frames_per_datagram": [
+        1,
+        1
+      ],
+      "crypto_offset_varint_widths": [
+        1,
+        2
+      ],
+      "crypto_length_varint_widths": [
+        2
+      ],
+      "client_hello": {
+        "sni": "gew4-spclient.spotify.com",
+        "alpn": [
+          "h3"
+        ],
+        "cipher_suites": [
+          "0xaaaa",
+          "0x1302",
+          "0x1303",
+          "0x1301"
+        ],
+        "extensions_in_order": [
+          {
+            "id": "0x6a6a",
+            "len": 0
+          },
+          {
+            "id": "0x0000",
+            "len": 30
+          },
+          {
+            "id": "0x000a",
+            "len": 14
+          },
+          {
+            "id": "0x0010",
+            "len": 5
+          },
+          {
+            "id": "0x0005",
+            "len": 5
+          },
+          {
+            "id": "0x000d",
+            "len": 22
+          },
+          {
+            "id": "0x0012",
+            "len": 0
+          },
+          {
+            "id": "0x0033",
+            "len": 1263
+          },
+          {
+            "id": "0x002d",
+            "len": 2
+          },
+          {
+            "id": "0x002b",
+            "len": 5
+          },
+          {
+            "id": "0x0039",
+            "len": 43
+          },
+          {
+            "id": "0x001b",
+            "len": 3
+          },
+          {
+            "id": "0x4a4a",
+            "len": 1
+          }
+        ],
+        "quic_transport_parameters_in_order": [
+          {
+            "id": "0x5",
+            "name": "initial_max_stream_data_bidi_local",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "80200000",
+            "value": 2097152
+          },
+          {
+            "id": "0x6",
+            "name": "initial_max_stream_data_bidi_remote",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "80200000",
+            "value": 2097152
+          },
+          {
+            "id": "0x7",
+            "name": "initial_max_stream_data_uni",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "80200000",
+            "value": 2097152
+          },
+          {
+            "id": "0x9",
+            "name": "initial_max_streams_uni",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "08",
+            "value": 8
+          },
+          {
+            "id": "0xe",
+            "name": "active_connection_id_limit",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "4040",
+            "value": 64
+          },
+          {
+            "id": "0xf",
+            "name": "initial_source_connection_id",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": ""
+          },
+          {
+            "id": "0x4",
+            "name": "initial_max_data",
+            "id_varint_width": 1,
+            "len_varint_width": 1,
+            "raw": "81000000",
+            "value": 16777216
+          },
+          {
+            "id": "0xff080808",
+            "name": "unknown",
+            "id_varint_width": 8,
+            "len_varint_width": 1,
+            "raw": "09",
+            "value": 9
+          }
+        ]
+      }
+    }
+  ]
+}

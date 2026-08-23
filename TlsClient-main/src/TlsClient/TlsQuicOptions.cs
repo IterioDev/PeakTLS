@@ -1,0 +1,404 @@
+using System.Collections.Immutable;
+using SharpTls;
+using SharpTls.Protocol;
+using SharpTls.Quic;
+
+namespace TlsClient;
+
+/// <summary>How wide a QUIC variable-length integer field is encoded, beyond its minimum.</summary>
+/// <remarks>Mirrors <c>SharpTls.Quic.TlsQuicVarintWidth</c> value for value; that type is
+/// internal to SharpTls and cannot appear on a public TlsClient API.</remarks>
+public enum TlsQuicVarintWidth
+{
+    /// <summary>The narrowest encoding that holds the value.</summary>
+    Minimal = 0,
+
+    /// <summary>Always one byte.</summary>
+    OneByte = 1,
+
+    /// <summary>Always two bytes.</summary>
+    TwoBytes = 2,
+
+    /// <summary>Always four bytes.</summary>
+    FourBytes = 4,
+
+    /// <summary>Always eight bytes.</summary>
+    EightBytes = 8,
+}
+
+/// <summary>What a PTO probe packet carries.</summary>
+/// <remarks>Mirrors <c>SharpTls.Quic.TlsQuicProbeContents</c> value for value.</remarks>
+public enum TlsQuicProbeContents
+{
+    /// <summary>A bare PING.</summary>
+    Ping = 0,
+
+    /// <summary>A PING padded out to the datagram target.</summary>
+    PingWithPadding = 1,
+
+    /// <summary>The oldest unacknowledged data, retransmitted.</summary>
+    RetransmittedData = 2,
+}
+
+/// <summary>When an acknowledgement is sent.</summary>
+/// <remarks>Mirrors <c>SharpTls.Quic.TlsQuicAckPolicy</c> value for value.</remarks>
+public enum TlsQuicAckPolicy
+{
+    /// <summary>As soon as the packet that elicits it is processed.</summary>
+    Immediate = 0,
+
+    /// <summary>Held back up to the advertised <c>max_ack_delay</c>.</summary>
+    DelayedToMaxAckDelay = 1,
+}
+
+/// <summary>
+/// Configures the six QUIC local flow-control limits this client advertises.
+/// </summary>
+/// <remarks>These are the values the six <c>Placed</c> transport-parameter slots carry, which
+/// is why they live here and not as literal bytes in
+/// <see cref="TlsQuicTransportParameterOptions.Entries"/> — typing them in both places would
+/// let a caller set two different numbers for one wire field. Every default is read from
+/// SharpTls's own spec rather than re-typed.</remarks>
+public sealed class TlsQuicFlowControlOptions
+{
+    private static readonly TlsQuicLocalFlowControlSpec SpecDefaults = new();
+
+    /// <summary>Gets or sets <c>initial_max_data</c>.</summary>
+    public ulong InitialMaxData { get; set; } = SpecDefaults.InitialMaxData;
+
+    /// <summary>Gets or sets <c>initial_max_stream_data_bidi_local</c>.</summary>
+    public ulong InitialMaxStreamDataBidiLocal { get; set; } =
+        SpecDefaults.InitialMaxStreamDataBidiLocal;
+
+    /// <summary>Gets or sets <c>initial_max_stream_data_bidi_remote</c>.</summary>
+    public ulong InitialMaxStreamDataBidiRemote { get; set; } =
+        SpecDefaults.InitialMaxStreamDataBidiRemote;
+
+    /// <summary>Gets or sets <c>initial_max_stream_data_uni</c>.</summary>
+    public ulong InitialMaxStreamDataUni { get; set; } = SpecDefaults.InitialMaxStreamDataUni;
+
+    /// <summary>Gets or sets <c>initial_max_streams_bidi</c>.</summary>
+    public ulong InitialMaxStreamsBidi { get; set; } = SpecDefaults.InitialMaxStreamsBidi;
+
+    /// <summary>Gets or sets <c>initial_max_streams_uni</c>.</summary>
+    public ulong InitialMaxStreamsUni { get; set; } = SpecDefaults.InitialMaxStreamsUni;
+
+    internal TlsQuicLocalFlowControlSpec Snapshot() => new()
+    {
+        InitialMaxData = InitialMaxData,
+        InitialMaxStreamDataBidiLocal = InitialMaxStreamDataBidiLocal,
+        InitialMaxStreamDataBidiRemote = InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni = InitialMaxStreamDataUni,
+        InitialMaxStreamsBidi = InitialMaxStreamsBidi,
+        InitialMaxStreamsUni = InitialMaxStreamsUni,
+    };
+}
+
+/// <summary>
+/// Configures QUIC loss detection and congestion control — every settable knob of SharpTls's
+/// <c>TlsQuicRecoverySpec</c> except its congestion-controller factory.
+/// </summary>
+/// <remarks>
+/// <para>THIS IS FINGERPRINT SURFACE, NOT TUNING. Recovery behaviour is observable from the
+/// outside: when a probe goes out, how large the first flight is, whether acknowledgements are
+/// immediate. Two clients with identical bytes and different recovery constants are
+/// distinguishable by timing.</para>
+/// <para>THE CONGESTION CONTROLLER ITSELF IS NOT REACHABLE FROM HERE. SharpTls's
+/// <c>CongestionController</c> is a <c>Func&lt;ITlsQuicCongestionController&gt;</c> over an
+/// <see langword="internal"/> interface with exactly one implementation (NewReno), so a
+/// TlsClient consumer can neither name the type nor write another. Making it reachable needs
+/// SharpTls to make <c>ITlsQuicCongestionController</c> public; until then a caller cannot
+/// select, for example, the BBR that Chromium runs.</para>
+/// </remarks>
+public sealed class TlsQuicRecoveryOptions
+{
+    private static readonly TlsQuicRecoverySpec SpecDefaults = new();
+
+    /// <summary>
+    /// Gets or sets the initial congestion window as a datagram multiplier and a byte cap.
+    /// </summary>
+    public (int DatagramMultiplier, int ByteCap) InitialCongestionWindow { get; set; } =
+        SpecDefaults.InitialCongestionWindow;
+
+    /// <summary>Gets or sets the floor the congestion window may not shrink below.</summary>
+    public int MinimumCongestionWindowDatagrams { get; set; } =
+        SpecDefaults.MinimumCongestionWindowDatagrams;
+
+    /// <summary>Gets or sets the multiplier applied to the window on a congestion event.</summary>
+    public double LossReductionFactor { get; set; } = SpecDefaults.LossReductionFactor;
+
+    /// <summary>Gets or sets RFC 9002's <c>kPacketThreshold</c>.</summary>
+    public int PacketThreshold { get; set; } = SpecDefaults.PacketThreshold;
+
+    /// <summary>Gets or sets RFC 9002's <c>kTimeThreshold</c>.</summary>
+    public double TimeThreshold { get; set; } = SpecDefaults.TimeThreshold;
+
+    /// <summary>Gets or sets RFC 9002's <c>kPersistentCongestionThreshold</c>.</summary>
+    public int PersistentCongestionThreshold { get; set; } =
+        SpecDefaults.PersistentCongestionThreshold;
+
+    /// <summary>
+    /// Gets or sets the PTO backoff factor and the optional ceiling the backoff stops at.
+    /// </summary>
+    public (double Factor, TimeSpan? Maximum) PtoBackoff { get; set; } =
+        SpecDefaults.PtoBackoff;
+
+    /// <summary>Gets or sets how many probe packets one PTO expiry sends.</summary>
+    public int ProbePacketsPerPto { get; set; } = SpecDefaults.ProbePacketsPerPto;
+
+    /// <summary>Gets or sets what a probe packet carries.</summary>
+    public TlsQuicProbeContents ProbeContents { get; set; } =
+        (TlsQuicProbeContents)SpecDefaults.ProbeContents;
+
+    /// <summary>Gets or sets when an acknowledgement is sent.</summary>
+    public TlsQuicAckPolicy AckPolicy { get; set; } = (TlsQuicAckPolicy)SpecDefaults.AckPolicy;
+
+    /// <summary>
+    /// Gets or sets the pacing burst in datagrams, or <see langword="null"/> for no pacing.
+    /// </summary>
+    public int? PacingBurstDatagrams { get; set; } = SpecDefaults.PacingBurstDatagrams;
+
+    /// <summary>
+    /// Gets or sets RFC 9002 section 7.7's <c>N</c>, the factor the paced sending interval is
+    /// scaled by. Without it the burst is settable and the spacing between the datagrams in
+    /// that burst is not, because neither <c>congestion_window</c> nor <c>smoothed_rtt</c> —
+    /// section 7.7's other two terms — is a knob.
+    /// </summary>
+    public double PacingIntervalScale { get; set; } = SpecDefaults.PacingIntervalScale;
+
+    internal TlsQuicRecoverySpec Snapshot() =>
+        new TlsQuicRecoverySpec
+        {
+            InitialCongestionWindow = InitialCongestionWindow,
+            MinimumCongestionWindowDatagrams = MinimumCongestionWindowDatagrams,
+            LossReductionFactor = LossReductionFactor,
+            PacketThreshold = PacketThreshold,
+            TimeThreshold = TimeThreshold,
+            PersistentCongestionThreshold = PersistentCongestionThreshold,
+            PtoBackoff = PtoBackoff,
+            ProbePacketsPerPto = ProbePacketsPerPto,
+            ProbeContents = (SharpTls.Quic.TlsQuicProbeContents)ProbeContents,
+            AckPolicy = (SharpTls.Quic.TlsQuicAckPolicy)AckPolicy,
+            PacingBurstDatagrams = PacingBurstDatagrams,
+            PacingIntervalScale = PacingIntervalScale,
+        };
+}
+
+/// <summary>
+/// Configures the QUIC connection and the TLS half of the HTTP/3 ClientHello — everything
+/// <see cref="TlsSessionOptions.Profile"/> cannot reach because a <c>TlsProfile</c> describes a
+/// TCP ClientHello.
+/// </summary>
+/// <remarks>
+/// <para>WHY THIS IS SEPARATE FROM <see cref="TlsSessionOptions.Profile"/>. A
+/// <c>TlsProfile</c> carries TLS 1.2 suites, session tickets and ALPS, and several of its
+/// extensions are ones RFC 9001 section 8.4 forbids over QUIC. It therefore does not and must
+/// not drive the h3 ClientHello. <see cref="ConfigureClientHello"/> is how an HTTP/3 persona's
+/// TLS half is set.</para>
+/// <para>Every default is read from a freshly constructed SharpTls spec rather than re-typed,
+/// so nothing here can drift away from the cited preset it mirrors.</para>
+/// </remarks>
+public sealed class TlsQuicOptions
+{
+    private static readonly TlsQuicConnectionSpec SpecDefaults = new();
+
+    // Not a const: CA2208 only accepts a compile-time paramName that names a parameter of the
+    // throwing method, and this rejection belongs to the AlpnProtocols property.
+    private static readonly string AlpnParameter = nameof(AlpnProtocols);
+
+    /// <summary>
+    /// RFC 9000 section 14.1's minimum Initial datagram, which every deployed QUIC server
+    /// accepts and which SharpTls's live run used.
+    /// </summary>
+    private const int InitialDatagramPaddingTarget = 1200;
+
+    /// <summary>Gets or sets the source connection ID length in bytes.</summary>
+    public int SourceConnectionIdLength { get; set; } = SpecDefaults.SourceConnectionIdLength;
+
+    /// <summary>Gets or sets the initial destination connection ID length in bytes.</summary>
+    public int DestinationConnectionIdLength { get; set; } =
+        SpecDefaults.DestinationConnectionIdLength;
+
+    /// <summary>Gets or sets the first packet number this client uses.</summary>
+    public ulong InitialPacketNumber { get; set; } = SpecDefaults.InitialPacketNumber;
+
+    /// <summary>Gets or sets how many bytes a packet number is encoded in.</summary>
+    public int PacketNumberEncodedLength { get; set; } = SpecDefaults.PacketNumberEncodedLength;
+
+    /// <summary>Gets or sets the address-validation token replayed in the Initial packet.</summary>
+    public ReadOnlyMemory<byte> Token { get; set; } = SpecDefaults.Token;
+
+    /// <summary>
+    /// Gets or sets the byte length Initial datagrams are padded to. The default is RFC 9000
+    /// section 14.1's 1200-byte minimum.
+    /// </summary>
+    public int PaddingTarget { get; set; } = InitialDatagramPaddingTarget;
+
+    /// <summary>
+    /// Gets or sets the exact byte count of each CRYPTO frame in the Initial flight, in order.
+    /// Empty means one frame carrying everything.
+    /// </summary>
+    public IList<int> InitialCryptoFrameByteCounts { get; set; } =
+        [.. SpecDefaults.InitialCryptoFrameByteCounts];
+
+    /// <summary>
+    /// Gets or sets how many CRYPTO frames each Initial datagram carries, in order. Empty means
+    /// SharpTls packs them.
+    /// </summary>
+    public IList<int> InitialCryptoFramesPerDatagram { get; set; } =
+        [.. SpecDefaults.InitialCryptoFramesPerDatagram];
+
+    /// <summary>
+    /// Gets or sets the frame types in an Initial packet, in exact emission order, by their
+    /// RFC 9000 section 12.4 wire codes. A bare <see cref="ulong"/> rather than an enum so a
+    /// frame type this library does not name can still be ordered.
+    /// </summary>
+    public IList<ulong> InitialFrameOrder { get; set; } =
+        [.. SpecDefaults.InitialFrameOrder.Select(type => (ulong)type)];
+
+    /// <summary>Gets or sets the width of a long-header packet's Length field.</summary>
+    public TlsQuicVarintWidth HeaderLengthVarintWidth { get; set; } =
+        (TlsQuicVarintWidth)SpecDefaults.HeaderLengthVarintWidth;
+
+    /// <summary>Gets or sets the width of a CRYPTO frame's Offset field.</summary>
+    public TlsQuicVarintWidth CryptoOffsetVarintWidth { get; set; } =
+        (TlsQuicVarintWidth)SpecDefaults.CryptoOffsetVarintWidth;
+
+    /// <summary>Gets or sets the width of a CRYPTO frame's Length field.</summary>
+    public TlsQuicVarintWidth CryptoLengthVarintWidth { get; set; } =
+        (TlsQuicVarintWidth)SpecDefaults.CryptoLengthVarintWidth;
+
+    /// <summary>
+    /// Gets or sets the range a per-connection <c>initial_rtt</c> is drawn from, or
+    /// <see langword="null"/> to use RFC 9002's fixed initial RTT.
+    /// </summary>
+    public (TimeSpan Minimum, TimeSpan Maximum)? InitialRttRange { get; set; } =
+        SpecDefaults.InitialRttRange;
+
+    /// <summary>Gets or sets how many ACK ranges one ACK frame reports.</summary>
+    public int AckRangeLimit { get; set; } = SpecDefaults.AckRangeLimit;
+
+    /// <summary>
+    /// Gets or sets whether coalesced packets in one datagram ascend by encryption level.
+    /// </summary>
+    public bool CoalesceAscendingByLevel { get; set; } = SpecDefaults.CoalesceAscendingByLevel;
+
+    /// <summary>Gets or sets whether an ACK frame leads the packet that carries it.</summary>
+    public bool AckLeadsInPacket { get; set; } = SpecDefaults.AckLeadsInPacket;
+
+    /// <summary>Gets the six local flow-control limits.</summary>
+    public TlsQuicFlowControlOptions FlowControl { get; } = new();
+
+    /// <summary>Gets the transport parameters, as an ordered list of slots.</summary>
+    public TlsQuicTransportParameterOptions TransportParameters { get; } = new();
+
+    /// <summary>Gets the loss-detection and congestion-control knobs.</summary>
+    public TlsQuicRecoveryOptions Recovery { get; } = new();
+
+    /// <summary>
+    /// Gets or sets the ALPN protocols offered in the QUIC ClientHello, in exact order. The
+    /// HTTP/3 connection still requires the peer to select <c>h3</c>.
+    /// </summary>
+    public IList<string> AlpnProtocols { get; set; } =
+        [TlsQuicClientHelloProfileFactory.Http3AlpnToken];
+
+    /// <summary>
+    /// Gets or sets the TLS half of the HTTP/3 ClientHello — cipher suites, supported groups,
+    /// key shares, signature algorithms, GREASE policy, extension order and extension layout.
+    /// <see langword="null"/> applies <see cref="ApplyDefaultClientHello"/>; a non-null value
+    /// REPLACES it, so call <see cref="ApplyDefaultClientHello"/> first to extend rather than
+    /// replace.
+    /// </summary>
+    public Action<ClientHelloBuilder>? ConfigureClientHello { get; set; }
+
+    /// <summary>
+    /// Applies the default HTTP/3 ClientHello shape: TLS 1.3, two suites and two groups, which
+    /// is what SharpTls's live run against the reference endpoint used.
+    /// </summary>
+    /// <param name="builder">The builder to configure.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
+    public static void ApplyDefaultClientHello(ClientHelloBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder
+            .WithTls13()
+            .WithCipherSuites(
+                TlsCipherSuite.TlsAes128GcmSha256,
+                TlsCipherSuite.TlsAes256GcmSha384)
+            .WithSupportedGroups(NamedGroup.X25519, NamedGroup.Secp256r1)
+            .WithKeyShares(NamedGroup.X25519);
+    }
+
+    internal TlsQuicConfiguration Snapshot(TlsHttp3Options http3)
+    {
+        ArgumentNullException.ThrowIfNull(http3);
+        ArgumentNullException.ThrowIfNull(FlowControl, nameof(FlowControl));
+        ArgumentNullException.ThrowIfNull(TransportParameters, nameof(TransportParameters));
+        ArgumentNullException.ThrowIfNull(Recovery, nameof(Recovery));
+        ArgumentNullException.ThrowIfNull(
+            InitialCryptoFrameByteCounts,
+            nameof(InitialCryptoFrameByteCounts));
+        ArgumentNullException.ThrowIfNull(
+            InitialCryptoFramesPerDatagram,
+            nameof(InitialCryptoFramesPerDatagram));
+        ArgumentNullException.ThrowIfNull(InitialFrameOrder, nameof(InitialFrameOrder));
+        ArgumentNullException.ThrowIfNull(AlpnProtocols, nameof(AlpnProtocols));
+
+        // No Enum.IsDefined guard on the three varint widths: TlsQuicConnectionSpec's own
+        // ValidateVarintWidth already rejects an undefined one under the same paramName. See
+        // TlsHttp3Options.Snapshot for the sweep result that established this.
+
+        var alpn = AlpnProtocols.ToArray();
+        if (alpn.Any(string.IsNullOrEmpty))
+        {
+            throw new ArgumentException(
+                $"{AlpnParameter} must contain no null or empty tokens.",
+                AlpnParameter);
+        }
+
+        var connectionSpec = new TlsQuicConnectionSpec
+        {
+            SourceConnectionIdLength = SourceConnectionIdLength,
+            DestinationConnectionIdLength = DestinationConnectionIdLength,
+            InitialPacketNumber = InitialPacketNumber,
+            PacketNumberEncodedLength = PacketNumberEncodedLength,
+            Token = Token,
+            PaddingTarget = PaddingTarget,
+            InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
+            InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
+            InitialFrameOrder =
+                [.. InitialFrameOrder.Select(type => (TlsQuicFrameType)type)],
+            HeaderLengthVarintWidth =
+                (SharpTls.Quic.TlsQuicVarintWidth)HeaderLengthVarintWidth,
+            CryptoOffsetVarintWidth =
+                (SharpTls.Quic.TlsQuicVarintWidth)CryptoOffsetVarintWidth,
+            CryptoLengthVarintWidth =
+                (SharpTls.Quic.TlsQuicVarintWidth)CryptoLengthVarintWidth,
+            InitialRttRange = InitialRttRange,
+            AckRangeLimit = AckRangeLimit,
+            CoalesceAscendingByLevel = CoalesceAscendingByLevel,
+            AckLeadsInPacket = AckLeadsInPacket,
+            LocalFlowControl = FlowControl.Snapshot(),
+            TransportParameters = TransportParameters.Snapshot(),
+            Recovery = Recovery.Snapshot(),
+        };
+
+        var configureClientHello = ConfigureClientHello ?? ApplyDefaultClientHello;
+        return new TlsQuicConfiguration(
+            connectionSpec,
+            http3.Snapshot(),
+            alpn,
+            configureClientHello);
+    }
+}
+
+/// <summary>The immutable QUIC and HTTP/3 shape one session dials with.</summary>
+/// <remarks>Carries SharpTls's own spec objects rather than a second copy of their fields.
+/// They are immutable, and every per-connection value they hold — the three drawn transport
+/// parameters, the drawn <c>initial_rtt</c> — is redrawn by <c>Compose</c> at connect time
+/// rather than frozen here.</remarks>
+internal sealed record TlsQuicConfiguration(
+    TlsQuicConnectionSpec ConnectionSpec,
+    TlsQuicHttp3Spec Http3Spec,
+    string[] AlpnProtocols,
+    Action<ClientHelloBuilder> ConfigureClientHello);

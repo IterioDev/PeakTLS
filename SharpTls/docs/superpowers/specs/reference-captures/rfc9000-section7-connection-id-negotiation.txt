@@ -1,0 +1,172 @@
+RFC 9000 Section 7.2-7.3 - Negotiating and Authenticating Connection IDs (complete)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9000.txt on 2026-08-18.
+7.2 covers choosing and changing connection IDs during the handshake (the peer
+MAY change the Source Connection ID once and later only via NEW_CONNECTION_ID);
+7.3 covers authenticating them via the initial_source_connection_id,
+original_destination_connection_id and retry_source_connection_id transport
+parameters.
+Ground truth for phase A4 task 9a: the server's Source Connection ID on its
+first packet becomes our Destination Connection ID.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+7.2.  Negotiating Connection IDs
+
+   A connection ID is used to ensure consistent routing of packets, as
+   described in Section 5.1.  The long header contains two connection
+   IDs: the Destination Connection ID is chosen by the recipient of the
+   packet and is used to provide consistent routing; the Source
+   Connection ID is used to set the Destination Connection ID used by
+   the peer.
+
+   During the handshake, packets with the long header (Section 17.2) are
+   used to establish the connection IDs used by both endpoints.  Each
+   endpoint uses the Source Connection ID field to specify the
+   connection ID that is used in the Destination Connection ID field of
+   packets being sent to them.  After processing the first Initial
+   packet, each endpoint sets the Destination Connection ID field in
+   subsequent packets it sends to the value of the Source Connection ID
+   field that it received.
+
+   When an Initial packet is sent by a client that has not previously
+   received an Initial or Retry packet from the server, the client
+   populates the Destination Connection ID field with an unpredictable
+   value.  This Destination Connection ID MUST be at least 8 bytes in
+   length.  Until a packet is received from the server, the client MUST
+   use the same Destination Connection ID value on all packets in this
+   connection.
+
+   The Destination Connection ID field from the first Initial packet
+   sent by a client is used to determine packet protection keys for
+   Initial packets.  These keys change after receiving a Retry packet;
+   see Section 5.2 of [QUIC-TLS].
+
+   The client populates the Source Connection ID field with a value of
+   its choosing and sets the Source Connection ID Length field to
+   indicate the length.
+
+   0-RTT packets in the first flight use the same Destination Connection
+   ID and Source Connection ID values as the client's first Initial
+   packet.
+
+   Upon first receiving an Initial or Retry packet from the server, the
+   client uses the Source Connection ID supplied by the server as the
+   Destination Connection ID for subsequent packets, including any 0-RTT
+   packets.  This means that a client might have to change the
+   connection ID it sets in the Destination Connection ID field twice
+   during connection establishment: once in response to a Retry packet
+   and once in response to an Initial packet from the server.  Once a
+   client has received a valid Initial packet from the server, it MUST
+   discard any subsequent packet it receives on that connection with a
+   different Source Connection ID.
+
+   A client MUST change the Destination Connection ID it uses for
+   sending packets in response to only the first received Initial or
+   Retry packet.  A server MUST set the Destination Connection ID it
+   uses for sending packets based on the first received Initial packet.
+   Any further changes to the Destination Connection ID are only
+   permitted if the values are taken from NEW_CONNECTION_ID frames; if
+   subsequent Initial packets include a different Source Connection ID,
+   they MUST be discarded.  This avoids unpredictable outcomes that
+   might otherwise result from stateless processing of multiple Initial
+   packets with different Source Connection IDs.
+
+   The Destination Connection ID that an endpoint sends can change over
+   the lifetime of a connection, especially in response to connection
+   migration (Section 9); see Section 5.1.1 for details.
+
+7.3.  Authenticating Connection IDs
+
+   The choice each endpoint makes about connection IDs during the
+   handshake is authenticated by including all values in transport
+   parameters; see Section 7.4.  This ensures that all connection IDs
+   used for the handshake are also authenticated by the cryptographic
+   handshake.
+
+   Each endpoint includes the value of the Source Connection ID field
+   from the first Initial packet it sent in the
+   initial_source_connection_id transport parameter; see Section 18.2.
+   A server includes the Destination Connection ID field from the first
+   Initial packet it received from the client in the
+   original_destination_connection_id transport parameter; if the server
+   sent a Retry packet, this refers to the first Initial packet received
+   before sending the Retry packet.  If it sends a Retry packet, a
+   server also includes the Source Connection ID field from the Retry
+   packet in the retry_source_connection_id transport parameter.
+
+   The values provided by a peer for these transport parameters MUST
+   match the values that an endpoint used in the Destination and Source
+   Connection ID fields of Initial packets that it sent (and received,
+   for servers).  Endpoints MUST validate that received transport
+   parameters match received connection ID values.  Including connection
+   ID values in transport parameters and verifying them ensures that an
+   attacker cannot influence the choice of connection ID for a
+   successful connection by injecting packets carrying attacker-chosen
+   connection IDs during the handshake.
+
+   An endpoint MUST treat the absence of the
+   initial_source_connection_id transport parameter from either endpoint
+   or the absence of the original_destination_connection_id transport
+   parameter from the server as a connection error of type
+   TRANSPORT_PARAMETER_ERROR.
+
+   An endpoint MUST treat the following as a connection error of type
+   TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+
+   *  absence of the retry_source_connection_id transport parameter from
+      the server after receiving a Retry packet,
+
+   *  presence of the retry_source_connection_id transport parameter
+      when no Retry packet was received, or
+
+   *  a mismatch between values received from a peer in these transport
+      parameters and the value sent in the corresponding Destination or
+      Source Connection ID fields of Initial packets.
+
+   If a zero-length connection ID is selected, the corresponding
+   transport parameter is included with a zero-length value.
+
+   Figure 7 shows the connection IDs (with DCID=Destination Connection
+   ID, SCID=Source Connection ID) that are used in a complete handshake.
+   The exchange of Initial packets is shown, plus the later exchange of
+   1-RTT packets that includes the connection ID established during the
+   handshake.
+
+   Client                                                  Server
+
+   Initial: DCID=S1, SCID=C1 ->
+                                     <- Initial: DCID=C1, SCID=S3
+                                ...
+   1-RTT: DCID=S3 ->
+                                                <- 1-RTT: DCID=C1
+
+               Figure 7: Use of Connection IDs in a Handshake
+
+   Figure 8 shows a similar handshake that includes a Retry packet.
+
+   Client                                                  Server
+
+   Initial: DCID=S1, SCID=C1 ->
+                                       <- Retry: DCID=C1, SCID=S2
+   Initial: DCID=S2, SCID=C1 ->
+                                     <- Initial: DCID=C1, SCID=S3
+                                ...
+   1-RTT: DCID=S3 ->
+                                                <- 1-RTT: DCID=C1
+
+         Figure 8: Use of Connection IDs in a Handshake with Retry
+
+   In both cases (Figures 7 and 8), the client sets the value of the
+   initial_source_connection_id transport parameter to "C1".
+
+   When the handshake does not include a Retry (Figure 7), the server
+   sets original_destination_connection_id to "S1" (note that this value
+   is chosen by the client) and initial_source_connection_id to "S3".
+   In this case, the server does not include a
+   retry_source_connection_id transport parameter.
+
+   When the handshake includes a Retry (Figure 8), the server sets
+   original_destination_connection_id to "S1",
+   retry_source_connection_id to "S2", and initial_source_connection_id
+   to "S3".
+

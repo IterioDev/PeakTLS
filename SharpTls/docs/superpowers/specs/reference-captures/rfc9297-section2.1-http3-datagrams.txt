@@ -1,0 +1,110 @@
+RFC 9297 Section 2.1 - HTTP/3 Datagrams (complete: 2.1, 2.1.1 The
+SETTINGS_H3_DATAGRAM HTTP/3 Setting)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9297.txt on 2026-08-19.
+Captured for subsystem C task C0. The Brave capture this subsystem reproduces
+sends SETTINGS_H3_DATAGRAM as "51: 1"; 2.1.1 names the setting 0x33, and
+0x33 = 51, so the capture's decimal 51 and this RFC's hex 0x33 are the same
+identifier. This extract is what makes that a checkable claim rather than a
+copied constant.
+Three things 2.1.1 says that bear on sending it purely for fingerprint match:
+  - "The value of the SETTINGS_H3_DATAGRAM setting MUST be either 0 or 1", and
+    a value that is neither is H3_SETTINGS_ERROR;
+  - "QUIC DATAGRAM frames MUST NOT be sent until the SETTINGS_H3_DATAGRAM
+    setting has been both sent and received with a value of 1" - sending 1 does
+    not by itself license sending datagrams;
+  - "It is RECOMMENDED that implementations that support receiving HTTP/3
+    Datagrams always send the SETTINGS_H3_DATAGRAM setting with a value of 1,
+    even if the application does not intend to use HTTP/3 Datagrams.  This
+    helps to avoid \"sticking out\"" - the RFC itself gives the
+    anti-fingerprinting reason, but conditions it on actually supporting
+    RECEIPT. Sending 1 while unable to receive is outside what this clause
+    recommends.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+2.1.  HTTP/3 Datagrams
+
+   When used with HTTP/3, the Datagram Data field of QUIC DATAGRAM
+   frames uses the following format:
+
+   HTTP/3 Datagram {
+     Quarter Stream ID (i),
+     HTTP Datagram Payload (..),
+   }
+
+                      Figure 1: HTTP/3 Datagram Format
+
+   Quarter Stream ID:  A variable-length integer that contains the value
+      of the client-initiated bidirectional stream that this datagram is
+      associated with divided by four (the division by four stems from
+      the fact that HTTP requests are sent on client-initiated
+      bidirectional streams, which have stream IDs that are divisible by
+      four).  The largest legal QUIC stream ID value is 2^62-1, so the
+      largest legal value of the Quarter Stream ID field is 2^60-1.
+      Receipt of an HTTP/3 Datagram that includes a larger value MUST be
+      treated as an HTTP/3 connection error of type H3_DATAGRAM_ERROR
+      (0x33).
+
+   HTTP Datagram Payload:  The payload of the datagram, whose semantics
+      are defined by the extension that is using HTTP Datagrams.  Note
+      that this field can be empty.
+
+   Receipt of a QUIC DATAGRAM frame whose payload is too short to allow
+   parsing the Quarter Stream ID field MUST be treated as an HTTP/3
+   connection error of type H3_DATAGRAM_ERROR (0x33).
+
+   HTTP/3 Datagrams MUST NOT be sent unless the corresponding stream's
+   send side is open.  If a datagram is received after the corresponding
+   stream's receive side is closed, the received datagrams MUST be
+   silently dropped.
+
+   If an HTTP/3 Datagram is received and its Quarter Stream ID field
+   maps to a stream that has not yet been created, the receiver SHALL
+   either drop that datagram silently or buffer it temporarily (on the
+   order of a round trip) while awaiting the creation of the
+   corresponding stream.
+
+   If an HTTP/3 Datagram is received and its Quarter Stream ID field
+   maps to a stream that cannot be created due to client-initiated
+   bidirectional stream limits, it SHOULD be treated as an HTTP/3
+   connection error of type H3_ID_ERROR.  Generating an error is not
+   mandatory because the QUIC stream limit might be unknown to the
+   HTTP/3 layer.
+
+   Prioritization of HTTP/3 Datagrams is not defined in this document.
+   Future extensions MAY define how to prioritize datagrams and MAY
+   define signaling to allow communicating prioritization preferences.
+
+2.1.1.  The SETTINGS_H3_DATAGRAM HTTP/3 Setting
+
+   An endpoint can indicate to its peer that it is willing to receive
+   HTTP/3 Datagrams by sending the SETTINGS_H3_DATAGRAM (0x33) setting
+   with a value of 1.
+
+   The value of the SETTINGS_H3_DATAGRAM setting MUST be either 0 or 1.
+   A value of 0 indicates that the implementation is not willing to
+   receive HTTP Datagrams.  If the SETTINGS_H3_DATAGRAM setting is
+   received with a value that is neither 0 nor 1, the receiver MUST
+   terminate the connection with error H3_SETTINGS_ERROR.
+
+   QUIC DATAGRAM frames MUST NOT be sent until the SETTINGS_H3_DATAGRAM
+   setting has been both sent and received with a value of 1.
+
+   When clients use 0-RTT, they MAY store the value of the server's
+   SETTINGS_H3_DATAGRAM setting.  Doing so allows the client to send
+   QUIC DATAGRAM frames in 0-RTT packets.  When servers decide to accept
+   0-RTT data, they MUST send a SETTINGS_H3_DATAGRAM setting greater
+   than or equal to the value they sent to the client in the connection
+   where they sent them the NewSessionTicket message.  If a client
+   stores the value of the SETTINGS_H3_DATAGRAM setting with their 0-RTT
+   state, they MUST validate that the new value of the
+   SETTINGS_H3_DATAGRAM setting sent by the server in the handshake is
+   greater than or equal to the stored value; if not, the client MUST
+   terminate the connection with error H3_SETTINGS_ERROR.  In all cases,
+   the maximum permitted value of the SETTINGS_H3_DATAGRAM setting
+   parameter is 1.
+
+   It is RECOMMENDED that implementations that support receiving HTTP/3
+   Datagrams always send the SETTINGS_H3_DATAGRAM setting with a value
+   of 1, even if the application does not intend to use HTTP/3
+   Datagrams.  This helps to avoid "sticking out"; see Section 4.

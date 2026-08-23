@@ -1,0 +1,194 @@
+uQUIC ChromeRandomInitialRTT - google_initial_rtt (0x3127 = 12583) draw
+Extracted verbatim from third-party Go SOURCE CODE, not from a specification, on
+2026-08-20.
+  repository: https://github.com/refraction-networking/uquic
+  path:       u_parrot.go
+  ref:        master @ 837c7ce1b72bf07b2d29b3dabd5b45c60bec0f42 (2026-08-04)
+  blob:       f19f6c5f6b75260f46315ba777e89a5a5a7c6a85 (33244 bytes, 1037 lines)
+  raw URL:    https://raw.githubusercontent.com/refraction-networking/uquic/837c7ce1b72bf07b2d29b3dabd5b45c60bec0f42/u_parrot.go
+  introduced: commit 544b8096eacbcfa6ca04e1b9f51fac2f4083b09b (2026-06-17,
+              "Add support for modern Chrome features")
+  NOT in any released tag - the newest tag v0.0.6 (cb2c7f1296) has no
+  ChromeRandomInitialRTT. This text exists only on master. Cite the commit, not
+  a version.
+
+This is the FIRST source-code capture in this directory; every other file here is
+RFC text. Read it accordingly:
+  - It is NOT normative. uQUIC is one third party's imitation of Chromium. Its
+    numbers are that project's model of Chrome's behaviour, and carry exactly the
+    authority of that project's own measurement - which the code states was a
+    single pcap.
+  - It is third-party GPL-adjacent Go source quoted as evidence, not vendored
+    code. Nothing here is to be compiled, translated to C#, or treated as an
+    interface.
+  - It is evidence ABOUT Chromium, at one remove. Chromium itself is the subject;
+    uQUIC is the witness.
+
+Captured for task B12, which asked whether this function settles the range behind
+Brave151InitialRttRange in src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs.
+
+WHAT IT SAYS - bounds, units, distribution
+  bounds:       const minRTT, maxRTT = 1000, 20000
+  units:        MICROSECONDS. Stated by the doc comment ("a random realistic RTT
+                value in microseconds", "the range 1000-20000 us"). The code
+                carries no time.Duration; the value goes straight onto the wire as
+                a QUIC varint. So 1000 us = 1 ms and 20000 us = 20 ms.
+  distribution: UNIFORM, over the half-open interval [1000, 20000). crypto/rand
+                (imported as "rand"; math/rand is the separate "mrand") draws
+                rand.Int over [0, maxRTT-minRTT) = [0, 19000) and adds minRTT, so
+                20000 itself is never produced; the realised set is the 19000
+                integers 1000..19999.
+  redrawn:      per call to QUICID2Spec, i.e. per spec build, NOT per dial of a
+                reused spec - see the QUICID2Spec doc comment quoted below.
+
+*** THE OBSERVED 192859 IS OUTSIDE THIS RANGE. THIS FUNCTION DOES NOT SETTLE  ***
+*** Brave151InitialRttRange. DO NOT ADOPT 1000-20000 AS THE BRAVE 151 RANGE.  ***
+
+  The Brave 151 capture
+  (2026-08-16-brave-151-http3-impersonate-pro.md, line 91) records
+  initial_rtt = 192859. That is 192859 us = 192.9 ms, roughly 9.6x this
+  function's maximum and 193x its minimum. It cannot be a draw from
+  [1000, 20000).
+
+  Three independent readings of the code below say the same thing, and none of
+  them can be reconciled away:
+
+  1. Range. 192859 > 20000. Directly.
+  2. Encoding. The function emits a TWO-byte QUIC varint - val is literally two
+     bytes, prefix 0b01 - whose maximum representable value is 16383. 192859
+     needs a four-byte varint (max 1073741823). Whatever Brave put on the wire
+     was not encoded the way this function encodes.
+  3. The function's own numbers do not close. maxRTT is 20000 but the two-byte
+     varint holds 16383, so every draw in [16384, 19999] silently loses its
+     overflow bits: byte(0x40|byte(rtt>>8)) keeps only the low 6 bits of the high
+     byte, so e.g. 16384 encodes as 0. The effective on-wire distribution is
+     therefore NOT the documented one. (Readings 2 and 3 are read off the code
+     below - they are not claims the code makes about itself.)
+
+  The doc comment also records uQUIC's own single observation: "The observed
+  value in the reference pcap was 7740 us". So there are now two single draws
+  from the real world - 7740 us (uQUIC's Chrome 146 pcap) and 192859 us (this
+  repo's Brave 151 capture) - a factor of 25 apart, and BOTH inside the range of
+  a plausible measured network RTT. The simplest reading consistent with both is
+  that Chromium reports a path-derived RTT estimate rather than drawing a random
+  number, in which case there is no fixed distribution to copy and 1000-20000 is
+  uQUIC's invention for imitation purposes, fitted to one sample. That reading is
+  an inference from two data points; it is NOT established here.
+
+WHAT THIS CAPTURE SETTLES
+  - Exactly what uQUIC does, verbatim, with a citable ref. Nothing else.
+  - That uQUIC's model CONTRADICTS this repo's one observed sample, so B12's
+    "alternative source for initial_rtt only" does not in fact discharge B12.
+    The packet capture is still required - now for all three values, not two.
+
+WHAT IT DOES NOT SETTLE
+  - The reserved (GREASE) parameter's N in 31*N+27. Untouched here.
+  - The Initial flight split point. Untouched here.
+  - Brave 151's actual initial_rtt range. Still UNVERIFIED, now with a cited
+    reason why the obvious shortcut fails rather than an unexplained marker.
+
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+[verbatim] refraction-networking/uquic @ 837c7ce, u_parrot.go lines 1-11
+  (which "rand" is which)
+
+package quic
+
+import (
+	"crypto/rand"
+	"fmt"
+	"math"
+	"math/big"
+	mrand "math/rand"
+
+	tls "github.com/refraction-networking/utls"
+)
+
+----------------------------------------------------------------------
+[verbatim] refraction-networking/uquic @ 837c7ce, u_parrot.go lines 918-932
+  (the function itself)
+
+// ChromeRandomInitialRTT returns a FakeQUICTransportParameter for google_initial_rtt (0x3127).
+// Chrome 146 includes this parameter with a random realistic RTT value in microseconds.
+// The observed value in the reference pcap was 7740 µs; the range 1000–20000 µs covers
+// typical network conditions. Value is encoded as a 2-byte QUIC varint (high bits = 0b01).
+func ChromeRandomInitialRTT() *tls.FakeQUICTransportParameter {
+	const minRTT, maxRTT = 1000, 20000
+	r, err := rand.Int(rand.Reader, big.NewInt(maxRTT-minRTT))
+	if err != nil {
+		panic(err)
+	}
+	rtt := uint16(minRTT + r.Int64())
+	// 2-byte QUIC varint: top 2 bits = 01, remaining 14 bits = value
+	val := []byte{byte(0x40 | byte(rtt>>8)), byte(rtt)}
+	return &tls.FakeQUICTransportParameter{Id: 0x3127, Val: val}
+}
+
+----------------------------------------------------------------------
+[verbatim] refraction-networking/uquic @ 837c7ce, u_parrot.go lines 57-60
+  (when the draw is re-drawn)
+
+// QUICID2Spec returns the QUICSpec that mimics the client named by id, or an error for
+// an unknown ID. Each call builds a fresh spec, so per-spec random draws (GREASE
+// parameter IDs and lengths, ChromeRandomInitialRTT) are re-drawn — call it per
+// connection rather than caching one result if those values must vary.
+
+----------------------------------------------------------------------
+[verbatim] refraction-networking/uquic @ 837c7ce, u_parrot.go lines 715-757
+  (the QUICChrome_146 call site, and the observed QTP order around it)
+
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
+					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{
+						TransportParameters: tls.TransportParameters{
+							// Observed QTP order (shuffled per connection):
+							// 0x06 initial_max_stream_data_bidi_remote
+							// 0x20 max_datagram_frame_size
+							// 0x11 version_information
+							// 0x03 max_udp_payload_size
+							// 0x01 max_idle_timeout
+							// 0x3127 google_initial_rtt (new in Chrome 146)
+							// 0x04 initial_max_data
+							// 0x07 initial_max_stream_data_uni
+							// 0x0f initial_source_connection_id
+							// GREASE
+							// 0x3128 google_connection_options ("10AF", changed from "RVCM" in Chrome 115)
+							// 0x05 initial_max_stream_data_bidi_local
+							// 0x08 initial_max_streams_bidi
+							// 0x09 initial_max_streams_uni
+							// Note: 0x4752 (google_quic_version) was removed vs Chrome 115
+							tls.InitialMaxStreamDataBidiRemote(6291456),
+							tls.MaxDatagramFrameSize(65536),
+							&tls.VersionInformation{
+								ChoosenVersion: tls.VERSION_1,
+								AvailableVersions: []uint32{
+									tls.VERSION_GREASE,
+									tls.VERSION_1,
+								},
+								LegacyID: true,
+							},
+							tls.MaxUDPPayloadSize(1472),
+							tls.MaxIdleTimeout(30000),
+							ChromeRandomInitialRTT(), // 0x3127: random 1000–20000 µs per connection
+							tls.InitialMaxData(15728640),
+							tls.InitialMaxStreamDataUni(6291456),
+							tls.InitialSourceConnectionID([]byte{}),
+							VariableLengthGREASEQTP(0x10),
+							&tls.FakeQUICTransportParameter{ // 0x3128 google_connection_options
+								Id:  0x3128,
+								Val: []byte{0x31, 0x30, 0x41, 0x46}, // "10AF" (was "RVCM" in Chrome 115)
+							},
+							tls.InitialMaxStreamDataBidiLocal(6291456),
+							tls.InitialMaxStreamsBidi(100),
+							tls.InitialMaxStreamsUni(103),
+
+----------------------------------------------------------------------
+[verbatim] refraction-networking/uquic @ 837c7ce, u_parrot.go lines 850-856
+  (the second call site, QUICChrome_146_IPv6, no trailing comment)
+
+							tls.MaxUDPPayloadSize(1472),
+							tls.MaxIdleTimeout(30000),
+							ChromeRandomInitialRTT(),
+							tls.InitialMaxData(15728640),
+							tls.InitialMaxStreamDataUni(6291456),
+							tls.InitialSourceConnectionID([]byte{}),
+							VariableLengthGREASEQTP(0x10),

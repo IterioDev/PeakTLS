@@ -1,0 +1,28 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+
+# The previous per-project git histories, moved aside when this monorepo was created.
+# Kept so nothing is lost; not part of this repo.
+.archive-git/
+
+# Raw packet captures. The 64 MB pcapng trips GitHub's file-size warning and would sit in
+# history forever. The DERIVED analyses next to them are committed instead - those are what the
+# presets and tests actually cite, and they are small.
+*.pcapng
+
+# Leftover working copies from mutation sweeps and worktree experiments. Plain directories,
+# not git repos; they duplicate SharpTls sources and would double the tree.
+.wt-base/
+.wt-zstd/
+wt11/
+sharptls-pin/
+mutsweep-t11/
+sharptls-mut-t5/
+SharpTls-mutation-sweep/
+
+# Secrets
+.env
+*.env

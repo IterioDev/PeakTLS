@@ -1,0 +1,97 @@
+RFC 9204 Sections 7.2-7.4 - Static Huffman Encoding, Memory Consumption,
+Implementation Limits (complete: 7.2, 7.3, 7.4)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9204.txt on 2026-08-19.
+Captured for subsystem C task C0. 7.2 is the RFC's own statement of what the
+Huffman choice leaks - it is the standards-track basis for treating
+Huffman-versus-literal as a fingerprintable decision rather than a free
+optimisation, which is why C copies the capture's choice per field instead of
+always encoding. 7.4 bounds what a conforming decoder may refuse.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+7.2.  Static Huffman Encoding
+
+   There is no currently known attack against a static Huffman encoding.
+   A study has shown that using a static Huffman encoding table created
+   an information leakage; however, this same study concluded that an
+   attacker could not take advantage of this information leakage to
+   recover any meaningful amount of information (see [PETAL]).
+
+7.3.  Memory Consumption
+
+   An attacker can try to cause an endpoint to exhaust its memory.
+   QPACK is designed to limit both the peak and stable amounts of memory
+   allocated by an endpoint.
+
+   QPACK uses the definition of the maximum size of the dynamic table
+   and the maximum number of blocking streams to limit the amount of
+   memory the encoder can cause the decoder to consume.  In HTTP/3,
+   these values are controlled by the decoder through the settings
+   parameters SETTINGS_QPACK_MAX_TABLE_CAPACITY and
+   SETTINGS_QPACK_BLOCKED_STREAMS, respectively (see Section 3.2.3 and
+   Section 2.1.2).  The limit on the size of the dynamic table takes
+   into account the size of the data stored in the dynamic table, plus a
+   small allowance for overhead.  The limit on the number of blocked
+   streams is only a proxy for the maximum amount of memory required by
+   the decoder.  The actual maximum amount of memory will depend on how
+   much memory the decoder uses to track each blocked stream.
+
+   A decoder can limit the amount of state memory used for the dynamic
+   table by setting an appropriate value for the maximum size of the
+   dynamic table.  In HTTP/3, this is realized by setting an appropriate
+   value for the SETTINGS_QPACK_MAX_TABLE_CAPACITY parameter.  An
+   encoder can limit the amount of state memory it uses by choosing a
+   smaller dynamic table size than the decoder allows and signaling this
+   to the decoder (see Section 4.3.1).
+
+   A decoder can limit the amount of state memory used for blocked
+   streams by setting an appropriate value for the maximum number of
+   blocked streams.  In HTTP/3, this is realized by setting an
+   appropriate value for the SETTINGS_QPACK_BLOCKED_STREAMS parameter.
+   Streams that risk becoming blocked consume no additional state memory
+   on the encoder.
+
+   An encoder allocates memory to track all dynamic table references in
+   unacknowledged field sections.  An implementation can directly limit
+   the amount of state memory by only using as many references to the
+   dynamic table as it wishes to track; no signaling to the decoder is
+   required.  However, limiting references to the dynamic table will
+   reduce compression effectiveness.
+
+   The amount of temporary memory consumed by an encoder or decoder can
+   be limited by processing field lines sequentially.  A decoder
+   implementation does not need to retain a complete list of field lines
+   while decoding a field section.  An encoder implementation does not
+   need to retain a complete list of field lines while encoding a field
+   section if it is using a single-pass algorithm.  Note that it might
+   be necessary for an application to retain a complete list of field
+   lines for other reasons; even if QPACK does not force this to occur,
+   application constraints might make this necessary.
+
+   While the negotiated limit on the dynamic table size accounts for
+   much of the memory that can be consumed by a QPACK implementation,
+   data that cannot be immediately sent due to flow control is not
+   affected by this limit.  Implementations should limit the size of
+   unsent data, especially on the decoder stream where flexibility to
+   choose what to send is limited.  Possible responses to an excess of
+   unsent data might include limiting the ability of the peer to open
+   new streams, reading only from the encoder stream, or closing the
+   connection.
+
+7.4.  Implementation Limits
+
+   An implementation of QPACK needs to ensure that large values for
+   integers, long encoding for integers, or long string literals do not
+   create security weaknesses.
+
+   An implementation has to set a limit for the values it accepts for
+   integers, as well as for the encoded length; see Section 4.1.1.  In
+   the same way, it has to set a limit to the length it accepts for
+   string literals; see Section 4.1.2.  These limits SHOULD be large
+   enough to process the largest individual field the HTTP
+   implementation can be configured to accept.
+
+   If an implementation encounters a value larger than it is able to
+   decode, this MUST be treated as a stream error of type
+   QPACK_DECOMPRESSION_FAILED if on a request stream or a connection
+   error of the appropriate type if on the encoder or decoder stream.

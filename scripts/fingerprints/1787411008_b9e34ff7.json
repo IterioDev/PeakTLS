@@ -1,0 +1,115 @@
+{
+  "ts": 1787411008.1584115,
+  "client_id": "b9e34ff7-db7f-4ecd-9abc-9690958da9d0",
+  "peername": "('10.0.0.1', 63317)",
+  "transport": "quic",
+  "sni": "firebase-settings.crashlytics.com",
+  "alpn": [
+    "h3"
+  ],
+  "ja4": "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+  "ja3": "48d08f334704479db85d91df80039756",
+  "ja3_string": "771,4866-4867-4865,0-10-16-5-13-18-51-45-43-57-27,4588-29-23-24-25,",
+  "ciphers": [
+    "0x1a1a",
+    "0x1302",
+    "0x1303",
+    "0x1301"
+  ],
+  "extensions": [
+    "0x7a7a",
+    "0x0000",
+    "0x000a",
+    "0x0010",
+    "0x0005",
+    "0x000d",
+    "0x0012",
+    "0x0033",
+    "0x002d",
+    "0x002b",
+    "0x0039",
+    "0x001b",
+    "0xaaaa"
+  ],
+  "supported_versions": [
+    "0xaaaa",
+    "0x0304"
+  ],
+  "supported_groups": [
+    "0xeaea",
+    "0x11ec",
+    "0x001d",
+    "0x0017",
+    "0x0018",
+    "0x0019"
+  ],
+  "sig_algs": [
+    "0x0403",
+    "0x0804",
+    "0x0401",
+    "0x0503",
+    "0x0805",
+    "0x0805",
+    "0x0501",
+    "0x0806",
+    "0x0601",
+    "0x0201"
+  ],
+  "quic_transport_parameters": {
+    "initial_max_streams_uni": 8,
+    "active_connection_id_limit": 64,
+    "initial_source_connection_id": true,
+    "initial_max_data": 16777216,
+    "initial_max_stream_data_bidi_local": 2097152,
+    "initial_max_stream_data_bidi_remote": 2097152,
+    "initial_max_stream_data_uni": 2097152,
+    "unknown_0xff080808": "09",
+    "_order": [
+      "initial_max_streams_uni",
+      "active_connection_id_limit",
+      "initial_source_connection_id",
+      "initial_max_data",
+      "initial_max_stream_data_bidi_local",
+      "initial_max_stream_data_bidi_remote",
+      "initial_max_stream_data_uni",
+      "unknown_0xff080808"
+    ]
+  },
+  "client_random": "cad58b645067cbc31df4801c6e51af9866a9282ca80c6ba18368b81b53d108f3",
+  "raw_client_hello": "16030305e2010005de0303cad58b645067cbc31df4801c6e51af9866a9282ca80c6ba18368b81b53d108f30000081a1a130213031301010005ad7a7a000000000026002400002166697265626173652d73657474696e67732e63726173686c79746963732e636f6d000a000e000ceaea11ec001d001700180019001000050003026833000500050100000000000d00160014040308040401050308050805050108060601020100120000003304ef04edeaea00010011ec04c0eb697f3e405b99e96244f690ac1a2e36810a17e7751a35af914649d3492510b48841d06d5745acdd909096950ca9463453bacc8a2c81b2b5653a942d4134099e3c4db796bab26213b32132b31c57fee1cc7b8884c1839130d20f07795c7131c7ea3c8f0198c8db9c4c6a29695ed79bb962ba7fe7adb070a51496a1241559d3131b17d7197f7188bb6131c1947389d927308abc97574ae423ca879304e3ea9f146cc508b9ba1fb844796436d19716e3145344e819b10291e6784636c11a5f424099429e12061e41ba6312571c4ba44d87924de70b8a820349c376183fd0c2554157e7b763dd3c12da7a7d5fe933f5472255c64b62752d50ba213b0349992c2b33b54a59c42d721261a0ea8911d44144e1341b7479e85023e6254c228a655e489c12a98bb071c49991aef4482758ca70f600421684071f2762fbd475765234cb518c5fb7bd2679a79c8ac82232593852447bd6ba3196ce51f7be0d122bc15373882144e8622914985b3c067bd2272941992929040825d78c863bb7a855b832e119048895f15551ddf17b31caa79f50a4afe1068edc75aa5a1aaf6a5a490948ddac526884a7e090b6e9ac2e3a710b6619b08796bd64ab0a11f49d079a6fce74c8d941b49a50047a5b56c1ca205a48037538b1217bb786c85d64d43fe5307882049fc57407e372ab42e36882e0613902a1e2467b9a49768ab4c53fd35ec8c654d620b499eb25a5a2af25fa9c8446360c39176e069078d5bfc1f31fd12a48321c2249a215a1234a03ac697d906551bcc8c22b3b132bcb8f6a3183102106b72e25324fcb62a0617ab84e9861c06c9d8d763cf6090e72e73e7f54c2b89b608c6a2b54649a5d08808c6c5a32ba3e5c484fcd81bc78a74e906028bbc48db1a2303f135253020ace33a0d1641f6c797593c08f91712ed440552165213ba5174b5a207434ba82f5564f6bb6576461477a0c71313e878887d0b1c37ab95e3f5b05c2371f47114097c75f957629ea5093d1331db49b1ea2857fb5941df8cacafd374eb15a623cf292f6b790da7a592d71cf6696273f522e8296cfde9064e3f219072255bf463734375bdacc63d2e51faa7053c199710cca65b3a74c947022988aad564079db94c1ad09b74dd44d4ef46e2bc62bad8762e38840b5d327e142aeb745808474b3684080ca98986b01054f098663a222dc040de2da9bfd1c377186be60833f8e295858f711df1c6bc66348c07c2267267745e28c9bba7f02353696e98437b9273028a35721b619f873b4027d8e455175bb08afe6bcf085479e03b26ea984ec9165a087485ed62dd049329c8c2b1026514a154d4792923e61a466a477e22b42b27b776e100c573b4ab4080761c9c1aca500ed61a872989688c28ab7808e2c7693b6b580069665401c75f53b63d6b85f19e34e5f578ca6303261161f061408edb70d7d3860a2e4b2be93b1d2f2acc4a7a5583a1e76b66a405892af0a7003da171bb59db7148f00d23576962a552685fd81831e48006b3343c5481ffa6737f3f9696fac7d43090949506bf9102ed009b8b0c7451f0305b8520dffc45cb251b6794154bbbb8c72b19c99c55dcff1b085752a1b5066d191b4b4c20dd804725cf46bf3f93e5be8ed8b2bf8bbd6e2f2ddc6ab8a6271f316f29f6bf9f4611c0f0eb09c6c5c2e71a510dd0aaeac613e24695d73c8470ec29f732f801de40653fa12d643b63924001d0020637c584378c3b83327045da381bf12c5137220f6fc2fdad78a82c4cce4fc7713002d00020101002b000504aaaa03040039002b0901080e0240400f00040481000000050480200000060480200000070480200000c0000000ff0808080109001b0003020001aaaa000100",
+  "h3_settings": {
+    "QPACK_MAX_TABLE_CAPACITY": 16383,
+    "QPACK_BLOCKED_STREAMS": 100,
+    "GREASE_0x597c4ccfe": 357710961,
+    "_order": [
+      "QPACK_MAX_TABLE_CAPACITY",
+      "QPACK_BLOCKED_STREAMS",
+      "GREASE_0x597c4ccfe"
+    ]
+  },
+  "h3": {
+    "uni_streams": [
+      "control",
+      "qpack_encoder",
+      "qpack_decoder",
+      "control",
+      "qpack_encoder"
+    ],
+    "control_frames": [
+      "SETTINGS"
+    ],
+    "pseudo_headers": "m,s,a,p",
+    "header_order": [
+      "x-crashlytics-os-display-version",
+      "accept",
+      "x-crashlytics-api-client-version",
+      "x-crashlytics-installation-id",
+      "accept-language",
+      "x-crashlytics-device-model",
+      "accept-encoding",
+      "priority",
+      "user-agent",
+      "x-crashlytics-os-build-version"
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+mitmweb --mode wireguard -s "C:\Users\Admin\Desktop\PROJECTS\PeakTLS\scripts\mitm_h3_fingerprint.py"

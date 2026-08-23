@@ -1,0 +1,369 @@
+{
+  "_capture": {
+    "endpoint": "https://fp.impersonate.pro/api/http2",
+    "preset": "spotify-9.1.72-ios-16.7.16",
+    "observed_utc": "2026-08-16",
+    "note": "Verbatim third-party observation, captured by Http2ImpersonateLiveParityTests with TLSCLIENT_LIVE_CAPTURE_DIR set. Regenerate the same way. This is the SECOND independent fingerprint observer; tls3.peet.ws is the first (Fixtures/peet-*.json). Fields that vary per connection (GREASE code points in tls.cipher_suites / tls.extensions / supported_groups / key_share, and the padding extension raw bytes) are recorded here as evidence but are NOT asserted by the test.",
+    "redacted": [],
+    "redaction_note": "Nothing needed redacting: unlike tls3.peet.ws, this service reports no caller IP, no TCP/IP stack observation and no session/random material. tls.authority is the service’s own hostname, not ours."
+  },
+  "response": {
+    "info": "HTTP/2 fingerprint captured from the active TLS connection.",
+    "protocol": "http2",
+    "http2": {
+      "akamai_text": "4:2097152;3:100|10485760|0|m,s,p,a",
+      "akamai_hash": "d5fcbdc393757341115a861bf8d23265",
+      "settings": [
+        {
+          "id": 4,
+          "name": "SETTINGS_INITIAL_WINDOW_SIZE",
+          "value": 2097152
+        },
+        {
+          "id": 3,
+          "name": "SETTINGS_MAX_CONCURRENT_STREAMS",
+          "value": 100
+        }
+      ],
+      "window_updates": [
+        10485760
+      ],
+      "priority": 0,
+      "headers_frame": {
+        "flags": [
+          "EndStream (0x1)",
+          "EndHeaders (0x4)"
+        ]
+      },
+      "header_order": [
+        ":method",
+        ":scheme",
+        ":path",
+        ":authority",
+        "accept",
+        "accept-language",
+        "user-agent",
+        "accept-encoding"
+      ],
+      "headers": [
+        {
+          "name": ":method",
+          "value": "GET"
+        },
+        {
+          "name": ":scheme",
+          "value": "https"
+        },
+        {
+          "name": ":path",
+          "value": "/api/http2"
+        },
+        {
+          "name": ":authority",
+          "value": "fp.impersonate.pro"
+        },
+        {
+          "name": "accept",
+          "value": "*/*"
+        },
+        {
+          "name": "accept-language",
+          "value": "en-GB,en;q=0.9"
+        },
+        {
+          "name": "user-agent",
+          "value": "Spotify/9.1.72 iOS/16.7.16 (iPhone10,3)"
+        },
+        {
+          "name": "accept-encoding",
+          "value": "gzip, deflate, br"
+        }
+      ]
+    },
+    "tls": {
+      "ja3": {
+        "text": "771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171,0-23-65281-10-11-16-5-13-18-51-45-43-27-21,29-23-24-25,0",
+        "hash": "b76d503360ae441d410a85a7f8d648ab"
+      },
+      "ja3n": {
+        "text": "771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171,0-5-10-11-13-16-18-21-23-27-43-45-51-65281,29-23-24-25,0",
+        "hash": "4ae9619a31749ee24c7e77ec3162be41"
+      },
+      "cipher_suites": [
+        {
+          "name": "GREASE",
+          "value": 64250
+        },
+        {
+          "name": "TLS_AES_128_GCM_SHA256",
+          "value": 4865
+        },
+        {
+          "name": "TLS_AES_256_GCM_SHA384",
+          "value": 4866
+        },
+        {
+          "name": "TLS_CHACHA20_POLY1305_SHA256",
+          "value": 4867
+        },
+        {
+          "name": "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+          "value": 49196
+        },
+        {
+          "name": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "value": 49195
+        },
+        {
+          "name": "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+          "value": 52393
+        },
+        {
+          "name": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+          "value": 49200
+        },
+        {
+          "name": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+          "value": 49199
+        },
+        {
+          "name": "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+          "value": 52392
+        },
+        {
+          "name": "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+          "value": 49162
+        },
+        {
+          "name": "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+          "value": 49161
+        },
+        {
+          "name": "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+          "value": 49172
+        },
+        {
+          "name": "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+          "value": 49171
+        }
+      ],
+      "extensions": [
+        {
+          "id": 2570,
+          "name": "GREASE"
+        },
+        {
+          "id": 0,
+          "name": "server_name",
+          "data": "fp.impersonate.pro"
+        },
+        {
+          "id": 23,
+          "name": "extended_master_secret",
+          "data": {}
+        },
+        {
+          "id": 65281,
+          "name": "renegotiation_info",
+          "data": {
+            "length": 1,
+            "raw": "00"
+          }
+        },
+        {
+          "id": 10,
+          "name": "supported_groups",
+          "data": {
+            "groups": [
+              {
+                "name": "GREASE",
+                "value": 51914
+              },
+              {
+                "name": "X25519",
+                "value": 29
+              },
+              {
+                "name": "P-256",
+                "value": 23
+              },
+              {
+                "name": "P-384",
+                "value": 24
+              },
+              {
+                "name": "P-521",
+                "value": 25
+              }
+            ]
+          }
+        },
+        {
+          "id": 11,
+          "name": "ec_point_formats",
+          "data": {
+            "length": 2,
+            "raw": "0100"
+          }
+        },
+        {
+          "id": 16,
+          "name": "alpn",
+          "data": [
+            "h2",
+            "http/1.1"
+          ]
+        },
+        {
+          "id": 5,
+          "name": "status_request",
+          "data": {}
+        },
+        {
+          "id": 13,
+          "name": "signature_algorithms",
+          "data": {
+            "algorithms": [
+              {
+                "name": "ecdsa_secp256r1_sha256",
+                "value": 1027
+              },
+              {
+                "name": "rsa_pss_rsae_sha256",
+                "value": 2052
+              },
+              {
+                "name": "rsa_pkcs1_sha256",
+                "value": 1025
+              },
+              {
+                "name": "ecdsa_secp384r1_sha384",
+                "value": 1283
+              },
+              {
+                "name": "ecdsa_sha1",
+                "value": 515
+              },
+              {
+                "name": "rsa_pss_rsae_sha384",
+                "value": 2053
+              },
+              {
+                "name": "rsa_pss_rsae_sha384",
+                "value": 2053
+              },
+              {
+                "name": "rsa_pkcs1_sha384",
+                "value": 1281
+              },
+              {
+                "name": "rsa_pss_rsae_sha512",
+                "value": 2054
+              },
+              {
+                "name": "rsa_pkcs1_sha512",
+                "value": 1537
+              },
+              {
+                "name": "rsa_pkcs1_sha1",
+                "value": 513
+              }
+            ]
+          }
+        },
+        {
+          "id": 18,
+          "name": "signed_certificate_timestamp",
+          "data": {
+            "length": 0,
+            "raw": ""
+          }
+        },
+        {
+          "id": 51,
+          "name": "key_share",
+          "data": {
+            "shares": [
+              {
+                "group": {
+                  "name": "GREASE",
+                  "value": 51914
+                },
+                "key_length": 1
+              },
+              {
+                "group": {
+                  "name": "X25519",
+                  "value": 29
+                },
+                "key_length": 32
+              }
+            ]
+          }
+        },
+        {
+          "id": 45,
+          "name": "psk_key_exchange_modes",
+          "data": [
+            {
+              "name": "psk_dhe_ke",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "id": 43,
+          "name": "supported_versions",
+          "data": [
+            {
+              "name": "GREASE version",
+              "value": 47802
+            },
+            {
+              "name": "TLS 1.3",
+              "value": 772
+            },
+            {
+              "name": "TLS 1.2",
+              "value": 771
+            }
+          ]
+        },
+        {
+          "id": 27,
+          "name": "compress_certificate",
+          "data": {
+            "length": 3,
+            "raw": "020001",
+            "algorithms": [
+              {
+                "name": "zlib",
+                "value": 1
+              }
+            ]
+          }
+        },
+        {
+          "id": 6682,
+          "name": "GREASE"
+        },
+        {
+          "id": 21,
+          "name": "padding",
+          "data": {
+            "length": 206,
+            "raw": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      ],
+      "version": "TLSv1.3",
+      "alpn": "h2",
+      "cipher": {
+        "name": "TLS_AES_256_GCM_SHA384",
+        "protocol": "TLSv1.3",
+        "bits": 256
+      },
+      "authority": "fp.impersonate.pro"
+    }
+  }
+}

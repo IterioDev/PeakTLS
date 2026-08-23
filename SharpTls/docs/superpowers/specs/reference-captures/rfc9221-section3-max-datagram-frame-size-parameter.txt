@@ -1,0 +1,77 @@
+RFC 9221 Section 3 - Transport Parameter (complete)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9221.txt on 2026-08-20.
+Covers 3 Transport Parameter in full: the max_datagram_frame_size parameter
+(name and value=0x20 = 32), its variable-length-integer encoding, the meaning
+of the default 0 and of a non-zero value, the two PROTOCOL_VIOLATION rules, the
+RECOMMENDED value of 65535, its unidirectional nature, and its 0-RTT handling.
+Captured for subsystem B task B0 - transport parameter 32 in the Brave capture
+is the *advertisement*, and this section is all of what defines it.
+Deliberately NOT captured here: Section 4 Datagram Frame Types and Section 5
+Behavior and Usage, which define the DATAGRAM frames themselves. Those belong
+to task C17 and are to be extracted there.
+Correction to task B0's table, which says "3 and 4, the frames, belong to C17":
+in RFC 9221 the transport parameter definition IS Section 3, and the frames are
+Sections 4 and 5. The section numbers in that table are off by one; the split
+of subject matter it intends is preserved above.
+One sentence below bears directly on emitting this parameter for fingerprint
+match alone: "An endpoint MUST NOT send DATAGRAM frames until it has received
+the max_datagram_frame_size transport parameter with a non-zero value during
+the handshake" - advertising it does not by itself license sending anything.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+3.  Transport Parameter
+
+   Support for receiving the DATAGRAM frame types is advertised by means
+   of a QUIC transport parameter (name=max_datagram_frame_size,
+   value=0x20).  The max_datagram_frame_size transport parameter is an
+   integer value (represented as a variable-length integer) that
+   represents the maximum size of a DATAGRAM frame (including the frame
+   type, length, and payload) the endpoint is willing to receive, in
+   bytes.
+
+   The default for this parameter is 0, which indicates that the
+   endpoint does not support DATAGRAM frames.  A value greater than 0
+   indicates that the endpoint supports the DATAGRAM frame types and is
+   willing to receive such frames on this connection.
+
+   An endpoint MUST NOT send DATAGRAM frames until it has received the
+   max_datagram_frame_size transport parameter with a non-zero value
+   during the handshake (or during a previous handshake if 0-RTT is
+   used).  An endpoint MUST NOT send DATAGRAM frames that are larger
+   than the max_datagram_frame_size value it has received from its peer.
+   An endpoint that receives a DATAGRAM frame when it has not indicated
+   support via the transport parameter MUST terminate the connection
+   with an error of type PROTOCOL_VIOLATION.  Similarly, an endpoint
+   that receives a DATAGRAM frame that is larger than the value it sent
+   in its max_datagram_frame_size transport parameter MUST terminate the
+   connection with an error of type PROTOCOL_VIOLATION.
+
+   For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
+   of 65535 in the max_datagram_frame_size transport parameter to
+   indicate that this endpoint will accept any DATAGRAM frame that fits
+   inside a QUIC packet.
+
+   The max_datagram_frame_size transport parameter is a unidirectional
+   limit and indication of support of DATAGRAM frames.  Application
+   protocols that use DATAGRAM frames MAY choose to only negotiate and
+   use them in a single direction.
+
+   When clients use 0-RTT, they MAY store the value of the server's
+   max_datagram_frame_size transport parameter.  Doing so allows the
+   client to send DATAGRAM frames in 0-RTT packets.  When servers decide
+   to accept 0-RTT data, they MUST send a max_datagram_frame_size
+   transport parameter greater than or equal to the value they sent to
+   the client in the connection where they sent them the
+   NewSessionTicket message.  If a client stores the value of the
+   max_datagram_frame_size transport parameter with their 0-RTT state,
+   they MUST validate that the new value of the max_datagram_frame_size
+   transport parameter sent by the server in the handshake is greater
+   than or equal to the stored value; if not, the client MUST terminate
+   the connection with error PROTOCOL_VIOLATION.
+
+   Application protocols that use datagrams MUST define how they react
+   to the absence of the max_datagram_frame_size transport parameter.
+   If datagram support is integral to the application, the application
+   protocol can fail the handshake if the max_datagram_frame_size
+   transport parameter is not present.
+

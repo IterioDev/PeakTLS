@@ -1,0 +1,562 @@
+﻿[
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "56026,0,23,65281,10,11,16,5,13,18,51,45,43,27,6682",
+        "supported_groups":  "0x9a9a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "clienttoken.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x3a3a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "10794,0,23,65281,10,11,16,5,13,18,51,45,43,27,35466",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x8a8a,0x1302,0x1301,0x1303",
+        "extension_types":  "35466,0,10,16,5,13,18,51,45,43,57,27,27242",
+        "supported_groups":  "0x9a9a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xfafa,0x1302,0x1301,0x1303",
+        "extension_types":  "27242,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0x3a3a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "links.tospotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x9a9a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "43690,0,23,65281,10,11,16,5,13,18,51,45,43,27,47802",
+        "supported_groups":  "0x9a9a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303",
+        "extension_types":  "19018,0,10,16,5,13,18,51,45,43,57,27,39578",
+        "supported_groups":  "0xeaea,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x9a9a,0x1302,0x1301,0x1303",
+        "extension_types":  "56026,0,10,16,5,13,18,51,45,43,57,27,64250",
+        "supported_groups":  "0xcaca,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x4a4a,0x1302,0x1301,0x1303",
+        "extension_types":  "2570,0,10,16,5,13,18,51,45,43,57,27,64250",
+        "supported_groups":  "0x7a7a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x6a6a,0x1302,0x1301,0x1303",
+        "extension_types":  "27242,0,10,16,5,13,18,51,45,43,57,27,60138",
+        "supported_groups":  "0x8a8a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "35466,0,10,16,5,13,18,51,45,43,57,27,31354",
+        "supported_groups":  "0x0a0a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xcaca,0x1302,0x1301,0x1303",
+        "extension_types":  "6682,0,10,16,5,13,18,51,45,43,57,27,14906",
+        "supported_groups":  "0xaaaa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "dealer.g2.spotify.com",
+        "ja4":  "t13d2013h1_a09f3c656075_7f0f34a4126d",
+        "ja3":  "ecdf4f49dd59effc439639da29186671",
+        "ciphersuites":  "0x8a8a,0x1302,0x1303,0x1301,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013,0x009d,0x009c,0x0035,0x002f,0xc008,0xc012,0x000a",
+        "extension_types":  "6682,0,23,65281,10,11,16,5,13,18,51,45,43,27,47802",
+        "supported_groups":  "0x3a3a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "http/1.1"
+    },
+    {
+        "sni":  "apresolve.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "47802,0,23,65281,10,11,16,5,13,18,51,45,43,27,60138",
+        "supported_groups":  "0xbaba,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "27242,0,23,65281,10,11,16,5,13,18,51,45,43,27,39578",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x9a9a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "10794,0,23,65281,10,11,16,5,13,18,51,45,43,27,23130",
+        "supported_groups":  "0x4a4a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0xbaba,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "43690,0,23,65281,10,11,16,5,13,18,51,45,43,27,31354",
+        "supported_groups":  "0x4a4a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x9a9a,0x1302,0x1301,0x1303",
+        "extension_types":  "39578,0,10,16,5,13,18,51,45,43,57,27,10794",
+        "supported_groups":  "0x5a5a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "6682,0,23,65281,10,11,16,5,13,18,51,45,43,27,35466",
+        "supported_groups":  "0x5a5a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303",
+        "extension_types":  "6682,0,10,16,5,13,18,51,45,43,57,27,31354",
+        "supported_groups":  "0xbaba,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "misc.spotifycdn.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x4a4a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "39578,0,23,65281,10,11,16,5,13,18,51,45,43,27,31354",
+        "supported_groups":  "0xbaba,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x2a2a,0x1302,0x1301,0x1303",
+        "extension_types":  "39578,0,10,16,5,13,18,51,45,43,57,27,31354",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x4a4a,0x1302,0x1301,0x1303",
+        "extension_types":  "14906,0,10,16,5,13,18,51,45,43,57,27,56026",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303",
+        "extension_types":  "23130,0,10,16,5,13,18,51,45,43,57,27,14906",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xaaaa,0x1302,0x1301,0x1303",
+        "extension_types":  "23130,0,10,16,5,13,18,51,45,43,57,27,56026",
+        "supported_groups":  "0xbaba,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x7a7a,0x1302,0x1301,0x1303",
+        "extension_types":  "47802,0,10,16,5,13,18,51,45,43,57,27,56026",
+        "supported_groups":  "0x6a6a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xbaba,0x1302,0x1301,0x1303",
+        "extension_types":  "47802,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0x2a2a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x8a8a,0x1302,0x1301,0x1303",
+        "extension_types":  "14906,0,10,16,5,13,18,51,45,43,57,27,51914",
+        "supported_groups":  "0x8a8a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "6682,0,10,16,5,13,18,51,45,43,57,27,35466",
+        "supported_groups":  "0x8a8a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xfafa,0x1302,0x1301,0x1303",
+        "extension_types":  "35466,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0x8a8a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303",
+        "extension_types":  "31354,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x6a6a,0x1302,0x1301,0x1303",
+        "extension_types":  "43690,0,10,16,5,13,18,51,45,43,57,27,14906",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xeaea,0x1302,0x1301,0x1303",
+        "extension_types":  "10794,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0x6a6a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "47802,0,10,16,5,13,18,51,45,43,57,27,19018",
+        "supported_groups":  "0xeaea,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303",
+        "extension_types":  "39578,0,10,16,5,13,18,51,45,43,57,27,35466",
+        "supported_groups":  "0x7a7a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "login5.spotify.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x7a7a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "31354,0,23,65281,10,11,16,5,13,18,51,45,43,27,56026",
+        "supported_groups":  "0x9a9a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x2a2a,0x1302,0x1301,0x1303",
+        "extension_types":  "35466,0,10,16,5,13,18,51,45,43,57,27,19018",
+        "supported_groups":  "0x5a5a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "pickasso.spotifycdn.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0xfafa,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "10794,0,23,65281,10,11,16,5,13,18,51,45,43,27,35466",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303",
+        "extension_types":  "6682,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0x2a2a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303",
+        "extension_types":  "19018,0,10,16,5,13,18,51,45,43,57,27,23130",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "image-cdn-ak.spotifycdn.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "2570,0,23,65281,10,11,16,5,13,18,51,45,43,27,35466",
+        "supported_groups":  "0x2a2a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "video-cf.spotifycdn.com",
+        "ja4":  "t13d2013h2_a09f3c656075_7f0f34a4126d",
+        "ja3":  "ecdf4f49dd59effc439639da29186671",
+        "ciphersuites":  "0x7a7a,0x1302,0x1303,0x1301,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013,0x009d,0x009c,0x0035,0x002f,0xc008,0xc012,0x000a",
+        "extension_types":  "6682,0,23,65281,10,11,16,5,13,18,51,45,43,27,64250",
+        "supported_groups":  "0x0a0a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "video-cf.spotifycdn.com",
+        "ja4":  "t13d2013h1_a09f3c656075_7f0f34a4126d",
+        "ja3":  "ecdf4f49dd59effc439639da29186671",
+        "ciphersuites":  "0xaaaa,0x1302,0x1303,0x1301,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013,0x009d,0x009c,0x0035,0x002f,0xc008,0xc012,0x000a",
+        "extension_types":  "27242,0,23,65281,10,11,16,5,13,18,51,45,43,27,14906",
+        "supported_groups":  "0x0a0a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x9a9a,0x1302,0x1301,0x1303",
+        "extension_types":  "39578,0,10,16,5,13,18,51,45,43,57,27,2570",
+        "supported_groups":  "0xdada,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "56026,0,10,16,5,13,18,51,45,43,57,27,27242",
+        "supported_groups":  "0xeaea,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "43690,0,10,16,5,13,18,51,45,43,57,27,6682",
+        "supported_groups":  "0x9a9a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x2a2a,0x1302,0x1301,0x1303",
+        "extension_types":  "51914,0,10,16,5,13,18,51,45,43,57,27,35466",
+        "supported_groups":  "0x6a6a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xbaba,0x1302,0x1301,0x1303",
+        "extension_types":  "19018,0,10,16,5,13,18,51,45,43,57,27,27242",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xdada,0x1302,0x1301,0x1303",
+        "extension_types":  "64250,0,10,16,5,13,18,51,45,43,57,27,60138",
+        "supported_groups":  "0x1a1a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xeaea,0x1302,0x1301,0x1303",
+        "extension_types":  "60138,0,10,16,5,13,18,51,45,43,57,27,64250",
+        "supported_groups":  "0xaaaa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "spclient.wg.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x4a4a,0x1302,0x1301,0x1303",
+        "extension_types":  "51914,0,10,16,5,13,18,51,45,43,57,27,19018",
+        "supported_groups":  "0xeaea,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "concerts.spotifycdn.com",
+        "ja4":  "t13d1313h2_f57a46bbacb6_7f0f34a4126d",
+        "ja3":  "8527da8b8a640065e72ec6b6f99764f3",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303,0xc02c,0xc030,0xc02b,0xcca9,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013",
+        "extension_types":  "27242,0,23,65281,10,11,16,5,13,18,51,45,43,27,47802",
+        "supported_groups":  "0xaaaa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0xcaca,0x1302,0x1301,0x1303",
+        "extension_types":  "64250,0,10,16,5,13,18,51,45,43,57,27,14906",
+        "supported_groups":  "0x6a6a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x1a1a,0x1302,0x1301,0x1303",
+        "extension_types":  "14906,0,10,16,5,13,18,51,45,43,57,27,60138",
+        "supported_groups":  "0x7a7a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "gew1-spclient.spotify.com",
+        "ja4":  "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+        "ja3":  "2f9431e877b01e163774ae4ae0df9ded",
+        "ciphersuites":  "0x0a0a,0x1302,0x1301,0x1303",
+        "extension_types":  "6682,0,10,16,5,13,18,51,45,43,57,27,2570",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h3"
+    },
+    {
+        "sni":  "video-cf.spotifycdn.com",
+        "ja4":  "t13d2013h2_a09f3c656075_7f0f34a4126d",
+        "ja3":  "ecdf4f49dd59effc439639da29186671",
+        "ciphersuites":  "0x9a9a,0x1302,0x1303,0x1301,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013,0x009d,0x009c,0x0035,0x002f,0xc008,0xc012,0x000a",
+        "extension_types":  "60138,0,23,65281,10,11,16,5,13,18,51,45,43,27,51914",
+        "supported_groups":  "0x6a6a,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "h2,http/1.1"
+    },
+    {
+        "sni":  "video-cf.spotifycdn.com",
+        "ja4":  "t13d2013h1_a09f3c656075_7f0f34a4126d",
+        "ja3":  "ecdf4f49dd59effc439639da29186671",
+        "ciphersuites":  "0xbaba,0x1302,0x1303,0x1301,0xc02c,0xc02b,0xcca9,0xc030,0xc02f,0xcca8,0xc00a,0xc009,0xc014,0xc013,0x009d,0x009c,0x0035,0x002f,0xc008,0xc012,0x000a",
+        "extension_types":  "47802,0,23,65281,10,11,16,5,13,18,51,45,43,27,35466",
+        "supported_groups":  "0xfafa,0x11ec,0x001d,0x0017,0x0018,0x0019",
+        "sig_hash_algs":  "0x0403,0x0804,0x0401,0x0503,0x0805,0x0805,0x0501,0x0806,0x0601,0x0201",
+        "alpn":  "http/1.1"
+    }
+]

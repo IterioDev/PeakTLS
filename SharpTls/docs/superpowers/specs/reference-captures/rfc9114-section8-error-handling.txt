@@ -1,0 +1,111 @@
+RFC 9114 Section 8 - Error Handling (complete: 8, 8.1 HTTP/3 Error Codes)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9114.txt on 2026-08-19.
+Captured for subsystem C task C0. Ground truth for the application error code
+that goes into a QUIC application CONNECTION_CLOSE or a STOP_SENDING/RESET.
+8.1 defines 17 codes, H3_NO_ERROR (0x0100) through H3_VERSION_FALLBACK
+(0x0110) with no gaps - derived by counting the lines in the captured 8.1 body
+that match ^   H3_[A-Z_]+ \(0x, which is 17, and by reading their values off:
+they run 0x0100..0x0110 inclusive, and 0x110 - 0x100 + 1 = 17 reconciles.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+8.  Error Handling
+
+   When a stream cannot be completed successfully, QUIC allows the
+   application to abruptly terminate (reset) that stream and communicate
+   a reason; see Section 2.4 of [QUIC-TRANSPORT].  This is referred to
+   as a "stream error".  An HTTP/3 implementation can decide to close a
+   QUIC stream and communicate the type of error.  Wire encodings of
+   error codes are defined in Section 8.1.  Stream errors are distinct
+   from HTTP status codes that indicate error conditions.  Stream errors
+   indicate that the sender did not transfer or consume the full request
+   or response, while HTTP status codes indicate the result of a request
+   that was successfully received.
+
+   If an entire connection needs to be terminated, QUIC similarly
+   provides mechanisms to communicate a reason; see Section 5.3 of
+   [QUIC-TRANSPORT].  This is referred to as a "connection error".
+   Similar to stream errors, an HTTP/3 implementation can terminate a
+   QUIC connection and communicate the reason using an error code from
+   Section 8.1.
+
+   Although the reasons for closing streams and connections are called
+   "errors", these actions do not necessarily indicate a problem with
+   the connection or either implementation.  For example, a stream can
+   be reset if the requested resource is no longer needed.
+
+   An endpoint MAY choose to treat a stream error as a connection error
+   under certain circumstances, closing the entire connection in
+   response to a condition on a single stream.  Implementations need to
+   consider the impact on outstanding requests before making this
+   choice.
+
+   Because new error codes can be defined without negotiation (see
+   Section 9), use of an error code in an unexpected context or receipt
+   of an unknown error code MUST be treated as equivalent to
+   H3_NO_ERROR.  However, closing a stream can have other effects
+   regardless of the error code; for example, see Section 4.1.
+
+8.1.  HTTP/3 Error Codes
+
+   The following error codes are defined for use when abruptly
+   terminating streams, aborting reading of streams, or immediately
+   closing HTTP/3 connections.
+
+   H3_NO_ERROR (0x0100):  No error.  This is used when the connection or
+      stream needs to be closed, but there is no error to signal.
+
+   H3_GENERAL_PROTOCOL_ERROR (0x0101):  Peer violated protocol
+      requirements in a way that does not match a more specific error
+      code or endpoint declines to use the more specific error code.
+
+   H3_INTERNAL_ERROR (0x0102):  An internal error has occurred in the
+      HTTP stack.
+
+   H3_STREAM_CREATION_ERROR (0x0103):  The endpoint detected that its
+      peer created a stream that it will not accept.
+
+   H3_CLOSED_CRITICAL_STREAM (0x0104):  A stream required by the HTTP/3
+      connection was closed or reset.
+
+   H3_FRAME_UNEXPECTED (0x0105):  A frame was received that was not
+      permitted in the current state or on the current stream.
+
+   H3_FRAME_ERROR (0x0106):  A frame that fails to satisfy layout
+      requirements or with an invalid size was received.
+
+   H3_EXCESSIVE_LOAD (0x0107):  The endpoint detected that its peer is
+      exhibiting a behavior that might be generating excessive load.
+
+   H3_ID_ERROR (0x0108):  A stream ID or push ID was used incorrectly,
+      such as exceeding a limit, reducing a limit, or being reused.
+
+   H3_SETTINGS_ERROR (0x0109):  An endpoint detected an error in the
+      payload of a SETTINGS frame.
+
+   H3_MISSING_SETTINGS (0x010a):  No SETTINGS frame was received at the
+      beginning of the control stream.
+
+   H3_REQUEST_REJECTED (0x010b):  A server rejected a request without
+      performing any application processing.
+
+   H3_REQUEST_CANCELLED (0x010c):  The request or its response
+      (including pushed response) is cancelled.
+
+   H3_REQUEST_INCOMPLETE (0x010d):  The client's stream terminated
+      without containing a fully formed request.
+
+   H3_MESSAGE_ERROR (0x010e):  An HTTP message was malformed and cannot
+      be processed.
+
+   H3_CONNECT_ERROR (0x010f):  The TCP connection established in
+      response to a CONNECT request was reset or abnormally closed.
+
+   H3_VERSION_FALLBACK (0x0110):  The requested operation cannot be
+      served over HTTP/3.  The peer should retry over HTTP/1.1.
+
+   Error codes of the format 0x1f * N + 0x21 for non-negative integer
+   values of N are reserved to exercise the requirement that unknown
+   error codes be treated as equivalent to H3_NO_ERROR (Section 9).
+   Implementations SHOULD select an error code from this space with some
+   probability when they would have sent H3_NO_ERROR.

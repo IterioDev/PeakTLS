@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.0.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpTls/SharpTls.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../tools/SharpTls.Fuzz/ProtocolFuzzTargets.cs"
+             Link="Fuzzing/ProtocolFuzzTargets.cs" />
+    <Compile Include="../../tools/SharpTls.Fuzz/QuicRfcVectors.cs"
+             Link="Fuzzing/QuicRfcVectors.cs" />
+    <Compile Include="../../tools/SharpTls.ApiCompat/PublicApiContract.cs"
+             Link="Api/PublicApiContract.cs" />
+    <Compile Include="../../tools/SharpTls.PackageReproducibility/DeterministicNuGetPackage.cs"
+             Link="Packaging/DeterministicNuGetPackage.cs" />
+    <None Include="Api/PublicApi.Shipped.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Quic/quic-fingerprint-readout.snapshot.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Quic/quic-http3-fingerprint-readout.snapshot.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Quic/quic-recovery-readout.snapshot.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

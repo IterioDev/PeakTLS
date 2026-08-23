@@ -1,0 +1,73 @@
+RFC 9110 Section 6.4.1 - Content Semantics (complete: 6.4.1)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9110.txt on 2026-08-20.
+Captured because task C10b left the zero-DATA half of RFC 9114 Section 4.1.2's
+Content-Length rule carved out, and TlsQuicHttp3Request.cs names this section as
+the reason: "RFC 9110 s6.4.1 is NOT among this repository's captures, so writing
+that set out would be four constants nobody here can check". This is that
+section. Two corrections to the brief that ordered this capture:
+  - 6.4.1 is titled "Content Semantics", NOT "Content-Length". Content-Length is
+    RFC 9110 Section 8.6, and 8.6 is what RFC 9114 Section 4.1.2 actually cites
+    for it; see rfc9110-section8.6-content-length.txt, captured alongside this.
+  - 6.4.1 is nonetheless the right section for the carve-out, because 4.1.2's
+    rule is gated on a message being "defined as having content" / "defined as
+    never having content", and 6.4.1 is where that set is defined.
+What 6.4.1 actually says, where a summary would mislead:
+  - the never-having-content set is FIVE cases, not four: responses to HEAD, 2xx
+    responses to CONNECT, and all 1xx, 204, and 304 responses. The source
+    comment's list of four - "the response to a HEAD, a 204, a 304, a 2xx to a
+    CONNECT" - omits 1xx.
+  - the closing sentence is what decides the zero-DATA case: "All other
+    responses do include content, although that content might be of zero
+    length." A 200 declaring Content-Length: 1234 with no DATA frames is thus a
+    message "defined as having content" whose DATA sum is 0, so 4.1.2's mismatch
+    rule applies to it unchanged and it is malformed. The carve-out is narrow.
+  - the set is stated as flat declaratives. There is NO conformance keyword
+    anywhere in 6.4.1 - no MUST, no SHOULD, no MAY. All the strength lives in
+    RFC 9114 Section 4.1.2, which makes a malformed message a stream error of
+    type H3_MESSAGE_ERROR and forbids a client to accept a malformed response.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+6.4.1.  Content Semantics
+
+   The purpose of content in a request is defined by the method
+   semantics (Section 9).
+
+   For example, a representation in the content of a PUT request
+   (Section 9.3.4) represents the desired state of the target resource
+   after the request is successfully applied, whereas a representation
+   in the content of a POST request (Section 9.3.3) represents
+   information to be processed by the target resource.
+
+   In a response, the content's purpose is defined by the request
+   method, response status code (Section 15), and response fields
+   describing that content.  For example, the content of a 200 (OK)
+   response to GET (Section 9.3.1) represents the current state of the
+   target resource, as observed at the time of the message origination
+   date (Section 6.6.1), whereas the content of the same status code in
+   a response to POST might represent either the processing result or
+   the new state of the target resource after applying the processing.
+
+   The content of a 206 (Partial Content) response to GET contains
+   either a single part of the selected representation or a multipart
+   message body containing multiple parts of that representation, as
+   described in Section 15.3.7.
+
+   Response messages with an error status code usually contain content
+   that represents the error condition, such that the content describes
+   the error state and what steps are suggested for resolving it.
+
+   Responses to the HEAD request method (Section 9.3.2) never include
+   content; the associated response header fields indicate only what
+   their values would have been if the request method had been GET
+   (Section 9.3.1).
+
+   2xx (Successful) responses to a CONNECT request method
+   (Section 9.3.6) switch the connection to tunnel mode instead of
+   having content.
+
+   All 1xx (Informational), 204 (No Content), and 304 (Not Modified)
+   responses do not include content.
+
+   All other responses do include content, although that content might
+   be of zero length.

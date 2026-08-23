@@ -1,0 +1,87 @@
+# HTTP/3 fingerprint readout - SNAPSHOT
+
+SNAPSHOT. Every value in the "ours" column below was produced by
+TlsQuicHttp3FingerprintReadout from the QUIC STREAM frames this connection emitted,
+and NONE of it has an external source. Per A2's standing rule, a checked-in number
+with no external source is a snapshot and is labelled one: it pins what we do today,
+and it is evidence about nothing else. The "brave" column is the opposite - every
+one of its cells is quoted from
+docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md
+and none of it is measured here.
+
+## The perk string's first two segments
+
+    ours   1:65536;6:262144;7:100;51:1;GREASE | m,a,s,p
+    brave  1:65536;6:262144;7:100;51:1;GREASE | m,a,s,p
+
+## Segment 1, character for character against the capture's
+
+    ours   1:65536;6:262144;7:100;51:1;GREASE
+    brave  1:65536;6:262144;7:100;51:1;GREASE
+    identical
+
+## The rows
+
+| # | field | ours | brave | verdict |
+| --- | --- | --- | --- | --- |
+| 1 | settings 0x01 SETTINGS_QPACK_MAX_TABLE_CAPACITY | 65536 | 65536 | match |
+| 2 | settings 0x06 SETTINGS_MAX_FIELD_SECTION_SIZE | 262144 | 262144 | match |
+| 3 | settings 0x07 SETTINGS_QPACK_BLOCKED_STREAMS | 100 | 100 | match |
+| 4 | settings 0x33 SETTINGS_H3_DATAGRAM | 1 | 1 | match |
+| 5 | settings reserved (GREASE) pair | present | present | match |
+| 6 | settings wire order | 1,6,7,51,GREASE | 1,6,7,51,GREASE | not-yet-known-from-the-capture |
+| 7 | perk segment 1, whole | 1:65536;6:262144;7:100;51:1;GREASE | 1:65536;6:262144;7:100;51:1;GREASE | match |
+| 8 | pseudo-header order (perk segment 2) | m,a,s,p | m,a,s,p | match |
+| 9 | s4.2.2 receive half - the limit we advertise | 262144 | 262144 | match |
+| 10 | s4.2.2 send half - the emitted field section against that limit | 4 field lines, within | <= 262144 | match |
+| 11 | unidirectional stream open order | control,qpack-encoder,qpack-decoder | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 12 | QPACK Huffman flag policy | H set on 2 of 2 string literals | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 13 | QPACK name-match policy, s4.5.2 against s4.5.4 | 4.5.2,4.5.4,4.5.2,4.5.4 | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 14 | reserved (GREASE) request-stream frame - N | none emitted | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 15 | reserved (GREASE) request-stream frame - payload | none emitted | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 16 | reserved (GREASE) request-stream frame - position | none emitted | not-published-by-the-capture | not-yet-known-from-the-capture |
+| 17 | ALPN token (RFC 9114 s3.2) | h3 | h3 | match |
+| 18 | transport parameter 0x04 initial_max_data [subsystem B] | 15728640 | 15728640 | match |
+| 19 | transport parameter 0x05 initial_max_stream_data_bidi_local [subsystem B] | 6291456 | 6291456 | match |
+| 20 | transport parameter 0x06 initial_max_stream_data_bidi_remote [subsystem B] | 6291456 | 6291456 | match |
+| 21 | transport parameter 0x07 initial_max_stream_data_uni [subsystem B] | 6291456 | 6291456 | match |
+| 22 | transport parameter 0x08 initial_max_streams_bidi [subsystem B] | 100 | 100 | match |
+| 23 | transport parameter 0x09 initial_max_streams_uni [subsystem B] | 103 | 103 | match |
+| 24 | transport parameter wire order (perk segment 3) [subsystem B] | 15,14,4,5,6,7,8,9 | 12584,GREASE,32,9,8,7,5,15,17,1,6,4,12583,3 | MISMATCH |
+| 25 | connection ID length pair (perk segment 4) [subsystem B] | 5,8 | 0,8 | MISMATCH |
+
+## Verdict counts, derived from the rows above
+
+    rows                            25
+    match                           16
+    MISMATCH                        2
+    not-yet-known-from-the-capture  7
+    16 + 2 + 7 = 25
+
+## Notes on the third column
+
+SETTINGS WIRE ORDER IS MEASURED AND STILL NOT-YET-KNOWN, and those are not in
+tension. Finding 7: the capture's identifiers are "1, 6, 7, 51, 126585778853 -
+strictly ascending. So Chromium's emission order and a sort by identifier are
+indistinguishable from this capture alone." Reading OUR order off the wire, which
+this readout does, says nothing about BRAVE's. A capture of Chromium emitting a
+non-ascending set retires it.
+
+THE ALPN ROW IS DECODED FROM THE CLIENTHELLO. It used to sit in the third column
+with a pasted grep result for a value, because this readout was never handed the
+ClientHello. It is now: Describe requires the encoded handshake message and the row
+is read back out of it by the library's own importer, so the ours column is a
+function of emitted bytes like every other row here. The whole offered list is
+compared against the capture's single token, not searched for h3 inside it - RFC
+9114 s3.2 lets a conforming client offer more, and one that does is a different
+client.
+
+THE ROWS MARKED [subsystem B] ARE NOT SCORED AGAINST C. Perk segments 3 and 4 live
+in the ClientHello, under RFC 9001 s5.2's Initial keys, and TlsQuicFingerprintReadout
+already reads them off the emitted datagrams - it is the instrument, not this file.
+The transport-parameter wire order MISMATCH is task 11's finding re-rendered so a
+perk readout is not silently missing a perk segment, not a fresh filing against C.
+
+THE FIVE SETTINGS PAIRS AND THE PSEUDO-HEADER ORDER ARE NEVER not-yet-known. The
+capture publishes both affirmatively - its SETTINGS table at lines 64-68 and its
+pseudo-header line at 70 - so those rows carry match or MISMATCH and nothing else.

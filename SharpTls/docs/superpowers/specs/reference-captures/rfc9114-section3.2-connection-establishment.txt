@@ -1,0 +1,38 @@
+RFC 9114 Section 3.2 - Connection Establishment (complete: 3.2)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9114.txt on 2026-08-19.
+Captured for subsystem C task C0. Twenty-five lines, three of them normative.
+Ground truth for the ALPN token "h3" ("HTTP/3 support is indicated by selecting
+the ALPN token \"h3\" in the TLS handshake"), for the client SNI MUST, and for
+the rule C1 depends on: "After the QUIC connection is established, a SETTINGS
+frame MUST be sent by each endpoint as the initial frame of their respective
+HTTP control stream."
+Note what is NOT here: 3.2 states the SETTINGS-first MUST but names no error
+code for violating it. H3_MISSING_SETTINGS and H3_FRAME_UNEXPECTED are defined
+in 8.1 and attached to this rule in 6.2.1, not in 3.2.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+3.2.  Connection Establishment
+
+   HTTP/3 relies on QUIC version 1 as the underlying transport.  The use
+   of other QUIC transport versions with HTTP/3 MAY be defined by future
+   specifications.
+
+   QUIC version 1 uses TLS version 1.3 or greater as its handshake
+   protocol.  HTTP/3 clients MUST support a mechanism to indicate the
+   target host to the server during the TLS handshake.  If the server is
+   identified by a domain name ([DNS-TERMS]), clients MUST send the
+   Server Name Indication (SNI; [RFC6066]) TLS extension unless an
+   alternative mechanism to indicate the target host is used.
+
+   QUIC connections are established as described in [QUIC-TRANSPORT].
+   During connection establishment, HTTP/3 support is indicated by
+   selecting the ALPN token "h3" in the TLS handshake.  Support for
+   other application-layer protocols MAY be offered in the same
+   handshake.
+
+   While connection-level options pertaining to the core QUIC protocol
+   are set in the initial crypto handshake, settings specific to HTTP/3
+   are conveyed in the SETTINGS frame.  After the QUIC connection is
+   established, a SETTINGS frame MUST be sent by each endpoint as the
+   initial frame of their respective HTTP control stream.

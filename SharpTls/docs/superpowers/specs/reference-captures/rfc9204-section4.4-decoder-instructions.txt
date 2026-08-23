@@ -1,0 +1,91 @@
+RFC 9204 Section 4.4 - Decoder Instructions (complete: 4.4, 4.4.1 Section
+Acknowledgment, 4.4.2 Stream Cancellation, 4.4.3 Insert Count Increment;
+stops before 4.5 Field Line Representations)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9204.txt on 2026-08-20.
+Captured for subsystem C task C15, fetched alongside 4.3 in task C14 to avoid a
+second fetch of the same document. These are the three instructions WE send on
+our decoder stream (stream type 0x03, Section 4.2) once the dynamic table is
+live; C14 builds the table, C15 wires it up and owns these.
+The three opcodes are again a prefix tree and again not fixed width:
+  1xxxxxxx  Section Acknowledgment  (4.4.1), stream ID is 7+
+  01xxxxxx  Stream Cancellation     (4.4.2), stream ID is 6+
+  00xxxxxx  Insert Count Increment  (4.4.3), Increment is 6+
+4.4.1 is emitted only "after processing an encoded field section whose declared
+Required Insert Count is not zero" - a section that used no dynamic entries is
+NOT acknowledged, and emitting one anyway is what 4.4.1's own MUST calls a
+QPACK_DECODER_STREAM_ERROR at the encoder. A decoder that acknowledges every
+section is not merely chatty, it is generating a connection error for the peer.
+4.4.3 carries the mirror-image trap: "An encoder that receives an Increment
+field equal to zero ... MUST treat this as a connection error of type
+QPACK_DECODER_STREAM_ERROR." A zero Increment is never a legal no-op, so the
+natural "flush whatever changed" loop must suppress itself when nothing did.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+4.4.  Decoder Instructions
+
+   A decoder sends decoder instructions on the decoder stream to inform
+   the encoder about the processing of field sections and table updates
+   to ensure consistency of the dynamic table.
+
+4.4.1.  Section Acknowledgment
+
+   After processing an encoded field section whose declared Required
+   Insert Count is not zero, the decoder emits a Section Acknowledgment
+   instruction.  The instruction starts with the '1' 1-bit pattern,
+   followed by the field section's associated stream ID encoded as a
+   7-bit prefix integer; see Section 4.1.1.
+
+   This instruction is used as described in Sections 2.1.4 and 2.2.2.
+
+     0   1   2   3   4   5   6   7
+   +---+---+---+---+---+---+---+---+
+   | 1 |      Stream ID (7+)       |
+   +---+---------------------------+
+
+                      Figure 9: Section Acknowledgment
+
+   If an encoder receives a Section Acknowledgment instruction referring
+   to a stream on which every encoded field section with a non-zero
+   Required Insert Count has already been acknowledged, this MUST be
+   treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
+
+   The Section Acknowledgment instruction might increase the Known
+   Received Count; see Section 2.1.4.
+
+4.4.2.  Stream Cancellation
+
+   When a stream is reset or reading is abandoned, the decoder emits a
+   Stream Cancellation instruction.  The instruction starts with the
+   '01' 2-bit pattern, followed by the stream ID of the affected stream
+   encoded as a 6-bit prefix integer.
+
+   This instruction is used as described in Section 2.2.2.
+
+     0   1   2   3   4   5   6   7
+   +---+---+---+---+---+---+---+---+
+   | 0 | 1 |     Stream ID (6+)    |
+   +---+---+-----------------------+
+
+                       Figure 10: Stream Cancellation
+
+4.4.3.  Insert Count Increment
+
+   The Insert Count Increment instruction starts with the '00' 2-bit
+   pattern, followed by the Increment encoded as a 6-bit prefix integer.
+   This instruction increases the Known Received Count (Section 2.1.4)
+   by the value of the Increment parameter.  The decoder should send an
+   Increment value that increases the Known Received Count to the total
+   number of dynamic table insertions and duplications processed so far.
+
+     0   1   2   3   4   5   6   7
+   +---+---+---+---+---+---+---+---+
+   | 0 | 0 |     Increment (6+)    |
+   +---+---+-----------------------+
+
+                     Figure 11: Insert Count Increment
+
+   An encoder that receives an Increment field equal to zero, or one
+   that increases the Known Received Count beyond what the encoder has
+   sent, MUST treat this as a connection error of type
+   QPACK_DECODER_STREAM_ERROR.

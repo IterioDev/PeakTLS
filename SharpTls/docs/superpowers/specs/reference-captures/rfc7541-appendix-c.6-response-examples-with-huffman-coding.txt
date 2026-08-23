@@ -1,0 +1,296 @@
+RFC 7541 Appendix C.6 - Response Examples with Huffman Coding
+(complete: C.6, C.6.1 First Response, C.6.2 Second Response, C.6.3 Third
+Response)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc7541.txt on 2026-08-19.
+Captured for subsystem C task C0. The response half of the only published
+Huffman vectors; see rfc7541-appendix-c.4-request-examples-with-huffman-
+coding.txt. C.6 exercises longer literals than C.4 - the date and
+set-cookie values - and so covers Huffman codes longer than 8 bits and the
+padding-to-octet-boundary rule that C.4's short values do not reach.
+The same warning applies: the representation octets, the table indices and the
+eviction commentary are HPACK's. Only the Huffman-coded strings transfer.
+This RFC predates the unpaginated RFC text format; see the note in
+rfc7541-appendix-b-huffman-code.txt on page furniture.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+C.6.  Response Examples with Huffman Coding
+
+   This section shows the same examples as the previous section but uses
+   Huffman encoding for the literal values.  The HTTP/2 setting
+   parameter SETTINGS_HEADER_TABLE_SIZE is set to the value of 256
+   octets, causing some evictions to occur.  The eviction mechanism uses
+   the length of the decoded literal values, so the same evictions occur
+   as in the previous section.
+
+C.6.1.  First Response
+
+   Header list to encode:
+
+   :status: 302
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:21 GMT
+   location: https://www.example.com
+
+   Hex dump of encoded data:
+
+   4882 6402 5885 aec3 771a 4b61 96d0 7abe | H.d.X...w.Ka..z.
+   9410 54d4 44a8 2005 9504 0b81 66e0 82a6 | ..T.D. .....f...
+   2d1b ff6e 919d 29ad 1718 63c7 8f0b 97c8 | -..n..)...c.....
+   e9ae 82ae 43d3                          | ....C.
+
+
+
+Peon & Ruellan               Standards Track                   [Page 49]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Decoding process:
+
+   48                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 8)
+                                           |     :status
+   82                                      |   Literal value (len = 2)
+                                           |     Huffman encoded:
+   6402                                    | d.
+                                           |     Decoded:
+                                           | 302
+                                           | -> :status: 302
+   58                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 24)
+                                           |     cache-control
+   85                                      |   Literal value (len = 5)
+                                           |     Huffman encoded:
+   aec3 771a 4b                            | ..w.K
+                                           |     Decoded:
+                                           | private
+                                           | -> cache-control: private
+   61                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 33)
+                                           |     date
+   96                                      |   Literal value (len = 22)
+                                           |     Huffman encoded:
+   d07a be94 1054 d444 a820 0595 040b 8166 | .z...T.D. .....f
+   e082 a62d 1bff                          | ...-..
+                                           |     Decoded:
+                                           | Mon, 21 Oct 2013 20:13:21
+                                           | GMT
+                                           | -> date: Mon, 21 Oct 2013
+                                           |   20:13:21 GMT
+   6e                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 46)
+                                           |     location
+   91                                      |   Literal value (len = 17)
+                                           |     Huffman encoded:
+   9d29 ad17 1863 c78f 0b97 c8e9 ae82 ae43 | .)...c.........C
+   d3                                      | .
+                                           |     Decoded:
+                                           | https://www.example.com
+                                           | -> location:
+                                           |   https://www.example.com
+
+
+
+
+
+
+
+
+Peon & Ruellan               Standards Track                   [Page 50]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  63) location: https://www.example.com
+   [  2] (s =  65) date: Mon, 21 Oct 2013 20:13:21 GMT
+   [  3] (s =  52) cache-control: private
+   [  4] (s =  42) :status: 302
+         Table size: 222
+
+   Decoded header list:
+
+   :status: 302
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:21 GMT
+   location: https://www.example.com
+
+C.6.2.  Second Response
+
+   The (":status", "302") header field is evicted from the dynamic table
+   to free space to allow adding the (":status", "307") header field.
+
+   Header list to encode:
+
+   :status: 307
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:21 GMT
+   location: https://www.example.com
+
+   Hex dump of encoded data:
+
+   4883 640e ffc1 c0bf                     | H.d.....
+
+   Decoding process:
+
+   48                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 8)
+                                           |     :status
+   83                                      |   Literal value (len = 3)
+                                           |     Huffman encoded:
+   640e ff                                 | d..
+                                           |     Decoded:
+                                           | 307
+                                           | - evict: :status: 302
+                                           | -> :status: 307
+   c1                                      | == Indexed - Add ==
+                                           |   idx = 65
+                                           | -> cache-control: private
+   c0                                      | == Indexed - Add ==
+                                           |   idx = 64
+
+
+
+Peon & Ruellan               Standards Track                   [Page 51]
+
+RFC 7541                          HPACK                         May 2015
+
+
+                                           | -> date: Mon, 21 Oct 2013
+                                           |   20:13:21 GMT
+   bf                                      | == Indexed - Add ==
+                                           |   idx = 63
+                                           | -> location:
+                                           |   https://www.example.com
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  42) :status: 307
+   [  2] (s =  63) location: https://www.example.com
+   [  3] (s =  65) date: Mon, 21 Oct 2013 20:13:21 GMT
+   [  4] (s =  52) cache-control: private
+         Table size: 222
+
+   Decoded header list:
+
+   :status: 307
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:21 GMT
+   location: https://www.example.com
+
+C.6.3.  Third Response
+
+   Several header fields are evicted from the dynamic table during the
+   processing of this header list.
+
+   Header list to encode:
+
+   :status: 200
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:22 GMT
+   location: https://www.example.com
+   content-encoding: gzip
+   set-cookie: foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1
+
+   Hex dump of encoded data:
+
+   88c1 6196 d07a be94 1054 d444 a820 0595 | ..a..z...T.D. ..
+   040b 8166 e084 a62d 1bff c05a 839b d9ab | ...f...-...Z....
+   77ad 94e7 821d d7f2 e6c7 b335 dfdf cd5b | w..........5...[
+   3960 d5af 2708 7f36 72c1 ab27 0fb5 291f | 9`..'..6r..'..).
+   9587 3160 65c0 03ed 4ee5 b106 3d50 07   | ..1`e...N...=P.
+
+
+
+
+
+
+
+
+Peon & Ruellan               Standards Track                   [Page 52]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Decoding process:
+
+   88                                      | == Indexed - Add ==
+                                           |   idx = 8
+                                           | -> :status: 200
+   c1                                      | == Indexed - Add ==
+                                           |   idx = 65
+                                           | -> cache-control: private
+   61                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 33)
+                                           |     date
+   96                                      |   Literal value (len = 22)
+                                           |     Huffman encoded:
+   d07a be94 1054 d444 a820 0595 040b 8166 | .z...T.D. .....f
+   e084 a62d 1bff                          | ...-..
+                                           |     Decoded:
+                                           | Mon, 21 Oct 2013 20:13:22
+                                           | GMT
+                                           | - evict: cache-control:
+                                           |   private
+                                           | -> date: Mon, 21 Oct 2013
+                                           |   20:13:22 GMT
+   c0                                      | == Indexed - Add ==
+                                           |   idx = 64
+                                           | -> location:
+                                           |   https://www.example.com
+   5a                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 26)
+                                           |     content-encoding
+   83                                      |   Literal value (len = 3)
+                                           |     Huffman encoded:
+   9bd9 ab                                 | ...
+                                           |     Decoded:
+                                           | gzip
+                                           | - evict: date: Mon, 21 Oct
+                                           |    2013 20:13:21 GMT
+                                           | -> content-encoding: gzip
+   77                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 55)
+                                           |     set-cookie
+   ad                                      |   Literal value (len = 45)
+                                           |     Huffman encoded:
+   94e7 821d d7f2 e6c7 b335 dfdf cd5b 3960 | .........5...[9`
+   d5af 2708 7f36 72c1 ab27 0fb5 291f 9587 | ..'..6r..'..)...
+   3160 65c0 03ed 4ee5 b106 3d50 07        | 1`e...N...=P.
+                                           |     Decoded:
+                                           | foo=ASDJKHQKBZXOQWEOPIUAXQ
+                                           | WEOIU; max-age=3600; versi
+
+
+
+Peon & Ruellan               Standards Track                   [Page 53]
+
+RFC 7541                          HPACK                         May 2015
+
+
+                                           | on=1
+                                           | - evict: location:
+                                           |   https://www.example.com
+                                           | - evict: :status: 307
+                                           | -> set-cookie: foo=ASDJKHQ
+                                           |   KBZXOQWEOPIUAXQWEOIU; ma
+                                           |   x-age=3600; version=1
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  98) set-cookie: foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU;
+                    max-age=3600; version=1
+   [  2] (s =  52) content-encoding: gzip
+   [  3] (s =  65) date: Mon, 21 Oct 2013 20:13:22 GMT
+         Table size: 215
+
+   Decoded header list:
+
+   :status: 200
+   cache-control: private
+   date: Mon, 21 Oct 2013 20:13:22 GMT
+   location: https://www.example.com
+   content-encoding: gzip
+   set-cookie: foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1

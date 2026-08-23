@@ -1,0 +1,30 @@
+RFC 9369 Section 5 - TLS Resumption and NEW_TOKEN Tokens (complete)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9369.txt on 2026-08-18.
+Requirements for session tickets and NEW_TOKEN tokens to be bound to the QUIC
+version they were issued on, so a version downgrade cannot silently reuse them.
+Extraction only - QUIC v2 is not implemented in phase A4-minimal. Ground truth
+for citation coverage only; retires the A2 audit's one open finding alongside
+Section 3.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+5.  TLS Resumption and NEW_TOKEN Tokens
+
+   TLS session tickets and NEW_TOKEN tokens are specific to the QUIC
+   version of the connection that provided them.  Clients MUST NOT use a
+   session ticket or token from a QUIC version 1 connection to initiate
+   a QUIC version 2 connection, and vice versa.  When a connection
+   includes compatible version negotiation, any issued server tokens are
+   considered to originate from the negotiated version, not the original
+   one.
+
+   Servers MUST validate the originating version of any session ticket
+   or token and not accept one issued from a different version.  A
+   rejected ticket results in falling back to a full TLS handshake,
+   without 0-RTT.  A rejected token results in the client address
+   remaining unverified, which limits the amount of data the server can
+   send.
+
+   After compatible version negotiation, any resulting session ticket
+   maps to the negotiated version rather than the original one.
+

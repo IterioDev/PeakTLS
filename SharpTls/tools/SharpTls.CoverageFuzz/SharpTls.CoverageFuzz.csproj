@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>SharpTls.CoverageFuzz</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SharpTls/SharpTls.csproj" />
+    <PackageReference Include="SharpFuzz" Version="2.3.0" />
+    <Compile Include="../SharpTls.Fuzz/ProtocolFuzzTargets.cs"
+             Link="Fuzzing/ProtocolFuzzTargets.cs" />
+    <Compile Include="../SharpTls.Fuzz/QuicRfcVectors.cs"
+             Link="Fuzzing/QuicRfcVectors.cs" />
+  </ItemGroup>
+</Project>

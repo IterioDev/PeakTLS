@@ -1,0 +1,118 @@
+{
+  "ts": 1787411008.876704,
+  "client_id": "279cfb31-1481-4296-93ef-256071f78620",
+  "peername": "('10.0.0.1', 54283)",
+  "transport": "quic",
+  "sni": "gew1-spclient.spotify.com",
+  "alpn": [
+    "h3"
+  ],
+  "ja4": "q13d0311h3_55b375c5d22e_f2a83c8e78ae",
+  "ja3": "48d08f334704479db85d91df80039756",
+  "ja3_string": "771,4866-4867-4865,0-10-16-5-13-18-51-45-43-57-27,4588-29-23-24-25,",
+  "ciphers": [
+    "0x4a4a",
+    "0x1302",
+    "0x1303",
+    "0x1301"
+  ],
+  "extensions": [
+    "0x4a4a",
+    "0x0000",
+    "0x000a",
+    "0x0010",
+    "0x0005",
+    "0x000d",
+    "0x0012",
+    "0x0033",
+    "0x002d",
+    "0x002b",
+    "0x0039",
+    "0x001b",
+    "0xaaaa"
+  ],
+  "supported_versions": [
+    "0x3a3a",
+    "0x0304"
+  ],
+  "supported_groups": [
+    "0x7a7a",
+    "0x11ec",
+    "0x001d",
+    "0x0017",
+    "0x0018",
+    "0x0019"
+  ],
+  "sig_algs": [
+    "0x0403",
+    "0x0804",
+    "0x0401",
+    "0x0503",
+    "0x0805",
+    "0x0805",
+    "0x0501",
+    "0x0806",
+    "0x0601",
+    "0x0201"
+  ],
+  "quic_transport_parameters": {
+    "active_connection_id_limit": 64,
+    "initial_source_connection_id": true,
+    "initial_max_data": 16777216,
+    "initial_max_stream_data_bidi_local": 2097152,
+    "initial_max_stream_data_bidi_remote": 2097152,
+    "initial_max_stream_data_uni": 2097152,
+    "initial_max_streams_uni": 8,
+    "unknown_0xff080808": "09",
+    "_order": [
+      "active_connection_id_limit",
+      "initial_source_connection_id",
+      "initial_max_data",
+      "initial_max_stream_data_bidi_local",
+      "initial_max_stream_data_bidi_remote",
+      "initial_max_stream_data_uni",
+      "initial_max_streams_uni",
+      "unknown_0xff080808"
+    ]
+  },
+  "client_random": "32aceecb4c8f244b68a8756a034e694777462ab78a6837f39543a4bb2862cbad",
+  "raw_client_hello": "16030305da010005d6030332aceecb4c8f244b68a8756a034e694777462ab78a6837f39543a4bb2862cbad0000084a4a130213031301010005a54a4a00000000001e001c000019676577312d7370636c69656e742e73706f746966792e636f6d000a000e000c7a7a11ec001d001700180019001000050003026833000500050100000000000d00160014040308040401050308050805050108060601020100120000003304ef04ed7a7a00010011ec04c0e4fbb0ad7256c2c78a75dba373ac2f46e86eb24533f6274a8d85c726e38c4869ce4310ce1e0b740eca5d8dda3bfd3401b020bac5cc68366553879c918400ba408998f93b776bab61c44c577089533fb708cbb2baa089575a0687c2a141e78c9e2a2397f28140995014e23664ba6a9471e273eec5808a090c1e7a6feef097bdd9ce46215d63b3127358533036b3e3f05280e96a3641c45f8406e66453e57a76373649d4a5a53cb2396fa97313eb9750bac830b767615291244556673c0fadb0ce78537d37603144069441641313b9bac4926972a8ab41973ac2040283a31b825aab91e84de89255d2b779d2f2ad8d4867a612b10dd54e9e5caedfb64d8f73c7e897084ebc2be3f33ba58b437b77000fe28e65764303f0abc74cae89a5b6609b8c8117b300287ac7bccd0ce23065009f5f3c66cc8336a59958b35883e388ad588181dfdac107d403e224b3021ac5d2f694539894d3a7242577b0e0704208787592000b91115bea214d051049b1152e473866f6a37c0691587d35249f200ae6578f233516c4b67876ccad37e28387b57f8d97646ba63e9c2057ba45bde2f1c97a871b5b9825d814615a160727121d8ed3c64aa42b2d458ea96a64c3488ac184538642895baa181777b97078194afa8cf1a61a43854590c1abfc064699b166e44a74b99007c399c7df390a7d2559d8d458d70503b848b41301c55129b757a70e6b3b3d97142309b979a28131ad7b49775338adf39a4a0ab12eeab0f057861295339e87b3a03bc1eda3234c27b09075733bf818cfb5737d490fd5fc935ab76c03b9ad37bab960c86a3daa64a318bd8f5205b6fb9ddb233ac57b1d555580085abb8d778d0fc45fb2287258ccc327f4b056fbba94d958ecb4b4026506eeca733a3c2e9c419a61f88c8400c16948898f37246a73a4322497ac5851b0179207010093a81d5f3b97aecc3c1f651f651bcecb779449a70cb3d5a9823c9d7f31086d2744db7cccf2ccc24d0c449ac191a540896671bb23d0858527c409976768f43740aa831407129d66736a53a6f0c701d41a06d98b8bb07646c08b53fa2b6ce426648041a6c527c89680643ef2c17ba4aac94a88e2a5bc630ccaaa31797f539275a5599a37749bf2b6e7811668fc0514c23031d7b31ec9740a48947b5150a1f0b7f3fba6b150a571cb463883c104d934cf72b512278653903f69f2a62e099fd542160fc117539938062a61ece988cf5bc032aa5ec9b170348639baaa728035845cd4b94ef4576c298acc812abeb135d77194ad0c2ea98031b58c220f066bc8ca3e911038ce377d49d84a13e3544b961484646ea566542c855362fa4786fbc2b2baa9a21c0da5d0b867b66935c3b79452881b8511067b24e9043ee483282251b9eec3a61f6159620974e9b7c6f6a08ad69b4d75cb564ce02cad5298e1789d1c46bff066702fd2af706c48c4c40a4d1cadc431c131125ae55562491c2af8a65555c0359cb915fbb84206c6ac45cb8670c12487e543d9a04ba63b686295132acc5dd2fb4b03b303c9f89692cc4e29ccb7ea61bad470c478b626ccf4367d3a0e05d28f9f83c662b6664aa004222126abf5cbf0f209bfb1054d008e1da91e5280c46bf9289eca702c1635b8bc0303dad74cdff6f51fb18e21d19c8d84ed55cf742d441d9df83cd92f92ebaf87fe3bfa6af87c226574db09f8ef20109983cfdf83674374e2b35504001d0020a5d5d1524eee3329d62271e79cfcb7e6ea63a8c3f7e7d5b2ae762694ee62aa6c002d00020101002b0005043a3a03040039002b0e0240400f00040481000000050480200000060480200000070480200000090108c0000000ff0808080109001b0003020001aaaa000100",
+  "h3_settings": {
+    "QPACK_MAX_TABLE_CAPACITY": 16383,
+    "QPACK_BLOCKED_STREAMS": 100,
+    "GREASE_0x58b9c4aab": 2926723192,
+    "_order": [
+      "QPACK_MAX_TABLE_CAPACITY",
+      "QPACK_BLOCKED_STREAMS",
+      "GREASE_0x58b9c4aab"
+    ]
+  },
+  "h3": {
+    "uni_streams": [
+      "control",
+      "qpack_encoder",
+      "qpack_decoder",
+      "control",
+      "qpack_encoder",
+      "qpack_decoder"
+    ],
+    "control_frames": [
+      "SETTINGS"
+    ],
+    "pseudo_headers": "m,s,a,p",
+    "header_order": [
+      "content-type",
+      "spotify-app-version",
+      "accept",
+      "authorization",
+      "app-platform",
+      "priority",
+      "accept-language",
+      "accept-encoding",
+      "content-length",
+      "user-agent",
+      "x-client-id",
+      "client-token"
+    ]
+  }
+}

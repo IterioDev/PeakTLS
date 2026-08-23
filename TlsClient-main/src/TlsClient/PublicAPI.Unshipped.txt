@@ -1,0 +1,393 @@
+#nullable enable
+TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.Cancel = 8 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.CompressionError = 9 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.ConnectError = 10 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.EnhanceYourCalm = 11 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.FlowControlError = 3 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.FrameSizeError = 6 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.Http11Required = 13 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.InadequateSecurity = 12 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.InternalError = 2 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.NoError = 0 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.ProtocolError = 1 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.RefusedStream = 7 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.SettingsTimeout = 4 -> TlsClient.Http2ErrorCode
+TlsClient.Http2ErrorCode.StreamClosed = 5 -> TlsClient.Http2ErrorCode
+TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackHuffman.Always = 2 -> TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackHuffman.Never = 3 -> TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackHuffman.WhenNotLonger = 1 -> TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackHuffman.WhenShorter = 0 -> TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackMultiValue
+TlsClient.TlsHpackMultiValue.Join = 1 -> TlsClient.TlsHpackMultiValue
+TlsClient.TlsHpackMultiValue.SeparateFields = 0 -> TlsClient.TlsHpackMultiValue
+TlsClient.TlsHpackNameIndex
+TlsClient.TlsHpackNameIndex.HighestStatic = 1 -> TlsClient.TlsHpackNameIndex
+TlsClient.TlsHpackNameIndex.LowestStatic = 0 -> TlsClient.TlsHpackNameIndex
+TlsClient.TlsHpackNameIndex.MostRecentDynamic = 2 -> TlsClient.TlsHpackNameIndex
+TlsClient.TlsHpackOptions
+TlsClient.TlsHpackOptions.CookieCrumbSeparator.get -> string!
+TlsClient.TlsHpackOptions.CookieCrumbSeparator.set -> void
+TlsClient.TlsHpackOptions.CrumbleCookies.get -> bool
+TlsClient.TlsHpackOptions.CrumbleCookies.set -> void
+TlsClient.TlsHpackOptions.DefaultRepresentation.get -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackOptions.DefaultRepresentation.set -> void
+TlsClient.TlsHpackOptions.Huffman.get -> TlsClient.TlsHpackHuffman
+TlsClient.TlsHpackOptions.Huffman.set -> void
+TlsClient.TlsHpackOptions.IndexedFallback.get -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackOptions.IndexedFallback.set -> void
+TlsClient.TlsHpackOptions.MultiValue.get -> TlsClient.TlsHpackMultiValue
+TlsClient.TlsHpackOptions.MultiValue.set -> void
+TlsClient.TlsHpackOptions.MultiValueJoinSeparator.get -> string!
+TlsClient.TlsHpackOptions.MultiValueJoinSeparator.set -> void
+TlsClient.TlsHpackOptions.NameIndex.get -> TlsClient.TlsHpackNameIndex
+TlsClient.TlsHpackOptions.NameIndex.set -> void
+TlsClient.TlsHpackOptions.PerHeader.get -> System.Collections.Generic.IDictionary<string!, TlsClient.TlsHpackRepresentation>!
+TlsClient.TlsHpackOptions.PerHeaderHuffman.get -> System.Collections.Generic.IDictionary<string!, TlsClient.TlsHpackHuffman>!
+TlsClient.TlsHpackOptions.PerHeaderMultiValue.get -> System.Collections.Generic.IDictionary<string!, TlsClient.TlsHpackMultiValue>!
+TlsClient.TlsHpackOptions.PerHeaderNameIndex.get -> System.Collections.Generic.IDictionary<string!, int>!
+TlsClient.TlsHpackOptions.TableSizeUpdate.get -> TlsClient.TlsHpackTableSizeUpdate
+TlsClient.TlsHpackOptions.TableSizeUpdate.set -> void
+TlsClient.TlsHpackOptions.TableSizeUpdateValues.get -> System.Collections.Generic.IReadOnlyList<uint>!
+TlsClient.TlsHpackOptions.TableSizeUpdateValues.set -> void
+TlsClient.TlsHpackOptions.TlsHpackOptions() -> void
+TlsClient.TlsHpackOptions.UseDynamicTable.get -> bool
+TlsClient.TlsHpackOptions.UseDynamicTable.set -> void
+TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackRepresentation.Indexed = 0 -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackRepresentation.LiteralIncrementalIndexing = 1 -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackRepresentation.LiteralNeverIndexed = 3 -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackRepresentation.LiteralWithoutIndexing = 2 -> TlsClient.TlsHpackRepresentation
+TlsClient.TlsHpackTableSizeUpdate
+TlsClient.TlsHpackTableSizeUpdate.BeforeFirstRequest = 2 -> TlsClient.TlsHpackTableSizeUpdate
+TlsClient.TlsHpackTableSizeUpdate.Never = 0 -> TlsClient.TlsHpackTableSizeUpdate
+TlsClient.TlsHpackTableSizeUpdate.OnPeerSettingsChange = 1 -> TlsClient.TlsHpackTableSizeUpdate
+TlsClient.TlsHttp2AuthorityMode
+TlsClient.TlsHttp2AuthorityMode.AuthorityOnly = 0 -> TlsClient.TlsHttp2AuthorityMode
+TlsClient.TlsHttp2AuthorityMode.Both = 2 -> TlsClient.TlsHttp2AuthorityMode
+TlsClient.TlsHttp2AuthorityMode.HostHeaderOnly = 1 -> TlsClient.TlsHttp2AuthorityMode
+TlsClient.TlsHttp2DataOptions
+TlsClient.TlsHttp2DataOptions.EmptyBodyEndsOnHeaders.get -> bool
+TlsClient.TlsHttp2DataOptions.EmptyBodyEndsOnHeaders.set -> void
+TlsClient.TlsHttp2DataOptions.MaxDataFrameSize.get -> int?
+TlsClient.TlsHttp2DataOptions.MaxDataFrameSize.set -> void
+TlsClient.TlsHttp2DataOptions.NonEmptyBody.get -> TlsClient.TlsHttp2EndStreamPlacement
+TlsClient.TlsHttp2DataOptions.NonEmptyBody.set -> void
+TlsClient.TlsHttp2DataOptions.TlsHttp2DataOptions() -> void
+TlsClient.TlsHttp2EndStreamPlacement
+TlsClient.TlsHttp2EndStreamPlacement.OnLastDataFrame = 0 -> TlsClient.TlsHttp2EndStreamPlacement
+TlsClient.TlsHttp2EndStreamPlacement.SeparateEmptyDataFrame = 1 -> TlsClient.TlsHttp2EndStreamPlacement
+TlsClient.TlsHttp2FlowControlOptions
+TlsClient.TlsHttp2FlowControlOptions.CoalesceConnectionAndStream.get -> bool
+TlsClient.TlsHttp2FlowControlOptions.CoalesceConnectionAndStream.set -> void
+TlsClient.TlsHttp2FlowControlOptions.ConnectionWindowUpdateThreshold.get -> uint
+TlsClient.TlsHttp2FlowControlOptions.ConnectionWindowUpdateThreshold.set -> void
+TlsClient.TlsHttp2FlowControlOptions.FixedIncrement.get -> uint
+TlsClient.TlsHttp2FlowControlOptions.FixedIncrement.set -> void
+TlsClient.TlsHttp2FlowControlOptions.Increment.get -> TlsClient.TlsHttp2WindowUpdateIncrement
+TlsClient.TlsHttp2FlowControlOptions.Increment.set -> void
+TlsClient.TlsHttp2FlowControlOptions.Order.get -> TlsClient.TlsHttp2WindowUpdateOrder
+TlsClient.TlsHttp2FlowControlOptions.Order.set -> void
+TlsClient.TlsHttp2FlowControlOptions.StreamWindowUpdateThreshold.get -> uint
+TlsClient.TlsHttp2FlowControlOptions.StreamWindowUpdateThreshold.set -> void
+TlsClient.TlsHttp2FlowControlOptions.SuppressStreamUpdateOnEndStream.get -> bool
+TlsClient.TlsHttp2FlowControlOptions.SuppressStreamUpdateOnEndStream.set -> void
+TlsClient.TlsHttp2FlowControlOptions.TlsHttp2FlowControlOptions() -> void
+TlsClient.TlsHttp2FlowControlOptions.Trigger.get -> TlsClient.TlsHttp2WindowUpdateTrigger
+TlsClient.TlsHttp2FlowControlOptions.Trigger.set -> void
+TlsClient.TlsHttp2Options.Data.get -> TlsClient.TlsHttp2DataOptions!
+TlsClient.TlsHttp2Options.EmitTrailerHeader.get -> bool
+TlsClient.TlsHttp2Options.EmitTrailerHeader.set -> void
+TlsClient.TlsHttp2Options.FlowControl.get -> TlsClient.TlsHttp2FlowControlOptions!
+TlsClient.TlsHttp2Options.FlushAfterEveryDataFrame.get -> bool
+TlsClient.TlsHttp2Options.FlushAfterEveryDataFrame.set -> void
+TlsClient.TlsHttp2Options.FlushAfterHeaderBlock.get -> bool
+TlsClient.TlsHttp2Options.FlushAfterHeaderBlock.set -> void
+TlsClient.TlsHttp2Options.HeaderBlockFragmentSize.get -> int?
+TlsClient.TlsHttp2Options.HeaderBlockFragmentSize.set -> void
+TlsClient.TlsHttp2Options.Hpack.get -> TlsClient.TlsHpackOptions!
+TlsClient.TlsHttp2Options.InitialStreamId.get -> int
+TlsClient.TlsHttp2Options.InitialStreamId.set -> void
+TlsClient.TlsHttp2Options.Preface.get -> System.Collections.Generic.IReadOnlyList<TlsClient.TlsHttp2PrefaceFrame!>!
+TlsClient.TlsHttp2Options.Preface.set -> void
+TlsClient.TlsHttp2Options.PseudoHeaders.get -> TlsClient.TlsHttp2PseudoHeaderOptions!
+TlsClient.TlsHttp2Options.SettingsAckPlacement.get -> TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttp2Options.SettingsAckPlacement.set -> void
+TlsClient.TlsHttp2Options.Shutdown.get -> TlsClient.TlsHttp2ShutdownOptions!
+TlsClient.TlsHttp2Options.StreamIdStep.get -> int
+TlsClient.TlsHttp2Options.StreamIdStep.set -> void
+TlsClient.TlsHttp2PingFrame
+TlsClient.TlsHttp2PingFrame.Payload.get -> byte[]!
+TlsClient.TlsHttp2PingFrame.Payload.set -> void
+TlsClient.TlsHttp2PingFrame.TlsHttp2PingFrame() -> void
+TlsClient.TlsHttp2PrefaceFrame
+TlsClient.TlsHttp2PrefaceFrame.FlushAfter.get -> bool
+TlsClient.TlsHttp2PrefaceFrame.FlushAfter.set -> void
+TlsClient.TlsHttp2PrefaceFrame.TlsHttp2PrefaceFrame() -> void
+TlsClient.TlsHttp2PrefacePriorityFrame
+TlsClient.TlsHttp2PrefacePriorityFrame.Priority.get -> TlsClient.TlsHttp2Priority!
+TlsClient.TlsHttp2PrefacePriorityFrame.Priority.set -> void
+TlsClient.TlsHttp2PrefacePriorityFrame.StreamId.get -> int
+TlsClient.TlsHttp2PrefacePriorityFrame.StreamId.set -> void
+TlsClient.TlsHttp2PrefacePriorityFrame.TlsHttp2PrefacePriorityFrame() -> void
+TlsClient.TlsHttp2PriorityUpdateFrame
+TlsClient.TlsHttp2PriorityUpdateFrame.TlsHttp2PriorityUpdateFrame() -> void
+TlsClient.TlsHttp2PriorityUpdateFrame.Value.get -> string!
+TlsClient.TlsHttp2PriorityUpdateFrame.Value.set -> void
+TlsClient.TlsHttp2PseudoHeaderOptions
+TlsClient.TlsHttp2PseudoHeaderOptions.AuthorityMode.get -> TlsClient.TlsHttp2AuthorityMode
+TlsClient.TlsHttp2PseudoHeaderOptions.AuthorityMode.set -> void
+TlsClient.TlsHttp2PseudoHeaderOptions.Order.get -> System.Collections.Generic.IReadOnlyList<string!>!
+TlsClient.TlsHttp2PseudoHeaderOptions.Order.set -> void
+TlsClient.TlsHttp2PseudoHeaderOptions.Scheme.get -> string!
+TlsClient.TlsHttp2PseudoHeaderOptions.Scheme.set -> void
+TlsClient.TlsHttp2PseudoHeaderOptions.TlsHttp2PseudoHeaderOptions() -> void
+TlsClient.TlsHttp2RawFrame
+TlsClient.TlsHttp2RawFrame.Flags.get -> byte
+TlsClient.TlsHttp2RawFrame.Flags.set -> void
+TlsClient.TlsHttp2RawFrame.Payload.get -> byte[]!
+TlsClient.TlsHttp2RawFrame.Payload.set -> void
+TlsClient.TlsHttp2RawFrame.StreamId.get -> int
+TlsClient.TlsHttp2RawFrame.StreamId.set -> void
+TlsClient.TlsHttp2RawFrame.TlsHttp2RawFrame() -> void
+TlsClient.TlsHttp2RawFrame.Type.get -> byte
+TlsClient.TlsHttp2RawFrame.Type.set -> void
+TlsClient.TlsHttp2RequestFrame
+TlsClient.TlsHttp2RequestFrame.FlushAfter.get -> bool
+TlsClient.TlsHttp2RequestFrame.FlushAfter.set -> void
+TlsClient.TlsHttp2RequestFrame.TlsHttp2RequestFrame() -> void
+TlsClient.TlsHttp2RequestRawFrame
+TlsClient.TlsHttp2RequestRawFrame.Flags.get -> byte
+TlsClient.TlsHttp2RequestRawFrame.Flags.set -> void
+TlsClient.TlsHttp2RequestRawFrame.Payload.get -> byte[]!
+TlsClient.TlsHttp2RequestRawFrame.Payload.set -> void
+TlsClient.TlsHttp2RequestRawFrame.StreamId.get -> int
+TlsClient.TlsHttp2RequestRawFrame.StreamId.set -> void
+TlsClient.TlsHttp2RequestRawFrame.TlsHttp2RequestRawFrame() -> void
+TlsClient.TlsHttp2RequestRawFrame.Type.get -> byte
+TlsClient.TlsHttp2RequestRawFrame.Type.set -> void
+TlsClient.TlsHttp2SettingValue
+TlsClient.TlsHttp2SettingValue.Id.get -> ushort
+TlsClient.TlsHttp2SettingValue.Id.init -> void
+TlsClient.TlsHttp2SettingValue.TlsHttp2SettingValue() -> void
+TlsClient.TlsHttp2SettingValue.TlsHttp2SettingValue(ushort Id, uint Value) -> void
+TlsClient.TlsHttp2SettingValue.Value.get -> uint
+TlsClient.TlsHttp2SettingValue.Value.init -> void
+TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttp2SettingsAckPlacement.AfterNextBatch = 2 -> TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttp2SettingsAckPlacement.BeforeNextBatch = 1 -> TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttp2SettingsAckPlacement.Standalone = 0 -> TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttp2SettingsFrame
+TlsClient.TlsHttp2SettingsFrame.Settings.get -> System.Collections.Generic.IReadOnlyList<TlsClient.TlsHttp2SettingValue>!
+TlsClient.TlsHttp2SettingsFrame.Settings.set -> void
+TlsClient.TlsHttp2SettingsFrame.TlsHttp2SettingsFrame() -> void
+TlsClient.TlsHttp2ShutdownOptions
+TlsClient.TlsHttp2ShutdownOptions.CancellationResetCode.get -> TlsClient.Http2ErrorCode
+TlsClient.TlsHttp2ShutdownOptions.CancellationResetCode.set -> void
+TlsClient.TlsHttp2ShutdownOptions.GoAwayDebugData.get -> byte[]?
+TlsClient.TlsHttp2ShutdownOptions.GoAwayDebugData.set -> void
+TlsClient.TlsHttp2ShutdownOptions.GoAwayErrorCode.get -> TlsClient.Http2ErrorCode
+TlsClient.TlsHttp2ShutdownOptions.GoAwayErrorCode.set -> void
+TlsClient.TlsHttp2ShutdownOptions.LocalFailureResetCode.get -> TlsClient.Http2ErrorCode
+TlsClient.TlsHttp2ShutdownOptions.LocalFailureResetCode.set -> void
+TlsClient.TlsHttp2ShutdownOptions.PushRejectionResetCode.get -> TlsClient.Http2ErrorCode
+TlsClient.TlsHttp2ShutdownOptions.PushRejectionResetCode.set -> void
+TlsClient.TlsHttp2ShutdownOptions.SendGoAwayOnDispose.get -> bool
+TlsClient.TlsHttp2ShutdownOptions.SendGoAwayOnDispose.set -> void
+TlsClient.TlsHttp2ShutdownOptions.TlsHttp2ShutdownOptions() -> void
+TlsClient.TlsHttp2StreamPriorityFrame
+TlsClient.TlsHttp2StreamPriorityFrame.Priority.get -> TlsClient.TlsHttp2Priority!
+TlsClient.TlsHttp2StreamPriorityFrame.Priority.set -> void
+TlsClient.TlsHttp2StreamPriorityFrame.TlsHttp2StreamPriorityFrame() -> void
+TlsClient.TlsHttp2WindowUpdateFrame
+TlsClient.TlsHttp2WindowUpdateFrame.Increment.get -> uint
+TlsClient.TlsHttp2WindowUpdateFrame.Increment.set -> void
+TlsClient.TlsHttp2WindowUpdateFrame.TlsHttp2WindowUpdateFrame() -> void
+TlsClient.TlsHttp2WindowUpdateIncrement
+TlsClient.TlsHttp2WindowUpdateIncrement.BytesAccounted = 0 -> TlsClient.TlsHttp2WindowUpdateIncrement
+TlsClient.TlsHttp2WindowUpdateIncrement.Fixed = 2 -> TlsClient.TlsHttp2WindowUpdateIncrement
+TlsClient.TlsHttp2WindowUpdateIncrement.RefillToInitial = 1 -> TlsClient.TlsHttp2WindowUpdateIncrement
+TlsClient.TlsHttp2WindowUpdateOrder
+TlsClient.TlsHttp2WindowUpdateOrder.ConnectionFirst = 0 -> TlsClient.TlsHttp2WindowUpdateOrder
+TlsClient.TlsHttp2WindowUpdateOrder.StreamFirst = 1 -> TlsClient.TlsHttp2WindowUpdateOrder
+TlsClient.TlsHttp2WindowUpdateTrigger
+TlsClient.TlsHttp2WindowUpdateTrigger.OnConsume = 0 -> TlsClient.TlsHttp2WindowUpdateTrigger
+TlsClient.TlsHttp2WindowUpdateTrigger.OnReceive = 1 -> TlsClient.TlsHttp2WindowUpdateTrigger
+TlsClient.TlsHttp3Options
+TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.get -> bool
+TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.set -> void
+TlsClient.TlsHttp3Options.PseudoHeaderOrder.get -> System.Collections.Generic.IList<TlsClient.TlsHttp3PseudoHeader>!
+TlsClient.TlsHttp3Options.PseudoHeaderOrder.set -> void
+TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.get -> bool
+TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.set -> void
+TlsClient.TlsHttp3Options.QpackNameMatchPolicy.get -> TlsClient.TlsQpackNameMatchPolicy
+TlsClient.TlsHttp3Options.QpackNameMatchPolicy.set -> void
+TlsClient.TlsHttp3Options.SendReservedFramesOnRequestStreams.get -> bool
+TlsClient.TlsHttp3Options.SendReservedFramesOnRequestStreams.set -> void
+TlsClient.TlsHttp3Options.Settings.get -> System.Collections.Generic.IList<TlsClient.TlsHttp3Setting>!
+TlsClient.TlsHttp3Options.Settings.set -> void
+TlsClient.TlsHttp3Options.TlsHttp3Options() -> void
+TlsClient.TlsHttp3Options.UnidirectionalStreamOpenOrder.get -> System.Collections.Generic.IList<TlsClient.TlsHttp3StreamType>!
+TlsClient.TlsHttp3Options.UnidirectionalStreamOpenOrder.set -> void
+TlsClient.TlsHttp3PseudoHeader
+TlsClient.TlsHttp3PseudoHeader.Authority = 1 -> TlsClient.TlsHttp3PseudoHeader
+TlsClient.TlsHttp3PseudoHeader.Method = 0 -> TlsClient.TlsHttp3PseudoHeader
+TlsClient.TlsHttp3PseudoHeader.Path = 3 -> TlsClient.TlsHttp3PseudoHeader
+TlsClient.TlsHttp3PseudoHeader.Scheme = 2 -> TlsClient.TlsHttp3PseudoHeader
+TlsClient.TlsHttp3Setting
+TlsClient.TlsHttp3Setting.Identifier.get -> ulong
+TlsClient.TlsHttp3Setting.Identifier.init -> void
+TlsClient.TlsHttp3Setting.TlsHttp3Setting() -> void
+TlsClient.TlsHttp3Setting.TlsHttp3Setting(ulong Identifier, ulong Value) -> void
+TlsClient.TlsHttp3Setting.Value.get -> ulong
+TlsClient.TlsHttp3Setting.Value.init -> void
+TlsClient.TlsHttp3StreamType
+TlsClient.TlsHttp3StreamType.Control = 0 -> TlsClient.TlsHttp3StreamType
+TlsClient.TlsHttp3StreamType.Push = 1 -> TlsClient.TlsHttp3StreamType
+TlsClient.TlsHttp3StreamType.QpackDecoder = 3 -> TlsClient.TlsHttp3StreamType
+TlsClient.TlsHttp3StreamType.QpackEncoder = 2 -> TlsClient.TlsHttp3StreamType
+TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.InitialStreamId.get -> int
+TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.SettingsAckPlacement.get -> TlsClient.TlsHttp2SettingsAckPlacement
+TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.StreamIdStep.get -> int
+TlsClient.TlsHttpVersionPolicy.Http3Only = 3 -> TlsClient.TlsHttpVersionPolicy
+TlsClient.TlsQpackNameMatchPolicy
+TlsClient.TlsQpackNameMatchPolicy.LiteralName = 1 -> TlsClient.TlsQpackNameMatchPolicy
+TlsClient.TlsQpackNameMatchPolicy.NameReference = 0 -> TlsClient.TlsQpackNameMatchPolicy
+TlsClient.TlsQuicAckPolicy
+TlsClient.TlsQuicAckPolicy.DelayedToMaxAckDelay = 1 -> TlsClient.TlsQuicAckPolicy
+TlsClient.TlsQuicAckPolicy.Immediate = 0 -> TlsClient.TlsQuicAckPolicy
+TlsClient.TlsQuicFlowControlOptions
+TlsClient.TlsQuicFlowControlOptions.InitialMaxData.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxData.set -> void
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataBidiLocal.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataBidiLocal.set -> void
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataBidiRemote.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataBidiRemote.set -> void
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataUni.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamDataUni.set -> void
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamsBidi.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamsBidi.set -> void
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamsUni.get -> ulong
+TlsClient.TlsQuicFlowControlOptions.InitialMaxStreamsUni.set -> void
+TlsClient.TlsQuicFlowControlOptions.TlsQuicFlowControlOptions() -> void
+TlsClient.TlsQuicOptions
+TlsClient.TlsQuicOptions.AckLeadsInPacket.get -> bool
+TlsClient.TlsQuicOptions.AckLeadsInPacket.set -> void
+TlsClient.TlsQuicOptions.AckRangeLimit.get -> int
+TlsClient.TlsQuicOptions.AckRangeLimit.set -> void
+TlsClient.TlsQuicOptions.AlpnProtocols.get -> System.Collections.Generic.IList<string!>!
+TlsClient.TlsQuicOptions.AlpnProtocols.set -> void
+TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.get -> bool
+TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.set -> void
+TlsClient.TlsQuicOptions.ConfigureClientHello.get -> System.Action<SharpTls.ClientHelloBuilder!>?
+TlsClient.TlsQuicOptions.ConfigureClientHello.set -> void
+TlsClient.TlsQuicOptions.CryptoLengthVarintWidth.get -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicOptions.CryptoLengthVarintWidth.set -> void
+TlsClient.TlsQuicOptions.CryptoOffsetVarintWidth.get -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicOptions.CryptoOffsetVarintWidth.set -> void
+TlsClient.TlsQuicOptions.DestinationConnectionIdLength.get -> int
+TlsClient.TlsQuicOptions.DestinationConnectionIdLength.set -> void
+TlsClient.TlsQuicOptions.FlowControl.get -> TlsClient.TlsQuicFlowControlOptions!
+TlsClient.TlsQuicOptions.HeaderLengthVarintWidth.get -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicOptions.HeaderLengthVarintWidth.set -> void
+TlsClient.TlsQuicOptions.InitialCryptoFrameByteCounts.get -> System.Collections.Generic.IList<int>!
+TlsClient.TlsQuicOptions.InitialCryptoFrameByteCounts.set -> void
+TlsClient.TlsQuicOptions.InitialCryptoFramesPerDatagram.get -> System.Collections.Generic.IList<int>!
+TlsClient.TlsQuicOptions.InitialCryptoFramesPerDatagram.set -> void
+TlsClient.TlsQuicOptions.InitialFrameOrder.get -> System.Collections.Generic.IList<ulong>!
+TlsClient.TlsQuicOptions.InitialFrameOrder.set -> void
+TlsClient.TlsQuicOptions.InitialPacketNumber.get -> ulong
+TlsClient.TlsQuicOptions.InitialPacketNumber.set -> void
+TlsClient.TlsQuicOptions.InitialRttRange.get -> (System.TimeSpan Minimum, System.TimeSpan Maximum)?
+TlsClient.TlsQuicOptions.InitialRttRange.set -> void
+TlsClient.TlsQuicOptions.PacketNumberEncodedLength.get -> int
+TlsClient.TlsQuicOptions.PacketNumberEncodedLength.set -> void
+TlsClient.TlsQuicOptions.PaddingTarget.get -> int
+TlsClient.TlsQuicOptions.PaddingTarget.set -> void
+TlsClient.TlsQuicOptions.Recovery.get -> TlsClient.TlsQuicRecoveryOptions!
+TlsClient.TlsQuicOptions.SourceConnectionIdLength.get -> int
+TlsClient.TlsQuicOptions.SourceConnectionIdLength.set -> void
+TlsClient.TlsQuicOptions.TlsQuicOptions() -> void
+TlsClient.TlsQuicOptions.Token.get -> System.ReadOnlyMemory<byte>
+TlsClient.TlsQuicOptions.Token.set -> void
+TlsClient.TlsQuicOptions.TransportParameters.get -> TlsClient.TlsQuicTransportParameterOptions!
+TlsClient.TlsQuicProbeContents
+TlsClient.TlsQuicProbeContents.Ping = 0 -> TlsClient.TlsQuicProbeContents
+TlsClient.TlsQuicProbeContents.PingWithPadding = 1 -> TlsClient.TlsQuicProbeContents
+TlsClient.TlsQuicProbeContents.RetransmittedData = 2 -> TlsClient.TlsQuicProbeContents
+TlsClient.TlsQuicRecoveryOptions
+TlsClient.TlsQuicRecoveryOptions.AckPolicy.get -> TlsClient.TlsQuicAckPolicy
+TlsClient.TlsQuicRecoveryOptions.AckPolicy.set -> void
+TlsClient.TlsQuicRecoveryOptions.InitialCongestionWindow.get -> (int DatagramMultiplier, int ByteCap)
+TlsClient.TlsQuicRecoveryOptions.InitialCongestionWindow.set -> void
+TlsClient.TlsQuicRecoveryOptions.LossReductionFactor.get -> double
+TlsClient.TlsQuicRecoveryOptions.LossReductionFactor.set -> void
+TlsClient.TlsQuicRecoveryOptions.MinimumCongestionWindowDatagrams.get -> int
+TlsClient.TlsQuicRecoveryOptions.MinimumCongestionWindowDatagrams.set -> void
+TlsClient.TlsQuicRecoveryOptions.PacingBurstDatagrams.get -> int?
+TlsClient.TlsQuicRecoveryOptions.PacingBurstDatagrams.set -> void
+TlsClient.TlsQuicRecoveryOptions.PacingIntervalScale.get -> double
+TlsClient.TlsQuicRecoveryOptions.PacingIntervalScale.set -> void
+TlsClient.TlsQuicRecoveryOptions.PacketThreshold.get -> int
+TlsClient.TlsQuicRecoveryOptions.PacketThreshold.set -> void
+TlsClient.TlsQuicRecoveryOptions.PersistentCongestionThreshold.get -> int
+TlsClient.TlsQuicRecoveryOptions.PersistentCongestionThreshold.set -> void
+TlsClient.TlsQuicRecoveryOptions.ProbeContents.get -> TlsClient.TlsQuicProbeContents
+TlsClient.TlsQuicRecoveryOptions.ProbeContents.set -> void
+TlsClient.TlsQuicRecoveryOptions.ProbePacketsPerPto.get -> int
+TlsClient.TlsQuicRecoveryOptions.ProbePacketsPerPto.set -> void
+TlsClient.TlsQuicRecoveryOptions.PtoBackoff.get -> (double Factor, System.TimeSpan? Maximum)
+TlsClient.TlsQuicRecoveryOptions.PtoBackoff.set -> void
+TlsClient.TlsQuicRecoveryOptions.TimeThreshold.get -> double
+TlsClient.TlsQuicRecoveryOptions.TimeThreshold.set -> void
+TlsClient.TlsQuicRecoveryOptions.TlsQuicRecoveryOptions() -> void
+TlsClient.TlsQuicTransportParameterEntry
+TlsClient.TlsQuicTransportParameterEntry.HasLiteralValue.get -> bool
+TlsClient.TlsQuicTransportParameterEntry.Id.get -> ulong
+TlsClient.TlsQuicTransportParameterEntry.IsDrawn.get -> bool
+TlsClient.TlsQuicTransportParameterEntry.IsPlaced.get -> bool
+TlsClient.TlsQuicTransportParameterOptions
+TlsClient.TlsQuicTransportParameterOptions.Entries.get -> System.Collections.Generic.IList<TlsClient.TlsQuicTransportParameterEntry!>!
+TlsClient.TlsQuicTransportParameterOptions.Entries.set -> void
+TlsClient.TlsQuicTransportParameterOptions.TlsQuicTransportParameterOptions() -> void
+TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicVarintWidth.EightBytes = 8 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicVarintWidth.FourBytes = 4 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicVarintWidth.Minimal = 0 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicVarintWidth.OneByte = 1 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsQuicVarintWidth.TwoBytes = 2 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsRequestOptions.AuthorityMode.get -> TlsClient.TlsHttp2AuthorityMode?
+TlsClient.TlsRequestOptions.AuthorityMode.set -> void
+TlsClient.TlsRequestOptions.DataPadding.get -> int?
+TlsClient.TlsRequestOptions.DataPadding.set -> void
+TlsClient.TlsRequestOptions.FramesAfterHeaders.get -> System.Collections.Generic.IReadOnlyList<TlsClient.TlsHttp2RequestFrame!>!
+TlsClient.TlsRequestOptions.FramesAfterHeaders.set -> void
+TlsClient.TlsRequestOptions.FramesBeforeHeaders.get -> System.Collections.Generic.IReadOnlyList<TlsClient.TlsHttp2RequestFrame!>!
+TlsClient.TlsRequestOptions.FramesBeforeHeaders.set -> void
+TlsClient.TlsRequestOptions.HeaderOrder.get -> System.Collections.Generic.IReadOnlyList<string!>?
+TlsClient.TlsRequestOptions.HeaderOrder.set -> void
+TlsClient.TlsRequestOptions.HeaderPriority.get -> TlsClient.TlsHttp2Priority?
+TlsClient.TlsRequestOptions.HeaderPriority.set -> void
+TlsClient.TlsRequestOptions.HeadersPadding.get -> int?
+TlsClient.TlsRequestOptions.HeadersPadding.set -> void
+TlsClient.TlsRequestOptions.PathOverride.get -> string?
+TlsClient.TlsRequestOptions.PathOverride.set -> void
+TlsClient.TlsRequestOptions.PriorityUpdate.get -> string?
+TlsClient.TlsRequestOptions.PriorityUpdate.set -> void
+TlsClient.TlsRequestOptions.Protocol.get -> string?
+TlsClient.TlsRequestOptions.Protocol.set -> void
+TlsClient.TlsRequestOptions.PseudoHeaderOrder.get -> System.Collections.Generic.IReadOnlyList<string!>?
+TlsClient.TlsRequestOptions.PseudoHeaderOrder.set -> void
+TlsClient.TlsRequestOptions.Scheme.get -> string?
+TlsClient.TlsRequestOptions.Scheme.set -> void
+TlsClient.TlsSessionOptions.Http3.get -> TlsClient.TlsHttp3Options!
+TlsClient.TlsSessionOptions.Quic.get -> TlsClient.TlsQuicOptions!
+static TlsClient.TlsPresets.Spotify.get -> TlsClient.TlsPreset!
+static TlsClient.TlsPresets.Spotify917602050IOS270Http3.get -> TlsClient.TlsPreset!
+static TlsClient.TlsProfiles.Spotify917602050IOS270Quic.get -> TlsClient.TlsProfile!
+static TlsClient.TlsQuicOptions.ApplyDefaultClientHello(SharpTls.ClientHelloBuilder! builder) -> void
+static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byte[]! Value)?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
+static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
+static TlsClient.TlsQuicTransportParameterEntry.Literal(ulong id, System.ReadOnlySpan<byte> value) -> TlsClient.TlsQuicTransportParameterEntry!
+static TlsClient.TlsQuicTransportParameterEntry.Placed(ulong id) -> TlsClient.TlsQuicTransportParameterEntry!

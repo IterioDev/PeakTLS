@@ -1,0 +1,228 @@
+RFC 7541 Appendix C.4 - Request Examples with Huffman Coding
+(complete: C.4, C.4.1 First Request, C.4.2 Second Request, C.4.3 Third Request)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc7541.txt on 2026-08-19.
+Captured for subsystem C task C0. Together with Appendix C.6, these are the
+ONLY published Huffman test vectors in either RFC 7541 or RFC 9204 - RFC 9204
+reuses the table without restating any vectors, so there is nowhere else to
+check a Huffman encoder against. Ground truth for C's Huffman codec tests.
+These are HPACK examples, so their surrounding representation octets and their
+index values are HPACK's, NOT QPACK's. Only the Huffman-coded string literals
+inside them transfer: the header-block framing, the dynamic table state shown
+after each request, and every table index in these examples are HPACK and must
+not be copied into a QPACK implementation.
+This RFC predates the unpaginated RFC text format; see the note in
+rfc7541-appendix-b-huffman-code.txt on page furniture.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+
+C.4.  Request Examples with Huffman Coding
+
+   This section shows the same examples as the previous section but uses
+   Huffman encoding for the literal values.
+
+C.4.1.  First Request
+
+   Header list to encode:
+
+   :method: GET
+   :scheme: http
+   :path: /
+   :authority: www.example.com
+
+   Hex dump of encoded data:
+
+   8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 | ...A......:k....
+   ff                                      | .
+
+   Decoding process:
+
+   82                                      | == Indexed - Add ==
+                                           |   idx = 2
+                                           | -> :method: GET
+   86                                      | == Indexed - Add ==
+                                           |   idx = 6
+                                           | -> :scheme: http
+   84                                      | == Indexed - Add ==
+                                           |   idx = 4
+                                           | -> :path: /
+   41                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 1)
+                                           |     :authority
+   8c                                      |   Literal value (len = 12)
+                                           |     Huffman encoded:
+   f1e3 c2e5 f23a 6ba0 ab90 f4ff           | .....:k.....
+                                           |     Decoded:
+                                           | www.example.com
+                                           | -> :authority:
+                                           |   www.example.com
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  57) :authority: www.example.com
+         Table size:  57
+
+
+
+
+
+
+Peon & Ruellan               Standards Track                   [Page 41]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Decoded header list:
+
+   :method: GET
+   :scheme: http
+   :path: /
+   :authority: www.example.com
+
+C.4.2.  Second Request
+
+   Header list to encode:
+
+   :method: GET
+   :scheme: http
+   :path: /
+   :authority: www.example.com
+   cache-control: no-cache
+
+   Hex dump of encoded data:
+
+   8286 84be 5886 a8eb 1064 9cbf           | ....X....d..
+
+   Decoding process:
+
+   82                                      | == Indexed - Add ==
+                                           |   idx = 2
+                                           | -> :method: GET
+   86                                      | == Indexed - Add ==
+                                           |   idx = 6
+                                           | -> :scheme: http
+   84                                      | == Indexed - Add ==
+                                           |   idx = 4
+                                           | -> :path: /
+   be                                      | == Indexed - Add ==
+                                           |   idx = 62
+                                           | -> :authority:
+                                           |   www.example.com
+   58                                      | == Literal indexed ==
+                                           |   Indexed name (idx = 24)
+                                           |     cache-control
+   86                                      |   Literal value (len = 6)
+                                           |     Huffman encoded:
+   a8eb 1064 9cbf                          | ...d..
+                                           |     Decoded:
+                                           | no-cache
+                                           | -> cache-control: no-cache
+
+
+
+
+
+
+Peon & Ruellan               Standards Track                   [Page 42]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  53) cache-control: no-cache
+   [  2] (s =  57) :authority: www.example.com
+         Table size: 110
+
+   Decoded header list:
+
+   :method: GET
+   :scheme: http
+   :path: /
+   :authority: www.example.com
+   cache-control: no-cache
+
+C.4.3.  Third Request
+
+   Header list to encode:
+
+   :method: GET
+   :scheme: https
+   :path: /index.html
+   :authority: www.example.com
+   custom-key: custom-value
+
+   Hex dump of encoded data:
+
+   8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 | ....@.%.I.[.}..%
+   a849 e95b b8e8 b4bf                     | .I.[....
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Peon & Ruellan               Standards Track                   [Page 43]
+
+RFC 7541                          HPACK                         May 2015
+
+
+   Decoding process:
+
+   82                                      | == Indexed - Add ==
+                                           |   idx = 2
+                                           | -> :method: GET
+   87                                      | == Indexed - Add ==
+                                           |   idx = 7
+                                           | -> :scheme: https
+   85                                      | == Indexed - Add ==
+                                           |   idx = 5
+                                           | -> :path: /index.html
+   bf                                      | == Indexed - Add ==
+                                           |   idx = 63
+                                           | -> :authority:
+                                           |   www.example.com
+   40                                      | == Literal indexed ==
+   88                                      |   Literal name (len = 8)
+                                           |     Huffman encoded:
+   25a8 49e9 5ba9 7d7f                     | %.I.[.}.
+                                           |     Decoded:
+                                           | custom-key
+   89                                      |   Literal value (len = 9)
+                                           |     Huffman encoded:
+   25a8 49e9 5bb8 e8b4 bf                  | %.I.[....
+                                           |     Decoded:
+                                           | custom-value
+                                           | -> custom-key:
+                                           |   custom-value
+
+   Dynamic Table (after decoding):
+
+   [  1] (s =  54) custom-key: custom-value
+   [  2] (s =  53) cache-control: no-cache
+   [  3] (s =  57) :authority: www.example.com
+         Table size: 164
+
+   Decoded header list:
+
+   :method: GET
+   :scheme: https
+   :path: /index.html
+   :authority: www.example.com
+   custom-key: custom-value

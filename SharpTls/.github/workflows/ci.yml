@@ -1,0 +1,300 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet restore SharpTls.slnx
+      - run: dotnet test SharpTls.slnx --no-restore --configuration Release --logger "console;verbosity=minimal"
+
+  release-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet restore SharpTls.slnx
+      - run: dotnet build SharpTls.slnx --no-restore --configuration Release
+      - name: Managed parser and state-machine fuzz smoke
+        run: dotnet run --project tools/SharpTls.Fuzz/SharpTls.Fuzz.csproj --no-build --configuration Release -- --iterations 2000 --max-length 4096
+      - name: CPU and allocation budgets
+        run: dotnet run --project benchmarks/SharpTls.Benchmarks/SharpTls.Benchmarks.csproj --no-build --configuration Release -- --verify
+      - name: Pack twice with deterministic CI inputs
+        run: |
+          dotnet pack src/SharpTls/SharpTls.csproj --no-build --configuration Release --output artifacts/raw-a -p:ContinuousIntegrationBuild=true
+          dotnet pack src/SharpTls/SharpTls.csproj --no-build --configuration Release --output artifacts/raw-b -p:ContinuousIntegrationBuild=true
+      - name: Normalize nondeterministic NuGet OPC identifiers and ZIP metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pack-a artifacts/pack-b
+          for file in artifacts/raw-a/*; do
+            dotnet run --project tools/SharpTls.PackageReproducibility/SharpTls.PackageReproducibility.csproj --no-build --configuration Release -- "$file" "artifacts/pack-a/$(basename "$file")"
+          done
+          for file in artifacts/raw-b/*; do
+            dotnet run --project tools/SharpTls.PackageReproducibility/SharpTls.PackageReproducibility.csproj --no-build --configuration Release -- "$file" "artifacts/pack-b/$(basename "$file")"
+          done
+      - name: Require byte-for-byte reproducible packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in artifacts/pack-a/*; do
+            peer="artifacts/pack-b/$(basename "$file")"
+            test -f "$peer"
+            cmp --silent "$file" "$peer"
+            sha256sum "$file"
+          done
+      - name: Restore normalized package into a clean consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet new console --framework net9.0 --output artifacts/package-consumer
+          dotnet add artifacts/package-consumer/package-consumer.csproj package SharpTls --prerelease --source "$(pwd)/artifacts/pack-a"
+          dotnet build artifacts/package-consumer/package-consumer.csproj --configuration Release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sharptls-preview-packages
+          path: artifacts/pack-a/*
+          if-no-files-found: error
+          retention-days: 14
+
+  public-interop:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SHARPTLS_RUN_INTEROP: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet restore SharpTls.slnx
+      - name: Authenticate the executable profile and public protocol matrix
+        run: dotnet test tests/SharpTls.Tests/SharpTls.Tests.csproj --no-restore --configuration Release --filter "Category=Interop" --logger "console;verbosity=normal"
+
+  coverage-fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The target list below is derived and no longer seven names: it is every
+    # target the harness has, twelve at this commit, each fuzzed for its own
+    # -max_total_time=60. Twelve minutes of fuzzing plus publish, instrument and
+    # clang did not fit the 25 this job had when it ran seven.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet restore SharpTls.slnx
+      - name: Publish the coverage harness and export bounded seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet publish tools/SharpTls.CoverageFuzz/SharpTls.CoverageFuzz.csproj --configuration Release --output artifacts/coverage-fuzz
+          test -f artifacts/coverage-fuzz/SharpFuzz.dll
+          test -f artifacts/coverage-fuzz/SharpFuzz.Common.dll
+          test -f artifacts/coverage-fuzz/dnlib.dll
+          dotnet run --project tools/SharpTls.Fuzz/SharpTls.Fuzz.csproj --configuration Release -- --target all --export-corpus artifacts/fuzz-corpus
+      - name: Install and apply the pinned SharpFuzz instrumenter
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install SharpFuzz.CommandLine --tool-path artifacts/sharpfuzz-cli --version 2.3.0
+          artifacts/sharpfuzz-cli/sharpfuzz artifacts/coverage-fuzz/SharpTls.dll
+      - name: Build the hash-verified pinned libFuzzer driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/bd39d4e88d715ab460a929943645be2a186cde52/libfuzzer-dotnet.cc --output artifacts/libfuzzer-dotnet.cc
+          echo "90f019e2e9ad3a0b93c7ecc2c5afb2fbfc8b5aab6aac51c7e0d349ec79354f36  artifacts/libfuzzer-dotnet.cc" | sha256sum --check --strict
+          clang -O2 -fsanitize=fuzzer artifacts/libfuzzer-dotnet.cc -o artifacts/libfuzzer-dotnet
+      - name: Run every coverage-guided protocol target
+        shell: bash
+        run: |
+          set -euo pipefail
+          # DERIVED, NOT TRANSCRIBED. This list used to be seven names written
+          # out by hand, and the harness had grown to ten: socks5, quic-packets
+          # and quic-frames existed, exported seed corpora every run, and were
+          # never fuzzed by this job. A hand-kept copy of a list that lives
+          # somewhere else goes stale silently and nothing fails when it does.
+          # The step above exports one corpus directory per target in
+          # ProtocolFuzzTargets.TargetNames, so those directories ARE the list
+          # and a target added to the harness is fuzzed here from the same commit.
+          test -d artifacts/fuzz-corpus
+          targets=()
+          for corpus in artifacts/fuzz-corpus/*/; do
+            targets+=("$(basename "$corpus")")
+          done
+          test "${#targets[@]}" -gt 0
+          echo "coverage-guided targets: ${targets[*]}"
+          mkdir -p artifacts/fuzz-artifacts
+          for target in "${targets[@]}"; do
+            mkdir -p "artifacts/fuzz-artifacts/$target"
+            SHARPTLS_COVERAGE_FUZZ_TARGET="$target" artifacts/libfuzzer-dotnet \
+              --target_path=dotnet \
+              --target_arg="$(pwd)/artifacts/coverage-fuzz/SharpTls.CoverageFuzz.dll" \
+              -max_total_time=60 -timeout=5 -rss_limit_mb=1536 -max_len=65535 \
+              -print_final_stats=1 -artifact_prefix="artifacts/fuzz-artifacts/$target/" \
+              "artifacts/fuzz-corpus/$target"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: sharptls-coverage-fuzz-${{ github.run_id }}
+          path: |
+            artifacts/fuzz-corpus
+            artifacts/fuzz-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+  provenance:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, release-quality, public-interop, coverage-fuzz]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      NUGET_USER: ${{ secrets.NUGET_USER }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 9.0.x
+      - run: dotnet restore SharpTls.slnx
+      - run: dotnet build SharpTls.slnx --no-restore --configuration Release -p:ContinuousIntegrationBuild=true
+      - name: Validate tag and create tag-versioned packages twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '$GITHUB_REF_NAME' must be v<SemVer>." >&2
+            exit 1
+          fi
+
+          dotnet pack src/SharpTls/SharpTls.csproj --no-build --configuration Release \
+            --output artifacts/raw-release-a \
+            -p:ContinuousIntegrationBuild=true \
+            -p:PackageVersion="$version" \
+            -p:RepositoryCommit="$GITHUB_SHA"
+          dotnet pack src/SharpTls/SharpTls.csproj --no-build --configuration Release \
+            --output artifacts/raw-release-b \
+            -p:ContinuousIntegrationBuild=true \
+            -p:PackageVersion="$version" \
+            -p:RepositoryCommit="$GITHUB_SHA"
+
+          mkdir -p artifacts/release artifacts/release-peer
+          for file in artifacts/raw-release-a/*; do
+            dotnet run --project tools/SharpTls.PackageReproducibility/SharpTls.PackageReproducibility.csproj \
+              --no-build --configuration Release -- \
+              "$file" "artifacts/release/$(basename "$file")"
+          done
+          for file in artifacts/raw-release-b/*; do
+            dotnet run --project tools/SharpTls.PackageReproducibility/SharpTls.PackageReproducibility.csproj \
+              --no-build --configuration Release -- \
+              "$file" "artifacts/release-peer/$(basename "$file")"
+          done
+
+      - name: Require reproducible, complete release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(artifacts/release/*.nupkg)
+          symbols=(artifacts/release/*.snupkg)
+          test "${#packages[@]}" -eq 1
+          test "${#symbols[@]}" -eq 1
+
+          for file in artifacts/release/*; do
+            peer="artifacts/release-peer/$(basename "$file")"
+            test -f "$peer"
+            cmp --silent "$file" "$peer"
+            sha256sum "$file"
+          done
+
+          unzip -l "${packages[0]}" | tee artifacts/package-contents.txt
+          grep -Fq "lib/net9.0/SharpTls.dll" artifacts/package-contents.txt
+          grep -Fq "PACKAGE-README.md" artifacts/package-contents.txt
+          grep -Fq "LICENSE" artifacts/package-contents.txt
+          grep -Fq "sharptls-icon.png" artifacts/package-contents.txt
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: artifacts/release/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sharptls-${{ github.ref_name }}-attested
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/release/* \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            release_flags=()
+            if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" artifacts/release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "SharpTls $GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              "${release_flags[@]}"
+          fi
+      - name: Exchange GitHub OIDC token for a short-lived NuGet key
+        if: env.NUGET_USER != ''
+        id: nuget_login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ env.NUGET_USER }}
+      - name: Publish package and symbols to NuGet.org
+        shell: bash
+        env:
+          TRUSTED_NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          api_key="${TRUSTED_NUGET_API_KEY:-${NUGET_API_KEY:-}}"
+          if [[ -z "$api_key" ]]; then
+            echo "::notice title=NuGet.org publication skipped::Configure Trusted Publishing with NUGET_USER, or add the NUGET_API_KEY fallback secret."
+            exit 0
+          fi
+          dotnet nuget push artifacts/release/*.nupkg \
+            --api-key "$api_key" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
