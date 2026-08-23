@@ -216,7 +216,22 @@ internal sealed class TlsQuicClientHelloProfileFactory
             tls(builder);
             builder
                 .WithAlpn(alpn)
-                .WithQuicTransportParameters(parameters);
+                .WithQuicTransportParameters(parameters)
+
+                // RFC 9001 s8.4: QUIC does not use TLS compatibility mode, so the ClientHello's
+                // legacy_session_id MUST be empty; a server treats a non-empty one as a protocol
+                // violation. Forced HERE, alongside ALPN and the transport parameters, because it
+                // is the same kind of rule - QUIC's, not the persona's - and a caller's TLS half
+                // cannot be trusted to have got it right.
+                //
+                // EMPTY IS NOT null. ClientHelloBuilder.WithSessionId(null) means UNSPECIFIED,
+                // and ClientHelloEncoder then fills 32 random bytes for TLS 1.3 compatibility
+                // mode. That default is correct over TCP and illegal over QUIC, and it is what
+                // made BoringSSL peers - www.google.com, cloudflare-quic.com, every Spotify
+                // host - answer CRYPTO_ERROR with alert 47 (illegal_parameter) before any
+                // request. Lenient stacks accepted it, which is why offline tests and
+                // fp.impersonate.pro never showed it.
+                .WithSessionId([]);
         });
     }
 }

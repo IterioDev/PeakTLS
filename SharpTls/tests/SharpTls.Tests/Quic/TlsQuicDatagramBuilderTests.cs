@@ -1099,18 +1099,18 @@ public sealed class TlsQuicDatagramBuilderTests
     //
     //   ROWS 1, 2 AND 3 ARE THE SIZE-BOUNDARY ONES AND THEY ARE THE VACUITY HAZARD THIS
     //   SECTION WAS BUILT AROUND. The input straddles the boundary in all three: the
-    //   ClientHello is 1512 bytes against a 1400-byte budget, so it is longer than the
+    //   ClientHello is 1480 bytes against a 1400-byte budget, so it is longer than the
     //   budget but shorter than twice it, and every one of the three moves lands somewhere
     //   different.
     //     Row 3 raises the budget to 1600, ABOVE the stream, so the flight collapses to one
-    //       datagram and the "more than one" clause catches it. 1512 < 1600 is the straddle.
+    //       datagram and the "more than one" clause catches it. 1480 < 1600 is the straddle.
     //     Row 1 raises it to 1500, still BELOW the stream, so the flight is still two
     //       datagrams - the count says nothing - but the first becomes
     //       50 + 1500 = 1550 bytes, which is 78 over the capture's 1472 ceiling. Only the
-    //       per-datagram ceiling check catches it. 1512 > 1500 is the straddle.
+    //       per-datagram ceiling check catches it. 1480 > 1500 is the straddle.
     //     Row 2 lowers it to 1300: still two datagrams, and BOTH still land inside
     //       [1200, 1472] at 1350 and 1200. Neither the count clause nor the band clause sees
-    //       it at all. Only the exact [1450, 1200] and exact [1400, 112] assertions catch it
+    //       it at all. Only the exact [1450, 1200] and exact [1400, 80] assertions catch it
     //       - which is why the exact sizes are asserted as well as the band, and why row 2 is
     //       in this ledger rather than left out as "obviously covered".
     // ==============================================================================
@@ -1168,8 +1168,8 @@ public sealed class TlsQuicDatagramBuilderTests
         // same way.
         //
         // THE ARITHMETIC, from this class's header comment plus s19.6's CRYPTO fields:
-        //   the ClientHello encodes to 1512 bytes, so the preset's 1400-byte budget cuts it
-        //   at [1400, 112] - it STRADDLES the budget, which is what makes the split point
+        //   the ClientHello encodes to 1480 bytes, so the preset's 1400-byte budget cuts it
+        //   at [1400, 80] - it STRADDLES the budget, which is what makes the split point
         //   observable at all;
         //   datagram 0 = 28 header + 2 Length + (1 Type + 1 Offset + 2 Length + 1400) + 16
         //              = 1450, already over the 1200 target so no PADDING is added;
@@ -1189,8 +1189,8 @@ public sealed class TlsQuicDatagramBuilderTests
             clientHello,
             SentAt);
 
-        Assert.Equal(1512, clientHello.Length);
-        Assert.Equal(new[] { 1400, 112 }, byteCounts);
+        Assert.Equal(1480, clientHello.Length);
+        Assert.Equal(new[] { 1400, 80 }, byteCounts);
         Assert.Equal(new[] { 1, 1 }, framesPerDatagram);
         Assert.True(flight.Count > 1, $"The flight is {flight.Count} datagram(s), not more than one.");
         Assert.Equal(new[] { 1450, 1200 }, flight.Select(datagram => datagram.Length).ToArray());
@@ -1220,7 +1220,7 @@ public sealed class TlsQuicDatagramBuilderTests
         // what neither verification endpoint inspects - so this test is the only thing in
         // the repository that can report the silent failure at all.
         //
-        // 1562 = 28 + 2 + (1 Type + 1 Offset + 2 Length + 1512) + 16, and it is asserted
+        // 1530 = 28 + 2 + (1 Type + 1 Offset + 2 Length + 1480) + 16, and it is asserted
         // exactly because "over 1472" is also true of a flight that went wrong some other
         // way. It is 90 bytes over the ceiling the capture advertises.
         var ceiling = AdvertisedMaximumUdpPayload();
@@ -1231,9 +1231,9 @@ public sealed class TlsQuicDatagramBuilderTests
             Spec(1200), Template(keys, VectorPlan()), clientHello, SentAt);
 
         var datagram = Assert.Single(flight);
-        Assert.Equal(1562, datagram.Length);
+        Assert.Equal(1530, datagram.Length);
         Assert.True(datagram.Length > ceiling, "The unsplit flight no longer overshoots.");
-        Assert.Equal(90, datagram.Length - ceiling);
+        Assert.Equal(58, datagram.Length - ceiling);
     }
 
     [Fact]
@@ -1260,7 +1260,7 @@ public sealed class TlsQuicDatagramBuilderTests
         var crypto = CryptoFramesOf(keys, flight);
 
         Assert.Equal(new[] { 0UL, 1400UL }, crypto.Select(frame => frame.Offset).ToArray());
-        Assert.Equal(new[] { 1400, 112 }, crypto.Select(frame => frame.Data.Length).ToArray());
+        Assert.Equal(new[] { 1400, 80 }, crypto.Select(frame => frame.Data.Length).ToArray());
 
         // Contiguous from 0, stated as the running sum rather than as the two offsets above
         // so that a longer flight would be checked the same way.
@@ -1283,15 +1283,15 @@ public sealed class TlsQuicDatagramBuilderTests
         // clients/browsers/apps/systems could send a different value". A different client
         // splits its Initial flight differently, so a caller states its own frame byte
         // counts and its own frames-per-datagram and gets exactly those - three frames of
-        // 500/500/512 grouped two-then-one, which is a shape PlanInitialFlightSplit can
+        // 500/500/480 grouped two-then-one, which is a shape PlanInitialFlightSplit can
         // never produce (its budget is uniform and it puts one frame in each datagram).
         // Deliberately NOT the preset's shape, so a builder that ignored the spec and used
-        // the preset would produce two frames of 1400/112 in two datagrams and fail here.
+        // the preset would produce two frames of 1400/80 in two datagrams and fail here.
         var clientHello = Brave151ClientHello();
         using var keys = VectorKeys();
 
         var flight = TlsQuicDatagramBuilder.BuildInitialFlight(
-            SplitSpec([500, 500, 512], [2, 1]),
+            SplitSpec([500, 500, 480], [2, 1]),
             Template(keys, VectorPlan()),
             clientHello,
             SentAt);
@@ -1305,7 +1305,7 @@ public sealed class TlsQuicDatagramBuilderTests
         Assert.Equal(new[] { 0UL, 500UL }, first.Select(frame => frame.Offset).ToArray());
         Assert.Equal(new[] { 500, 500 }, first.Select(frame => frame.Data.Length).ToArray());
         Assert.Equal(new[] { 1000UL }, second.Select(frame => frame.Offset).ToArray());
-        Assert.Equal(new[] { 512 }, second.Select(frame => frame.Data.Length).ToArray());
+        Assert.Equal(new[] { 480 }, second.Select(frame => frame.Data.Length).ToArray());
         Assert.Equal(
             clientHello,
             first.Concat(second).SelectMany(frame => frame.Data.ToArray()).ToArray());

@@ -77,7 +77,11 @@ public static partial class ClientHelloProfiles
             .WithGrease(ClientHelloGreasePolicy.CreateWithSecondaryExtension(0, 1, 2, 2, 3, 4))
             .WithSecondaryGreaseExtension([0x00])
             .WithGreaseKeyShareBody([0x00])
-            .WithSessionId(null)                  // legacy_session_id is empty over QUIC
+            // Empty, as the capture shows. [] and not null: null means UNSPECIFIED, which the
+            // encoder fills with 32 random bytes. TlsQuicClientHelloProfileFactory forces this
+            // for every QUIC hello anyway; stated here so the profile matches the capture on
+            // its own terms rather than relying on that.
+            .WithSessionId([])
             // 0x1302, 0x1303, 0x1301 — the order in 4 of 4 proxy captures. The 80 pcapng
             // connections decrypted from Initials show 0x1302, 0x1301, 0x1303 instead, from the
             // same phone on the same build. The split is real and unexplained; the proxy path is

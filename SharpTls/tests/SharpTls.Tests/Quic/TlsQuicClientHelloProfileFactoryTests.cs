@@ -52,6 +52,53 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
     // The token, decoded out of the encoded ClientHello.
     // ------------------------------------------------------------------------------
 
+    /// <summary>
+    /// RFC 9001 s8.4: QUIC does not use TLS compatibility mode, so legacy_session_id MUST be
+    /// empty. This regressed in the field, not in a test: WithSessionId(null) reads as "empty"
+    /// but means UNSPECIFIED, and the encoder then filled 32 random bytes. Every BoringSSL peer
+    /// answered CRYPTO_ERROR + alert 47 (illegal_parameter) before any request; lenient peers
+    /// accepted it, so nothing offline or against fp.impersonate.pro ever noticed.
+    /// </summary>
+    [Fact]
+    public void TheSessionIdIsEmptyBecauseQuicHasNoCompatibilityMode()
+    {
+        // OFF THE ENCODED BYTES, NOT off ClientHelloCapture.Import. Import drops the session id
+        // unless PreserveSessionId is set, so Spec.SessionId is null whatever the wire says -
+        // the first version of this test asserted on it and passed with the fix reverted.
+        // Walks to the field rather than assuming an offset: the record header is optional here.
+        static int SessionIdLengthOf(byte[] hello)
+        {
+            var i = hello[0] == 0x16 ? 5 : 0;      // optional TLS record header
+            i += 4;                                 // handshake type + 3-byte length
+            i += 2 + TlsConstants.RandomLength;     // legacy_version + random
+            return hello[i];
+        }
+
+        static int EncodedSessionIdLength(TlsQuicClientHelloProfileFactory factory)
+        {
+            return SessionIdLengthOf(Encode(factory));
+        }
+
+        // The caller's TLS half asks for the ILLEGAL thing, which is the point: a persona must
+        // not be able to put a session id on a QUIC hello, whether by asking for one outright
+        // or by leaving it unspecified and inheriting the 32-byte TCP compatibility default.
+        Assert.Equal(0, EncodedSessionIdLength(new TlsQuicClientHelloProfileFactory
+        {
+            Tls = builder => builder.WithSessionId(new byte[32]),
+        }));
+
+        Assert.Equal(0, EncodedSessionIdLength(new TlsQuicClientHelloProfileFactory
+        {
+            Tls = builder => builder.WithSessionId(null),
+        }));
+
+        // Non-vacuous in the other direction: over TCP the same request DOES produce one, so
+        // the assertions above are reading a real field that can hold a non-zero value.
+        Assert.Equal(32, SessionIdLengthOf(
+            ClientHelloProfiles.Custom(b => b.WithSessionId(new byte[32]))
+                .BuildDeterministicForTesting("example.test", Seed)));
+    }
+
     [Fact]
     public void TheShippedFactoryOffersTheTokenRfc9114Section3Point2Names()
     {
