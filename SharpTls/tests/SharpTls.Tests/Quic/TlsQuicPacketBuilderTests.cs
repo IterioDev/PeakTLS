@@ -1,4 +1,4 @@
-﻿using SharpTls.Fuzzing;
+using SharpTls.Fuzzing;
 using SharpTls.Quic;
 
 namespace SharpTls.Tests.Quic;
@@ -694,6 +694,37 @@ public sealed class TlsQuicPacketBuilderTests
     // A.2 allows one byte here because only one packet number is unacknowledged. The
     // Length field is 1 + 8 + 16 = 25 = 0x19 and byte 0 is 0xC0 for a 1-byte packet
     // number.
+    // THE OTHER SIDE OF THE BOUND, AND THE NUMBER THE PROBE BUILDERS PAD TO. s5.4.2's sample
+    // starts at pn_offset + 4, so the frames have to make up whatever the packet number does
+    // not: "at least 3 bytes of frames ... if the packet number is encoded on a single byte, or
+    // 2 bytes of frames for a 2-byte packet number encoding". The row above proves 2 bytes is
+    // refused at a 1-byte packet number; this proves 3 is enough, which is what
+    // TlsQuicConnection.PadForHeaderProtectionSample computes as 4 - packetNumberLength.
+    //
+    // WHY IT MATTERS THAT THIS IS PINNED. Both probe builders send a lone PING and both MEASURE
+    // the datagram by building it once before padding it. An off-by-one in that pad would put
+    // the throw back exactly where it was, and only for profiles with a short packet number.
+    [Theory]
+    [InlineData(1, 3)]
+    [InlineData(2, 2)]
+    [InlineData(3, 1)]
+    [InlineData(4, 1)]
+    public void TheSectionFiveFourTwoMinimumIsFourLessThePacketNumberLength(
+        int packetNumberLength, int frameCount)
+    {
+        var frames = Enumerable
+            .Range(0, frameCount)
+            .Select(_ => new TlsQuicFrame { RawType = 0x01 })
+            .ToArray();
+        var plan = VectorPlan() with
+        {
+            PacketNumber = 0,
+            PacketNumberEncodedLength = packetNumberLength,
+        };
+
+        BuildOrThrow(plan, frames);
+    }
+
     [Fact]
     public void TheAeadNonceUsesTheFullPacketNumberNotTheTruncatedWireForm()
     {

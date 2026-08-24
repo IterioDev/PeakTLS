@@ -3956,6 +3956,42 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// the packet inside it.</summary>
     internal int LastProbeDatagramBytes { get; private set; }
 
+
+    /// <summary>
+    /// Adds the PADDING RFC 9001 section 5.4.2 requires before a payload can carry a header
+    /// protection sample.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE SAMPLE IS 16 BYTES TAKEN AT pn_offset + 4, so a packet needs 4 bytes where the
+    /// packet number sits before the sample even begins. s5.4.2 states the consequence and the
+    /// remedy in one breath: this "results in needing at least 3 bytes of frames in the
+    /// unprotected payload if the packet number is encoded on a single byte, or 2 bytes of
+    /// frames for a 2-byte packet number encoding", and "endpoints can add PADDING frames".
+    /// </para>
+    /// <para>THE TWO PROBE BUILDERS ARE THE ONLY PAYLOADS SHORT ENOUGH TO NEED IT. Both send a
+    /// lone PING - one byte - and both then MEASURE the datagram by building it once before
+    /// padding it to the size they want. That throwaway build is a real build: it protects the
+    /// header, so it hits this bound first and throws, and the padding that would have fixed
+    /// it never gets added. A profile with a 1-byte packet number therefore could not send a
+    /// PTO probe or a path MTU probe at all.</para>
+    /// <para>COUNT IS LENGTH HERE, and only here: PING and PADDING are one byte each (s19.1,
+    /// s19.2), so a list of them encodes to its own count. Do not reuse this on a list that
+    /// can hold anything else.</para>
+    /// </remarks>
+    /// <param name="frames">The probe's frames, PING first.</param>
+    /// <param name="packetNumberLength">The encoded packet number length this packet will use.</param>
+    private static void PadForHeaderProtectionSample(
+        List<TlsQuicFrame> frames, int packetNumberLength)
+    {
+        for (var length = frames.Count; length < HeaderProtectionSampleOffset - packetNumberLength; length++)
+        {
+            frames.Add(default);
+        }
+    }
+
+    /// <summary>RFC 9001 s5.4.2's sample offset from the start of the packet number, 4.</summary>
+    private const int HeaderProtectionSampleOffset = 4;
+
     // RFC 9002 A.9's SendOneAckElicitingHandshakePacket, SendOneAckElicitingPaddedInitialPacket
     // and SendOneOrTwoAckElicitingPackets, which differ here only in the space and the count -
     // see OnLossDetectionTimeout for why the space is A.8's answer in all three cases.
@@ -4000,6 +4036,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
         var plan = ShortHeaderPlan();
         packetNumber = plan.PacketNumber;
+        PadForHeaderProtectionSample(frames, plan.PacketNumberEncodedLength);
 
         var packet = new TlsQuicPacketToSend
         {
@@ -4158,11 +4195,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             new() { RawType = (ulong)TlsQuicFrameType.Ping },
         };
 
+        var probePlan = space == TlsQuicEncryptionLevel.Application
+            ? ShortHeaderPlan()
+            : PlanFor(space, _nextPacketNumber[(int)space]++);
+        PadForHeaderProtectionSample(frames, probePlan.PacketNumberEncodedLength);
+
         var packet = new TlsQuicPacketToSend
         {
-            Plan = space == TlsQuicEncryptionLevel.Application
-                ? ShortHeaderPlan()
-                : PlanFor(space, _nextPacketNumber[(int)space]++),
+            Plan = probePlan,
             Frames = frames,
             PacketProtectionCipher = keys.PacketCipher,
             Key = keys.Key.ToArray(),
