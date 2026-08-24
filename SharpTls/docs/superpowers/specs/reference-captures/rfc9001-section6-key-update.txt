@@ -1,0 +1,319 @@
+RFC 9001 Section 6 - Key Update (complete: 6, 6.1 - 6.6)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9001.txt on 2026-08-24.
+Captured for the client-side MUST conformance audit (docs/RFC-CONFORMANCE.md), to close a
+question the section 5 extract could not answer: section 5.3 carries a MUST to initiate a key
+update before AEAD limits, but the rule governing a response to a PEER-initiated update lives
+here. Without this extract the audit could only report the send side and had to leave the
+receive side UNVERIFIED.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+6.  Key Update
+
+   Once the handshake is confirmed (see Section 4.1.2), an endpoint MAY
+   initiate a key update.
+
+   The Key Phase bit indicates which packet protection keys are used to
+   protect the packet.  The Key Phase bit is initially set to 0 for the
+   first set of 1-RTT packets and toggled to signal each subsequent key
+   update.
+
+   The Key Phase bit allows a recipient to detect a change in keying
+   material without needing to receive the first packet that triggered
+   the change.  An endpoint that notices a changed Key Phase bit updates
+   keys and decrypts the packet that contains the changed value.
+
+   Initiating a key update results in both endpoints updating keys.
+   This differs from TLS where endpoints can update keys independently.
+
+   This mechanism replaces the key update mechanism of TLS, which relies
+   on KeyUpdate messages sent using 1-RTT encryption keys.  Endpoints
+   MUST NOT send a TLS KeyUpdate message.  Endpoints MUST treat the
+   receipt of a TLS KeyUpdate message as a connection error of type
+   0x010a, equivalent to a fatal TLS alert of unexpected_message; see
+   Section 4.8.
+
+   Figure 9 shows a key update process, where the initial set of keys
+   used (identified with @M) are replaced by updated keys (identified
+   with @N).  The value of the Key Phase bit is indicated in brackets
+   [].
+
+      Initiating Peer                    Responding Peer
+
+   @M [0] QUIC Packets
+
+   ... Update to @N
+   @N [1] QUIC Packets
+                         -------->
+                                            Update to @N ...
+                                         QUIC Packets [1] @N
+                         <--------
+                                         QUIC Packets [1] @N
+                                       containing ACK
+                         <--------
+   ... Key Update Permitted
+
+   @N [1] QUIC Packets
+            containing ACK for @N packets
+                         -------->
+                                    Key Update Permitted ...
+
+                            Figure 9: Key Update
+
+6.1.  Initiating a Key Update
+
+   Endpoints maintain separate read and write secrets for packet
+   protection.  An endpoint initiates a key update by updating its
+   packet protection write secret and using that to protect new packets.
+   The endpoint creates a new write secret from the existing write
+   secret as performed in Section 7.2 of [TLS13].  This uses the KDF
+   function provided by TLS with a label of "quic ku".  The
+   corresponding key and IV are created from that secret as defined in
+   Section 5.1.  The header protection key is not updated.
+
+   For example, to update write keys with TLS 1.3, HKDF-Expand-Label is
+   used as:
+
+   secret_<n+1> = HKDF-Expand-Label(secret_<n>, "quic ku",
+                                    "", Hash.length)
+
+   The endpoint toggles the value of the Key Phase bit and uses the
+   updated key and IV to protect all subsequent packets.
+
+   An endpoint MUST NOT initiate a key update prior to having confirmed
+   the handshake (Section 4.1.2).  An endpoint MUST NOT initiate a
+   subsequent key update unless it has received an acknowledgment for a
+   packet that was sent protected with keys from the current key phase.
+   This ensures that keys are available to both peers before another key
+   update can be initiated.  This can be implemented by tracking the
+   lowest packet number sent with each key phase and the highest
+   acknowledged packet number in the 1-RTT space: once the latter is
+   higher than or equal to the former, another key update can be
+   initiated.
+
+      |  Note: Keys of packets other than the 1-RTT packets are never
+      |  updated; their keys are derived solely from the TLS handshake
+      |  state.
+
+   The endpoint that initiates a key update also updates the keys that
+   it uses for receiving packets.  These keys will be needed to process
+   packets the peer sends after updating.
+
+   An endpoint MUST retain old keys until it has successfully
+   unprotected a packet sent using the new keys.  An endpoint SHOULD
+   retain old keys for some time after unprotecting a packet sent using
+   the new keys.  Discarding old keys too early can cause delayed
+   packets to be discarded.  Discarding packets will be interpreted as
+   packet loss by the peer and could adversely affect performance.
+
+6.2.  Responding to a Key Update
+
+   A peer is permitted to initiate a key update after receiving an
+   acknowledgment of a packet in the current key phase.  An endpoint
+   detects a key update when processing a packet with a key phase that
+   differs from the value used to protect the last packet it sent.  To
+   process this packet, the endpoint uses the next packet protection key
+   and IV.  See Section 6.3 for considerations about generating these
+   keys.
+
+   If a packet is successfully processed using the next key and IV, then
+   the peer has initiated a key update.  The endpoint MUST update its
+   send keys to the corresponding key phase in response, as described in
+   Section 6.1.  Sending keys MUST be updated before sending an
+   acknowledgment for the packet that was received with updated keys.
+   By acknowledging the packet that triggered the key update in a packet
+   protected with the updated keys, the endpoint signals that the key
+   update is complete.
+
+   An endpoint can defer sending the packet or acknowledgment according
+   to its normal packet sending behavior; it is not necessary to
+   immediately generate a packet in response to a key update.  The next
+   packet sent by the endpoint will use the updated keys.  The next
+   packet that contains an acknowledgment will cause the key update to
+   be completed.  If an endpoint detects a second update before it has
+   sent any packets with updated keys containing an acknowledgment for
+   the packet that initiated the key update, it indicates that its peer
+   has updated keys twice without awaiting confirmation.  An endpoint
+   MAY treat such consecutive key updates as a connection error of type
+   KEY_UPDATE_ERROR.
+
+   An endpoint that receives an acknowledgment that is carried in a
+   packet protected with old keys where any acknowledged packet was
+   protected with newer keys MAY treat that as a connection error of
+   type KEY_UPDATE_ERROR.  This indicates that a peer has received and
+   acknowledged a packet that initiates a key update, but has not
+   updated keys in response.
+
+6.3.  Timing of Receive Key Generation
+
+   Endpoints responding to an apparent key update MUST NOT generate a
+   timing side-channel signal that might indicate that the Key Phase bit
+   was invalid (see Section 9.5).  Endpoints can use randomized packet
+   protection keys in place of discarded keys when key updates are not
+   yet permitted.  Using randomized keys ensures that attempting to
+   remove packet protection does not result in timing variations, and
+   results in packets with an invalid Key Phase bit being rejected.
+
+   The process of creating new packet protection keys for receiving
+   packets could reveal that a key update has occurred.  An endpoint MAY
+   generate new keys as part of packet processing, but this creates a
+   timing signal that could be used by an attacker to learn when key
+   updates happen and thus leak the value of the Key Phase bit.
+
+   Endpoints are generally expected to have current and next receive
+   packet protection keys available.  For a short period after a key
+   update completes, up to the PTO, endpoints MAY defer generation of
+   the next set of receive packet protection keys.  This allows
+   endpoints to retain only two sets of receive keys; see Section 6.5.
+
+   Once generated, the next set of packet protection keys SHOULD be
+   retained, even if the packet that was received was subsequently
+   discarded.  Packets containing apparent key updates are easy to
+   forge, and while the process of key update does not require
+   significant effort, triggering this process could be used by an
+   attacker for DoS.
+
+   For this reason, endpoints MUST be able to retain two sets of packet
+   protection keys for receiving packets: the current and the next.
+   Retaining the previous keys in addition to these might improve
+   performance, but this is not essential.
+
+6.4.  Sending with Updated Keys
+
+   An endpoint never sends packets that are protected with old keys.
+   Only the current keys are used.  Keys used for protecting packets can
+   be discarded immediately after switching to newer keys.
+
+   Packets with higher packet numbers MUST be protected with either the
+   same or newer packet protection keys than packets with lower packet
+   numbers.  An endpoint that successfully removes protection with old
+   keys when newer keys were used for packets with lower packet numbers
+   MUST treat this as a connection error of type KEY_UPDATE_ERROR.
+
+6.5.  Receiving with Different Keys
+
+   For receiving packets during a key update, packets protected with
+   older keys might arrive if they were delayed by the network.
+   Retaining old packet protection keys allows these packets to be
+   successfully processed.
+
+   As packets protected with keys from the next key phase use the same
+   Key Phase value as those protected with keys from the previous key
+   phase, it is necessary to distinguish between the two if packets
+   protected with old keys are to be processed.  This can be done using
+   packet numbers.  A recovered packet number that is lower than any
+   packet number from the current key phase uses the previous packet
+   protection keys; a recovered packet number that is higher than any
+   packet number from the current key phase requires the use of the next
+   packet protection keys.
+
+   Some care is necessary to ensure that any process for selecting
+   between previous, current, and next packet protection keys does not
+   expose a timing side channel that might reveal which keys were used
+   to remove packet protection.  See Section 9.5 for more information.
+
+   Alternatively, endpoints can retain only two sets of packet
+   protection keys, swapping previous for next after enough time has
+   passed to allow for reordering in the network.  In this case, the Key
+   Phase bit alone can be used to select keys.
+
+   An endpoint MAY allow a period of approximately the Probe Timeout
+   (PTO; see [QUIC-RECOVERY]) after promoting the next set of receive
+   keys to be current before it creates the subsequent set of packet
+   protection keys.  These updated keys MAY replace the previous keys at
+   that time.  With the caveat that PTO is a subjective measure -- that
+   is, a peer could have a different view of the RTT -- this time is
+   expected to be long enough that any reordered packets would be
+   declared lost by a peer even if they were acknowledged and short
+   enough to allow a peer to initiate further key updates.
+
+   Endpoints need to allow for the possibility that a peer might not be
+   able to decrypt packets that initiate a key update during the period
+   when the peer retains old keys.  Endpoints SHOULD wait three times
+   the PTO before initiating a key update after receiving an
+   acknowledgment that confirms that the previous key update was
+   received.  Failing to allow sufficient time could lead to packets
+   being discarded.
+
+   An endpoint SHOULD retain old read keys for no more than three times
+   the PTO after having received a packet protected using the new keys.
+   After this period, old read keys and their corresponding secrets
+   SHOULD be discarded.
+
+6.6.  Limits on AEAD Usage
+
+   This document sets usage limits for AEAD algorithms to ensure that
+   overuse does not give an adversary a disproportionate advantage in
+   attacking the confidentiality and integrity of communications when
+   using QUIC.
+
+   The usage limits defined in TLS 1.3 exist for protection against
+   attacks on confidentiality and apply to successful applications of
+   AEAD protection.  The integrity protections in authenticated
+   encryption also depend on limiting the number of attempts to forge
+   packets.  TLS achieves this by closing connections after any record
+   fails an authentication check.  In comparison, QUIC ignores any
+   packet that cannot be authenticated, allowing multiple forgery
+   attempts.
+
+   QUIC accounts for AEAD confidentiality and integrity limits
+   separately.  The confidentiality limit applies to the number of
+   packets encrypted with a given key.  The integrity limit applies to
+   the number of packets decrypted within a given connection.  Details
+   on enforcing these limits for each AEAD algorithm follow below.
+
+   Endpoints MUST count the number of encrypted packets for each set of
+   keys.  If the total number of encrypted packets with the same key
+   exceeds the confidentiality limit for the selected AEAD, the endpoint
+   MUST stop using those keys.  Endpoints MUST initiate a key update
+   before sending more protected packets than the confidentiality limit
+   for the selected AEAD permits.  If a key update is not possible or
+   integrity limits are reached, the endpoint MUST stop using the
+   connection and only send stateless resets in response to receiving
+   packets.  It is RECOMMENDED that endpoints immediately close the
+   connection with a connection error of type AEAD_LIMIT_REACHED before
+   reaching a state where key updates are not possible.
+
+   For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the confidentiality limit
+   is 2^23 encrypted packets; see Appendix B.1.  For
+   AEAD_CHACHA20_POLY1305, the confidentiality limit is greater than the
+   number of possible packets (2^62) and so can be disregarded.  For
+   AEAD_AES_128_CCM, the confidentiality limit is 2^21.5 encrypted
+   packets; see Appendix B.2.  Applying a limit reduces the probability
+   that an attacker can distinguish the AEAD in use from a random
+   permutation; see [AEBounds], [ROBUST], and [GCM-MU].
+
+   In addition to counting packets sent, endpoints MUST count the number
+   of received packets that fail authentication during the lifetime of a
+   connection.  If the total number of received packets that fail
+   authentication within the connection, across all keys, exceeds the
+   integrity limit for the selected AEAD, the endpoint MUST immediately
+   close the connection with a connection error of type
+   AEAD_LIMIT_REACHED and not process any more packets.
+
+   For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the integrity limit is
+   2^52 invalid packets; see Appendix B.1.  For AEAD_CHACHA20_POLY1305,
+   the integrity limit is 2^36 invalid packets; see [AEBounds].  For
+   AEAD_AES_128_CCM, the integrity limit is 2^21.5 invalid packets; see
+   Appendix B.2.  Applying this limit reduces the probability that an
+   attacker can successfully forge a packet; see [AEBounds], [ROBUST],
+   and [GCM-MU].
+
+   Endpoints that limit the size of packets MAY use higher
+   confidentiality and integrity limits; see Appendix B for details.
+
+   Future analyses and specifications MAY relax confidentiality or
+   integrity limits for an AEAD.
+
+   Any TLS cipher suite that is specified for use with QUIC MUST define
+   limits on the use of the associated AEAD function that preserves
+   margins for confidentiality and integrity.  That is, limits MUST be
+   specified for the number of packets that can be authenticated and for
+   the number of packets that can fail authentication.  Providing a
+   reference to any analysis upon which values are based -- and any
+   assumptions used in that analysis -- allows limits to be adapted to
+   varying usage conditions.
+
+6.7.  Key Update Error Code
+
+   The KEY_UPDATE_ERROR error code (0x0e) is used to signal errors
+   related to key updates.

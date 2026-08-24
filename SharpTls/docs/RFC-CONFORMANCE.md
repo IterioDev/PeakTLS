@@ -1,7 +1,7 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and RFC 9001 §5
-(packet protection) are done. Every other
+Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and RFC 9001 §5-§6
+(packet protection, key update) are done. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -143,12 +143,32 @@ Severity **LATENT** for the send side. The AEAD limits this MUST protects are on
 2^23 packets for AES-GCM; a fingerprinting client making a handful of requests per connection
 will not approach them, so no live failure is expected.
 
-**The receive side is the part worth attention, and this audit cannot rule on it.** RFC 9001
-§6 is NOT among the pinned extracts, so the rule governing a client's response to a
-*peer-initiated* key update is outside what this document may quote. What can be stated from
-the code alone: the client parses the Key Phase bit but cannot derive the next generation of
-secrets, so a server that initiates a key update would leave it unable to decrypt. Whether that
-is a MUST violation is UNVERIFIED pending a pinned §6.
+**The receive side is worse, and §6 has since been pinned to settle it.** RFC 9001 §6.2:
+*"If a packet is successfully processed using the next key and IV, then the peer has initiated
+a key update. The endpoint MUST update its send keys to the corresponding key phase in
+response."* The client parses the Key Phase bit but cannot derive the next generation of
+secrets, so a server that initiates a key update leaves it unable to decrypt and unable to
+respond. This is a MUST violation, not merely an absent optimisation.
+
+Severity on the receive side is **BLOCKS-INTEROP, conditional**: it bites only when a peer
+actually initiates an update. Short request/response connections rarely see one, which is why
+the live HTTP/3 tests against Google, Cloudflare and Spotify all pass — but the client has no
+defence if a peer chooses to.
+
+#### FINDING 2 — AEAD packet counts are not tracked (MISSING)
+
+Searched: `confidentialityLimit`, `integrityLimit`, `AeadLimit`, `encryptedPacketCount`,
+`2^23`, `8388608`, `aeadConfidentiality` across `src` — no hits.
+
+RFC 9001 §6.6: *"Endpoints MUST count the number of encrypted packets for each set of keys. If
+the total number of encrypted packets with the same key exceeds the confidentiality limit for
+the selected AEAD, the endpoint MUST stop using those keys."* Nothing counts. This is the same
+root cause as FINDING 1 — without key update there is no action to take on reaching a limit —
+but it is a separate MUST and the RFC's fallback (*"If a key update is not possible ... the
+endpoint MUST stop using the"* keys) is also absent, so the client would simply keep
+encrypting past the limit.
+
+Severity **LATENT**, for the same arithmetic as FINDING 1.
 
 Still unaudited within RFC 9001: CRYPTO stream ordering and the §5.6 0-RTT key rules.
 
@@ -166,8 +186,8 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 - RFC 9000 — transport. Wire encoding (§12, §14, §16, §18, §19, packet formats) and lifecycle
   (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20).
-- RFC 9001 — §5 is audited above. Still open: CRYPTO stream ordering, §5.6 0-RTT keys, and
-  §6 key update, which needs its extract pinned before it can be ruled on.
+- RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
+  keys.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
   match exactly (a wrong constant is both a correctness and a fingerprint issue).
 - RFC 9114 — HTTP/3 framing, stream mapping, SETTINGS, pseudo-headers, error handling.
@@ -181,8 +201,9 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 19. Confirmed: 17 compliant, 1 defect (already fixed), 1 MISSING (key
-update, LATENT). One question left UNVERIFIED for want of a pinned extract. Dropped as false
+Findings raised: 21. Confirmed: 17 compliant, 1 defect (already fixed), 2 MISSING (key update,
+AEAD packet counting). The one question previously left UNVERIFIED was closed by pinning
+RFC 9001 §6, which turned it from an open question into a confirmed MUST violation. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
 packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
 code implemented them. Three near-misses in two passes is why the method note above exists.
