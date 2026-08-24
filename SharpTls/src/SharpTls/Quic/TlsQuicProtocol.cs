@@ -123,6 +123,15 @@ public enum TlsQuicTransportError : ulong
     /// announces a key phase other than the installed one.
     /// </summary>
     KeyUpdateError = 0x0E,
+
+    /// <summary>
+    /// RFC 9000 s20.1 AEAD_LIMIT_REACHED (0x0f): "The endpoint has reached the
+    /// confidentiality or integrity limit for the AEAD algorithm used by the given
+    /// connection." Raised by <see cref="TlsQuicConnection"/> when RFC 9001 s6.6's
+    /// integrity limit is passed, or when its confidentiality limit is reached and no
+    /// key update is possible.
+    /// </summary>
+    AeadLimitReached = 0x0F,
 }
 
 /// <summary>A fail-closed QUIC transport error raised by the recordless TLS boundary.</summary>

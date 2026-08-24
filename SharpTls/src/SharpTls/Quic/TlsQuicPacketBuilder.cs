@@ -313,8 +313,9 @@ internal static class TlsQuicPacketBuilder
     //   THE LOOPBACK SET =
     //     TlsQuicPacketBuilderTests.AShortHeaderPacketIsOpenedByThePacketReceiverAtTheIn
     //       stalledKeyPhase (both rows)
-    //     TlsQuicPacketBuilderTests.AShortHeaderPacketBuiltAtTheOtherKeyPhaseIsAKeyUpdat
-    //       eError (both rows)
+    //     TlsQuicPacketBuilderTests.AShortHeaderPacketBuiltAtTheOtherKeyPhaseIsDiscarded
+    //       (both rows; it read IsAKeyUpdateError until RFC 9001 s6 landed and a flipped
+    //       Key Phase bit stopped being a connection error)
     //
     // GROUP A - THIS FILE. Eight bullets.
     //

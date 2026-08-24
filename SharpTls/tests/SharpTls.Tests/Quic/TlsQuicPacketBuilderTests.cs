@@ -963,20 +963,25 @@ public sealed class TlsQuicPacketBuilderTests
     // pins only whichever the test happened to take.
     [InlineData(false, true)]
     [InlineData(true, false)]
-    public void AShortHeaderPacketBuiltAtTheOtherKeyPhaseIsAKeyUpdateError(bool built, bool installed)
+    public void AShortHeaderPacketBuiltAtTheOtherKeyPhaseIsDiscarded(bool built, bool installed)
     {
         // The negative half of the pair above, and the reason that one is about the KEY
         // PHASE BIT rather than merely about decryption succeeding. A builder that wrote a
         // constant Key Phase bit would still pass the positive test on one of its two
         // rows; it fails here on the row where the constant disagrees with the install.
         //
-        // AND THE PACKET AUTHENTICATES FIRST, which is what makes this evidence about the
-        // BIT and not about the keys. RFC 9000 s17.3.1 puts byte 0 inside the header, and
-        // RFC 9001 s5.3 puts the header inside the AEAD's associated data, so a Key Phase
-        // bit that disagreed with the bytes the builder sealed under would fail the tag and
-        // be discarded silently. Reaching TlsQuicPacketReceiver's s20.1 KEY_UPDATE_ERROR
-        // means the tag verified and the announced phase then contradicted the installed
-        // one - the receiver's own comment sets out that distinction at length.
+        // THIS TEST ASSERTED KEY_UPDATE_ERROR UNTIL RFC 9001 s6 WAS IMPLEMENTED. A flipped
+        // Key Phase bit used to be a connection error because this library could not follow
+        // a key update at all; it is now the announcement of one, and the receiver answers
+        // it by trying the NEXT generation of read keys. No next generation is armed here -
+        // this receiver was handed one set of keys directly - so s5.5 applies instead: "a
+        // packet that appears to trigger a key update but cannot be unprotected successfully
+        // MUST be discarded".
+        //
+        // THE BIT IS STILL WHAT THIS TEST IS ABOUT. The packet authenticates under the
+        // installed keys, so a builder writing a constant phase would be indistinguishable
+        // from one writing the right phase on the matching row and would still land in the
+        // discard on the other.
         var connectionId = Convert.FromHexString(ShortVectorDestinationConnectionIdHex);
         using var keys = OneRttKeys();
         var packet = Build(keys, ShortLoopbackPlan() with { KeyPhase = built }, ShortVectorFrames(), out _);
@@ -996,7 +1001,12 @@ public sealed class TlsQuicPacketBuilderTests
 
         Assert.Equal(0, result.Processed);
         Assert.Equal(0, seen);
-        Assert.Equal(TlsQuicTransportError.KeyUpdateError, result.CloseError);
+        Assert.Equal(1, result.Discarded);
+
+        // NOT A CLOSE, and that is the change. s5.5's discard leaves the connection alive so
+        // that a forged Key Phase bit cannot kill it - the same reasoning s17.3.1 gives for
+        // judging the reserved bits after the AEAD rather than before it.
+        Assert.Null(result.CloseError);
     }
 
     [Fact]

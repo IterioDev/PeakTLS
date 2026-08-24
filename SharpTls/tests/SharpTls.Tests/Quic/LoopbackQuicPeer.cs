@@ -761,6 +761,18 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
     }
 
+    /// <summary>Performs an RFC 9001 s6.1 key update on this peer, so that its next 1-RTT
+    /// packet is protected with generation n+1 and announces the flipped Key Phase bit.</summary>
+    /// <remarks>THE PEER'S KEY SET DOES THE WORK, which is the point: this harness holds a
+    /// real TlsQuicKeySet, so the derivation under test on the client's side is the same code
+    /// that produces the packets it is tested against. A hand-rolled "quic ku" here would let
+    /// one shared mistake cancel itself, which is the failure mode this whole file exists to
+    /// avoid.</remarks>
+    internal void UpdateKeys() => _keys.ApplyKeyUpdate(locallyInitiated: true);
+
+    /// <summary>Gets the RFC 9001 s6 key phase this peer protects 1-RTT packets with.</summary>
+    internal bool WriteKeyPhase => _keys.WriteKeyPhase;
+
     /// <summary>Sends one 1-RTT packet whose payload is the given already-encoded frame
     /// bytes.</summary>
     /// <remarks>FOR RFC 9221 s4's DATAGRAM FRAME AND NOTHING ELSE SO FAR. Every other frame
@@ -966,15 +978,18 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             truncated[i] = (byte)(packetNumber >> (8 * (truncated.Length - 1 - i)));
         }
 
-        // RFC 9000 s17.3.1. Spin bit clear and key phase 0: key update is out of scope for
-        // this phase, and TlsQuicKeySet installs every level at phase 0 - a packet claiming
-        // the other phase is closed on by the receiver, post-AEAD, per RFC 9001 s5.5.
+        // RFC 9000 s17.3.1. Spin bit clear; the key phase is whatever generation this peer's
+        // write keys are at. It read `KeyPhase = false` with the reason "key update is out of
+        // scope for this phase" until RFC 9001 s6 was implemented - and a hardcoded false here
+        // would make every key-update test silently test nothing, because the packet would
+        // announce the old phase while being sealed under the new keys and the client would
+        // discard it as a forgery rather than following the update.
         var headerLength = TlsQuicPacketHeader.WriteShortHeader(
             target,
             new TlsQuicShortHeader
             {
                 SpinBit = false,
-                KeyPhase = false,
+                KeyPhase = _keys.WriteKeyPhase,
                 DestinationConnectionId = _destinationConnectionId,
                 PacketNumberLength = truncated.Length,
                 PacketNumber = truncated,

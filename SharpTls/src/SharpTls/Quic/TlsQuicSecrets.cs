@@ -97,6 +97,56 @@ public sealed class TlsQuicTrafficSecret : IDisposable
         return (byte[])_secret.Clone();
     }
 
+    /// <summary>Derives the next generation of this secret for an RFC 9001 s6.1 key
+    /// update.</summary>
+    /// <remarks>
+    /// <para>s6.1: "The endpoint creates a new write secret from the existing write secret as
+    /// performed in Section 7.2 of [TLS13].  This uses the KDF function provided by TLS with a
+    /// label of 'quic ku'." Worked in the same section as
+    /// <c>secret_&lt;n+1&gt; = HKDF-Expand-Label(secret_&lt;n&gt;, "quic ku", "", Hash.length)</c>,
+    /// which is what this is: empty context, output the hash length.</para>
+    /// <para>THE LABEL IS VERSION-DEPENDENT and composed the same way
+    /// <see cref="DerivePacketProtectionKeys"/> composes its three. RFC 9369 s3.3.2 changes
+    /// every one of them together - "from 'quic key' to 'quicv2 key' ... and from 'quic ku' to
+    /// 'quicv2 ku'" - so a hardcoded "quic ku" here would work on v1 and silently derive the
+    /// wrong secret on v2, where the failure is a discarded packet rather than an
+    /// error.</para>
+    /// <para>INTERNAL, unlike its neighbours on this public type. Key update is a transport
+    /// concern that <see cref="TlsQuicKeySet"/> sequences - it owns which generation each
+    /// direction is at, in step with the keys installed from it - and a caller able to advance
+    /// a secret independently would put the two out of step with nothing to notice it.</para>
+    /// <para>THE LEVEL AND DIRECTION ARE CARRIED THROUGH UNCHANGED, and s6.1's Note says why
+    /// that is safe to state so flatly: "Keys of packets other than the 1-RTT packets are never
+    /// updated". A caller that reached this at a handshake level has a bug this method cannot
+    /// see, which is why <see cref="TlsQuicKeySet"/> is the only caller and gates it.</para>
+    /// </remarks>
+    internal TlsQuicTrafficSecret NextGeneration(TlsQuicVersion version)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!Enum.IsDefined(version))
+        {
+            throw new ArgumentOutOfRangeException(nameof(version));
+        }
+
+        var suite = CipherSuiteInfo.Get(CipherSuite);
+        var prefix = version == TlsQuicVersion.Version2 ? "quicv2 " : "quic ";
+        var next = Tls13Hkdf.ExpandLabel(
+            suite.HashAlgorithm,
+            _secret,
+            prefix + "ku",
+            [],
+            suite.HashLength);
+
+        try
+        {
+            return new TlsQuicTrafficSecret(Level, Direction, CipherSuite, next);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(next);
+        }
+    }
+
     /// <summary>Derives RFC 9001 or RFC 9369 packet, IV and header-protection keys.</summary>
     public TlsQuicPacketProtectionKeys DerivePacketProtectionKeys(TlsQuicVersion version)
     {

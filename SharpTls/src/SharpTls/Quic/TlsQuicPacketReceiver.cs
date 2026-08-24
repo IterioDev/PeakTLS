@@ -213,6 +213,38 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     // is always set once anything has been. UInt128 rather than ulong doubles the window for
     // one word of state and no extra branch.
     private readonly ulong[] _duplicateWindowHighest = new ulong[PacketNumberSpaceCount];
+
+    // RFC 9001 s6's key update, all of it 1-RTT only - s6.1's Note: "Keys of packets other
+    // than the 1-RTT packets are never updated; their keys are derived solely from the TLS
+    // handshake state." So these are single fields rather than per-level arrays, and
+    // _keys[Application] is the CURRENT set they sit either side of.
+    //
+    // s6.3 IS WHY _next IS HELD RATHER THAN DERIVED ON DEMAND: "Endpoints responding to an
+    // apparent key update MUST NOT generate a timing side-channel signal that might indicate
+    // that the Key Phase bit was invalid", and s6.3 names deriving-on-receipt as exactly that
+    // signal - "An endpoint MAY generate new keys as part of packet processing, but this
+    // creates a timing signal". Holding both is also s6.3's own MUST: "endpoints MUST be able
+    // to retain two sets of packet protection keys for receiving packets: the current and the
+    // next."
+    //
+    // _previous IS s6.5's SHOULD, not a MUST, and it is kept because dropping it costs
+    // retransmits: "Retaining old packet protection keys allows these [delayed] packets to be
+    // successfully processed."
+    private ReadKeys? _nextApplicationKeys;
+    private ReadKeys? _previousApplicationKeys;
+
+    // s6.5's discriminator: "A recovered packet number that is lower than any packet number
+    // from the current key phase uses the previous packet protection keys." Null until a
+    // packet has been opened in the current phase, which is a state s6.5 does not name and
+    // this endpoint reaches every time it initiates an update itself - see
+    // _awaitingPeerKeyPhaseCatchUp.
+    private ulong? _currentPhaseLowestPacketNumber;
+
+    // Set when THIS endpoint initiated the update, cleared by the first packet that arrives at
+    // the new phase. While it is set, a packet at the OTHER phase is the peer still using the
+    // old keys rather than the peer initiating an update of its own - the two are identical on
+    // the wire and only this flag tells them apart.
+    private bool _awaitingPeerKeyPhaseCatchUp;
     private readonly UInt128[] _duplicateWindow = new UInt128[PacketNumberSpaceCount];
     private readonly bool[] _duplicateWindowStarted = new bool[PacketNumberSpaceCount];
     private byte[] _scratch = [];
@@ -269,6 +301,42 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// <summary>Whether read keys are installed at <paramref name="level"/>.</summary>
     internal bool HasReadKeys(TlsQuicEncryptionLevel level) => _keys[(int)level] is not null;
 
+    /// <summary>Gets the RFC 9001 s6 key phase the Application read keys are at, or
+    /// <see langword="false"/> before they are installed.</summary>
+    internal bool ApplicationKeyPhase =>
+        _keys[(int)TlsQuicEncryptionLevel.Application]?.KeyPhase ?? false;
+
+    /// <summary>Gets whether a peer-initiated key update has been detected and not yet
+    /// answered by updating the send keys.</summary>
+    /// <remarks>s6.2: "Sending keys MUST be updated before sending an acknowledgment for the
+    /// packet that was received with updated keys." This flag is what carries that obligation
+    /// out of the receive path; <see cref="ConsumeKeyUpdate"/> clears it.</remarks>
+    internal bool KeyUpdatePending { get; private set; }
+
+    /// <summary>Gets how many peer-initiated key updates this receiver has completed.</summary>
+    internal int KeyUpdatesReceived { get; private set; }
+
+    /// <summary>Gets how many received packets have failed authentication, across all keys and
+    /// all levels, for the lifetime of this receiver.</summary>
+    /// <remarks>s6.6: "In addition to counting packets sent, endpoints MUST count the number of
+    /// received packets that fail authentication during the lifetime of a connection." ACROSS
+    /// ALL KEYS is the section's own phrase and is why this is one counter and not one per
+    /// level or per key phase. The limit itself is enforced by TlsQuicConnection, which is
+    /// where a connection can be closed from.</remarks>
+    internal long AuthenticationFailures { get; private set; }
+
+    /// <summary>Takes the pending key-update signal, clearing it.</summary>
+    internal bool ConsumeKeyUpdate()
+    {
+        if (!KeyUpdatePending)
+        {
+            return false;
+        }
+
+        KeyUpdatePending = false;
+        return true;
+    }
+
     /// <summary>
     /// Installs read keys for one encryption level, replacing any already there. The
     /// key material is copied, because RFC 9001's own key objects are caller-owned and
@@ -278,10 +346,12 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// <remarks>
     /// <c>keyPhase</c> is the key phase these keys belong to. Read only for short headers: RFC 9000 s17.2
     /// defines no Key Phase field on the long header, so the value carried at the other
-    /// levels is never consulted rather than being accepted and ignored. Key update is
-    /// out of scope for this phase, so this receiver never rotates it - the caller
-    /// states which phase it installed and a packet claiming another one is an error;
-    /// see Receive.
+    /// levels is never consulted rather than being accepted and ignored.
+    /// <para>INSTALLING AT THE APPLICATION LEVEL RESETS RFC 9001 s6's STATE, because this is
+    /// generation zero of the 1-RTT keys and any next or previous set beside it belongs to a
+    /// connection that no longer exists. <see cref="InstallNextApplicationReadKeys"/> is how
+    /// generation n+1 is armed; <see cref="PromoteApplicationKeysForLocalUpdate"/> is how this
+    /// endpoint's own update is applied.</para>
     /// </remarks>
     internal void InstallReadKeys(
         TlsQuicEncryptionLevel level,
@@ -304,6 +374,79 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             HeaderProtectionKey = headerProtectionKey.ToArray(),
             KeyPhase = keyPhase,
         };
+
+        if (level == TlsQuicEncryptionLevel.Application)
+        {
+            ResetKeyUpdateState();
+        }
+    }
+
+    /// <summary>Arms RFC 9001 s6.3's "next" set of Application read keys - generation n+1,
+    /// carrying the opposite key phase to the installed keys.</summary>
+    /// <remarks>
+    /// <para>s6.3: "endpoints MUST be able to retain two sets of packet protection keys for
+    /// receiving packets: the current and the next." Armed AHEAD of any packet that needs it,
+    /// which is the same section's timing rule: "An endpoint MAY generate new keys as part of
+    /// packet processing, but this creates a timing signal that could be used by an attacker
+    /// to learn when key updates happen and thus leak the value of the Key Phase bit."</para>
+    /// <para>THE HEADER PROTECTION KEY AND CIPHERS ARE COPIED FROM THE CURRENT SET RATHER THAN
+    /// PASSED IN, because s6.1 says outright: "The header protection key is not updated." A
+    /// caller handing one in could hand in the freshly derived one - which
+    /// TlsQuicTrafficSecret.DerivePacketProtectionKeys does produce - and the peer would then
+    /// be unable to remove header protection at all. Taking it from the current set makes that
+    /// mistake unexpressible.</para>
+    /// </remarks>
+    internal void InstallNextApplicationReadKeys(
+        ReadOnlySpan<byte> key,
+        ReadOnlySpan<byte> iv)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var current = _keys[(int)TlsQuicEncryptionLevel.Application]
+            ?? throw new InvalidOperationException(
+                "RFC 9001 s6.3's next Application read keys cannot be armed before the "
+                    + "current ones are installed: the phase they carry is defined as the "
+                    + "opposite of the current phase.");
+
+        _nextApplicationKeys?.Dispose();
+        _nextApplicationKeys = new ReadKeys
+        {
+            PacketCipher = current.PacketCipher,
+            HeaderCipher = current.HeaderCipher,
+            Key = key.ToArray(),
+            Iv = iv.ToArray(),
+            HeaderProtectionKey = (byte[])current.HeaderProtectionKey.Clone(),
+            KeyPhase = !current.KeyPhase,
+        };
+    }
+
+    /// <summary>Applies an update this endpoint initiated: the armed next keys become current,
+    /// the current become previous, and the peer is expected to catch up.</summary>
+    /// <remarks>
+    /// <para>s6.1: "The endpoint that initiates a key update also updates the keys that it uses
+    /// for receiving packets.  These keys will be needed to process packets the peer sends
+    /// after updating."</para>
+    /// <para>AND UNTIL THE PEER DOES, ITS PACKETS CARRY THE OLD PHASE. That is
+    /// indistinguishable on the wire from the peer initiating an update of its own, so
+    /// <c>_awaitingPeerKeyPhaseCatchUp</c> records which of the two this is. Without it, the
+    /// first packet after a locally initiated update would be read as a peer update, opened
+    /// against generation n+2 keys that do not exist, and discarded - the connection would
+    /// stall at exactly the moment the AEAD limit forced the update.</para>
+    /// </remarks>
+    internal void PromoteApplicationKeysForLocalUpdate()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_nextApplicationKeys is null)
+        {
+            throw new InvalidOperationException(
+                "RFC 9001 s6.1's key update cannot be applied without the next read keys "
+                    + "armed: this endpoint would be unable to read the packets the peer "
+                    + "sends in response.");
+        }
+
+        Promote();
+        _awaitingPeerKeyPhaseCatchUp = true;
     }
 
     /// <summary>
@@ -601,6 +744,13 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             _keys[i] = null;
         }
 
+        // RFC 9001 s6's other two generations. Key material either side of the current set is
+        // the same class of secret and is zeroed on the same terms.
+        _nextApplicationKeys?.Dispose();
+        _nextApplicationKeys = null;
+        _previousApplicationKeys?.Dispose();
+        _previousApplicationKeys = null;
+
         // The scratch holds decrypted payload - CRYPTO frames carry the TLS handshake,
         // so this is the same class of material TlsQuicPacketProtectionKeys.Dispose and
         // TlsQuicSecrets.Dispose zero. Witnessed by
@@ -690,13 +840,95 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         }
 
         var plaintext = _scratch.AsSpan(0, ciphertext.Length - AuthenticationTagLength);
-        if (!TlsQuicPacketProtection.TryOpen(
-                keys.PacketCipher, keys.Key, keys.Iv, packetNumber, associatedData, ciphertext, plaintext))
+
+        // RFC 9001 s6's three generations, and WHICH ONE TO TRY IS DECIDED BEFORE ANY AEAD
+        // WORK, not by trying them all.
+        //
+        // A matching Key Phase bit is the current keys and nothing else. A DIFFERING one is
+        // ambiguous on the wire and s6.5 gives the discriminator: "A recovered packet number
+        // that is lower than any packet number from the current key phase uses the previous
+        // packet protection keys; a recovered packet number that is higher than any packet
+        // number from the current key phase requires the use of the next packet protection
+        // keys."
+        //
+        // AND ONE STATE s6.5 DOES NOT NAME: this endpoint has just updated its own keys and
+        // the peer has not caught up. Then EVERY packet still carries the old phase, at
+        // numbers above anything seen in the new phase, and s6.5's number test would send all
+        // of them to the next generation. _awaitingPeerKeyPhaseCatchUp is what distinguishes
+        // "the peer is behind me" from "the peer is ahead of me"; nothing on the wire does.
+        var opening = keys;
+        var opened = KeyGeneration.Current;
+        ReadKeys? fallback = null;
+
+        if (isShortHeader
+            && level == TlsQuicEncryptionLevel.Application
+            && ((packet[0] & KeyPhaseBit) != 0) != keys.KeyPhase)
         {
-            // s12.2 again, and the reason this is a count and not a close: a failed
-            // decrypt is what every stray, forged, or replayed datagram produces.
-            discarded++;
-            return null;
+            var previousFirst = _awaitingPeerKeyPhaseCatchUp
+                || (_previousApplicationKeys is not null
+                    && _currentPhaseLowestPacketNumber is { } lowest
+                    && packetNumber < lowest);
+
+            (opening, fallback) = previousFirst
+                ? (_previousApplicationKeys, _nextApplicationKeys)
+                : (_nextApplicationKeys, _previousApplicationKeys);
+            opened = previousFirst ? KeyGeneration.Previous : KeyGeneration.Next;
+
+            if (opening is null)
+            {
+                (opening, fallback) = (fallback, null);
+                opened = opened == KeyGeneration.Previous
+                    ? KeyGeneration.Next
+                    : KeyGeneration.Previous;
+            }
+
+            if (opening is null)
+            {
+                // Nothing to try. s5.5: "a packet that appears to trigger a key update but
+                // cannot be unprotected successfully MUST be discarded" - and a packet with no
+                // candidate keys at all cannot be unprotected successfully. Counted as a
+                // failure for the same reason s6.6 counts the ones that do reach the AEAD:
+                // this is a packet the connection could not authenticate, and an attacker who
+                // could make it free would have an unbounded forgery budget.
+                discarded++;
+                AuthenticationFailures++;
+                return null;
+            }
+        }
+
+        if (!TlsQuicPacketProtection.TryOpen(
+                opening.PacketCipher, opening.Key, opening.Iv,
+                packetNumber, associatedData, ciphertext, plaintext))
+        {
+            // THE SECOND CANDIDATE EXISTS FOR s6.4's MUST AND FOR NOTHING ELSE: "An endpoint
+            // that successfully removes protection with old keys when newer keys were used for
+            // packets with lower packet numbers MUST treat this as a connection error of type
+            // KEY_UPDATE_ERROR." That violation can only be SEEN by trying the old keys on a
+            // packet s6.5's number test had already routed to the new ones, so a receiver that
+            // stopped at one attempt could never raise it.
+            //
+            // THE EXTRA AEAD RUN IS ON A PATH THAT HAS ALREADY FAILED ONE, so an ordinary
+            // packet never pays it, and the Key Phase bit is header-protected - s5.4.1 covers
+            // "the least significant five bits of the first byte" - so an off-path sender
+            // cannot steer packets down this branch without the header protection key. That is
+            // the s6.3 timing argument for this shape; the primary answer to s6.3 is that both
+            // generations are derived ahead of time and none of this derives anything.
+            if (fallback is null
+                || !TlsQuicPacketProtection.TryOpen(
+                    fallback.PacketCipher, fallback.Key, fallback.Iv,
+                    packetNumber, associatedData, ciphertext, plaintext))
+            {
+                // s12.2, and the reason this is a count and not a close: a failed decrypt is
+                // what every stray, forged, or replayed datagram produces. s6.6's integrity
+                // limit is the thing that eventually acts on the total.
+                discarded++;
+                AuthenticationFailures++;
+                return null;
+            }
+
+            opened = opened == KeyGeneration.Next
+                ? KeyGeneration.Previous
+                : KeyGeneration.Next;
         }
 
         // Authenticated from here. Everything below judges bytes the peer's own AEAD
@@ -711,23 +943,61 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             return (TlsQuicTransportError.ProtocolViolation, "Reserved bits were non-zero.");
         }
 
-        if (isShortHeader && ((packet[0] & KeyPhaseBit) != 0) != keys.KeyPhase)
+        if (isShortHeader && level == TlsQuicEncryptionLevel.Application)
         {
-            // Key update is out of scope for this phase, so a phase other than the one
-            // installed is not something to ignore. RFC 9000 s20.1: "KEY_UPDATE_ERROR
-            // (0x0e): An endpoint detected errors in performing key updates".
-            //
-            // Note precisely what this can and cannot see, because the AEAD decides it.
-            // Byte 0 is inside the associated data, so a bit flipped in transit fails
-            // the tag and is discarded above, never reaching here. A peer genuinely
-            // rotating keys protects with keys we do not hold, which also fails the tag
-            // and is discarded. What reaches here is a peer that ANNOUNCED a phase
-            // change and then protected the packet with the unrotated keys anyway -
-            // authenticated, self-contradictory, and exactly s20.1's "errors in
-            // performing key updates". Closing before TryOpen instead would cover the
-            // rotation case too, at the cost of handing any off-path attacker a
-            // one-datagram connection kill - the trade s17.3.1 warns about by name.
-            return (TlsQuicTransportError.KeyUpdateError, "Key phase differed from the installed phase.");
+            // THIS BLOCK USED TO BE A CLOSE AND NOTHING ELSE. It read "key update is out of
+            // scope for this phase, so a phase other than the one installed is not something
+            // to ignore" and returned KEY_UPDATE_ERROR for every flipped Key Phase bit. A
+            // conforming server updating its keys - which s6 lets it do at any time after the
+            // handshake is confirmed - was met with a connection error. The close is still
+            // here, but for s6.4's violation rather than for the update itself.
+            if (opened == KeyGeneration.Next)
+            {
+                // s6.2: "If a packet is successfully processed using the next key and IV, then
+                // the peer has initiated a key update.  The endpoint MUST update its send keys
+                // to the corresponding key phase in response." The send half is
+                // TlsQuicConnection's, which is what KeyUpdatePending carries; promoting the
+                // read half is this receiver's and happens here, because the packet in hand
+                // was already opened with the new keys.
+                Promote();
+                KeyUpdatePending = true;
+                KeyUpdatesReceived++;
+            }
+            else if (opened == KeyGeneration.Previous
+                && _currentPhaseLowestPacketNumber is { } newestPhaseLowest
+                && packetNumber > newestPhaseLowest)
+            {
+                // s6.4: "Packets with higher packet numbers MUST be protected with either the
+                // same or newer packet protection keys than packets with lower packet numbers.
+                // An endpoint that successfully removes protection with old keys when newer
+                // keys were used for packets with lower packet numbers MUST treat this as a
+                // connection error of type KEY_UPDATE_ERROR."
+                //
+                // AUTHENTICATED BEFORE IT IS JUDGED, like every other close in this method:
+                // the packet opened, under keys only the peer holds, so this is the peer's own
+                // ordering and not a forgery.
+                return (
+                    TlsQuicTransportError.KeyUpdateError,
+                    "A packet protected with the previous key phase carried a higher packet "
+                        + "number than a packet already opened with the current one.");
+            }
+
+            if (opened != KeyGeneration.Previous)
+            {
+                // The peer is at our phase, so a locally initiated update is complete. Set
+                // unconditionally rather than under a test: it is already false in the common
+                // case and a branch would only hide which packet clears it.
+                _awaitingPeerKeyPhaseCatchUp = false;
+
+                // s6.5's "any packet number from the current key phase", kept as the lowest so
+                // the comparison it feeds is the one s6.5 states. Promote() cleared it a few
+                // lines above when this packet was the update itself, so that case lands here
+                // as the first number of the new phase.
+                if (_currentPhaseLowestPacketNumber is not { } known || packetNumber < known)
+                {
+                    _currentPhaseLowestPacketNumber = packetNumber;
+                }
+            }
         }
 
         // s17.1's "largest packet number received in a successfully authenticated
@@ -926,6 +1196,49 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         TlsQuicEncryptionLevel.Handshake => 1,
         _ => 2,
     };
+
+    // The shared half of both promotions - s6.5's three sets shifting one place along.
+    //
+    // THE PREVIOUS SET IS REPLACED, NOT ACCUMULATED. s6.5's alternative is explicit that two
+    // sets are enough: "endpoints can retain only two sets of packet protection keys, swapping
+    // previous for next after enough time has passed to allow for reordering in the network."
+    // Keeping three is this receiver's choice; keeping four would be keeping a generation no
+    // rule can select.
+    //
+    // _currentPhaseLowestPacketNumber IS CLEARED because it describes the phase that just
+    // stopped being current. Carrying it forward would make s6.5's "lower than any packet
+    // number from the current key phase" a comparison against the wrong phase's numbers.
+    private void Promote()
+    {
+        _previousApplicationKeys?.Dispose();
+        _previousApplicationKeys = _keys[(int)TlsQuicEncryptionLevel.Application];
+        _keys[(int)TlsQuicEncryptionLevel.Application] = _nextApplicationKeys;
+        _nextApplicationKeys = null;
+        _currentPhaseLowestPacketNumber = null;
+    }
+
+    // Generation zero. Called only from InstallReadKeys at the Application level, where the
+    // keys being installed came from the TLS handshake rather than from "quic ku".
+    private void ResetKeyUpdateState()
+    {
+        _nextApplicationKeys?.Dispose();
+        _nextApplicationKeys = null;
+        _previousApplicationKeys?.Dispose();
+        _previousApplicationKeys = null;
+        _currentPhaseLowestPacketNumber = null;
+        _awaitingPeerKeyPhaseCatchUp = false;
+        KeyUpdatePending = false;
+    }
+
+    // Which of RFC 9001 s6.5's three sets opened a packet. Not a field - it lives for one
+    // call - but named rather than a pair of bools, because "previous" and "next" are
+    // mutually exclusive and a bool pair would admit a fourth state that means nothing.
+    private enum KeyGeneration
+    {
+        Previous,
+        Current,
+        Next,
+    }
 
     private sealed class ReadKeys : IDisposable
     {

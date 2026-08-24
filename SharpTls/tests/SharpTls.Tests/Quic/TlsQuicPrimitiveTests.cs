@@ -352,11 +352,12 @@ public sealed class TlsQuicPrimitiveTests
     [InlineData(TlsQuicTransportError.ApplicationError, 0x0CUL)]
     [InlineData(TlsQuicTransportError.CryptoBufferExceeded, 0x0DUL)]
     [InlineData(TlsQuicTransportError.KeyUpdateError, 0x0EUL)]
+    [InlineData(TlsQuicTransportError.AeadLimitReached, 0x0FUL)]
     public void EveryTransportErrorCarriesItsSection201CodePoint(TlsQuicTransportError error, ulong code) =>
         Assert.Equal(code, (ulong)error);
 
     [Fact]
-    public void TheTransportErrorCodePointsAreExactlyTheElevenPinnedAbove() =>
+    public void TheTransportErrorCodePointsAreExactlyTheTwelvePinnedAbove() =>
         // The count is not asserted as a number: it is the list, so a member added
         // without a row above fails here rather than passing unnoticed. Sorted because
         // the enum's declaration order is not its numeric order.
@@ -374,8 +375,14 @@ public sealed class TlsQuicPrimitiveTests
         // "STREAM_STATE_ERROR (0x05)", "FINAL_SIZE_ERROR (0x06)" - immediately before
         // FRAME_ENCODING_ERROR (0x07), which was already here and is the anchor that makes a
         // shifted run visible.
+        //
+        // AND AGAIN FOR AEAD_LIMIT_REACHED (0x0f), which RFC 9001 s6.6 names twice - once for
+        // the integrity limit and once for a confidentiality limit reached with no key update
+        // available - and which s20.1 puts immediately after KEY_UPDATE_ERROR. The two are
+        // adjacent AND related, which is exactly the pair a transcription is most likely to
+        // collapse onto one number.
         Assert.Equal(
-            new ulong[] { 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0C, 0x0D, 0x0E },
+            new ulong[] { 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0C, 0x0D, 0x0E, 0x0F },
             Enum.GetValues<TlsQuicTransportError>().Select(e => (ulong)e).Order());
 
     private static void AssertKeys(

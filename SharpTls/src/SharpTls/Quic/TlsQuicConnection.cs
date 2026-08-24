@@ -964,6 +964,23 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private readonly Func<ReadOnlyMemory<byte>, CustomTlsQuicClient> _clientFactory;
     private readonly TlsQuicPacketReceiver _receiver;
     private readonly TlsQuicKeySet _keys;
+
+    // RFC 9001 s6.6's send-side count, reset by every key update because the limit is "the
+    // total number of encrypted packets with the same key".
+    internal long ApplicationPacketsProtectedWithCurrentKeys { get; private set; }
+
+    // s6.1's gate on a SECOND locally initiated update: "An endpoint MUST NOT initiate a
+    // subsequent key update unless it has received an acknowledgment for a packet that was
+    // sent protected with keys from the current key phase." s6.1 also gives the implementation
+    // outright - "This can be implemented by tracking the lowest packet number sent with each
+    // key phase and the highest acknowledged packet number in the 1-RTT space: once the latter
+    // is higher than or equal to the former, another key update can be initiated" - so these
+    // two fields are that sentence and nothing else.
+    //
+    // NULL MEANS NO LOCAL UPDATE HAS HAPPENED, which is not the same as zero: packet number 0
+    // is a legal lowest, and the gate does not apply to the first update at all.
+    private ulong? _lowestApplicationPacketNumberInWritePhase;
+    private ulong? _highestAcknowledgedApplicationPacketNumber;
     private readonly TlsQuicAckTracker _acks;
 
     // One send buffer for the life of the connection. Unlike the receive buffer this one is
@@ -1233,6 +1250,125 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// also what it advertised as <c>initial_source_connection_id</c>, because the factory
     /// was handed these exact bytes.</summary>
     internal ReadOnlyMemory<byte> SourceConnectionId => _sourceConnectionId;
+
+    /// <summary>Gets how many RFC 9001 s6 key updates this connection has applied, in either
+    /// direction.</summary>
+    internal int KeyUpdatesApplied => _keys.KeyUpdatesApplied;
+
+    /// <summary>Gets the RFC 9001 s6 key phase this connection protects 1-RTT packets
+    /// with.</summary>
+    internal bool WriteKeyPhase => _keys.WriteKeyPhase;
+
+    /// <summary>Gets how many received packets have failed authentication - RFC 9001 s6.6's
+    /// integrity count.</summary>
+    internal long AuthenticationFailures => _receiver.AuthenticationFailures;
+
+    // RFC 9001 s6.6's confidentiality limits, per AEAD: "For AEAD_AES_128_GCM and
+    // AEAD_AES_256_GCM, the confidentiality limit is 2^23 encrypted packets ... For
+    // AEAD_CHACHA20_POLY1305, the confidentiality limit is greater than the number of possible
+    // packets (2^62) and so can be disregarded."
+    //
+    // DISREGARDED IS WRITTEN AS 2^62 RATHER THAN AS long.MaxValue, because that is the number
+    // s6.6 gives its reason from - the count of possible packets - and a reader comparing this
+    // line to the section should find the section's own figure.
+    internal static long ConfidentialityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
+        cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305 ? 1L << 62 : 1L << 23;
+
+    // s6.6's integrity limits: "For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the integrity limit
+    // is 2^52 invalid packets ... For AEAD_CHACHA20_POLY1305, the integrity limit is 2^36
+    // invalid packets."
+    internal static long IntegrityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
+        cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305 ? 1L << 36 : 1L << 52;
+
+    // RFC 9001 s6's two reasons to rotate, in the order they bind. Called once per receive,
+    // between the frame walk and the answer.
+    private void ApplyKeyUpdateIfNeeded()
+    {
+        // s6.2's response. The receiver has already promoted its READ keys - it had to, to
+        // open the packet that announced the update - so this moves the send half and the
+        // secrets that track both.
+        if (_receiver.ConsumeKeyUpdate())
+        {
+            _keys.ApplyKeyUpdate(locallyInitiated: false);
+            ApplicationPacketsProtectedWithCurrentKeys = 0;
+            _lowestApplicationPacketNumberInWritePhase =
+                _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application];
+            return;
+        }
+
+        // s6.6's initiation: "Endpoints MUST initiate a key update before sending more
+        // protected packets than the confidentiality limit for the selected AEAD permits."
+        // BEFORE, so the test is >= and not >.
+        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var write, out _)
+            || ApplicationPacketsProtectedWithCurrentKeys
+                < ConfidentialityLimitFor(write.PacketCipher))
+        {
+            return;
+        }
+
+        // s6.1: "An endpoint MUST NOT initiate a subsequent key update unless it has received
+        // an acknowledgment for a packet that was sent protected with keys from the current
+        // key phase."
+        //
+        // NOT REACHING THE ACK IS NOT A REASON TO KEEP SENDING. s6.6 is explicit about what
+        // happens when the limit is reached and an update is unavailable - "If a key update is
+        // not possible ... the endpoint MUST stop using the connection" - so this falls
+        // through to the close below rather than returning and protecting more packets.
+        var gateOpen =
+            _lowestApplicationPacketNumberInWritePhase is not { } lowest
+            || (_highestAcknowledgedApplicationPacketNumber is { } highest && highest >= lowest);
+
+        if (gateOpen && _keys.CanUpdateKeys)
+        {
+            _keys.ApplyKeyUpdate(locallyInitiated: true);
+            ApplicationPacketsProtectedWithCurrentKeys = 0;
+            _lowestApplicationPacketNumberInWritePhase =
+                _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application];
+            return;
+        }
+
+        // s6.6: "If a key update is not possible or integrity limits are reached, the endpoint
+        // MUST stop using the connection and only send stateless resets in response to
+        // receiving packets.  It is RECOMMENDED that endpoints immediately close the connection
+        // with a connection error of type AEAD_LIMIT_REACHED before reaching a state where key
+        // updates are not possible."
+        //
+        // THE RECOMMENDED HALF IS WHAT THIS DOES. A stateless reset is a server behaviour -
+        // RFC 9000 s10.3 has it sent by an endpoint that has lost connection state, which a
+        // client tearing down a connection it owns has not - so the close is both the
+        // RECOMMENDED action and the only one of the two this endpoint could take.
+        throw new TlsQuicTransportException(
+            TlsQuicTransportError.AeadLimitReached,
+            "RFC 9001 s6.6's confidentiality limit was reached for the 1-RTT keys and no key "
+                + "update is possible, so this connection must stop being used.");
+    }
+
+    // s6.6: "If the total number of received packets that fail authentication within the
+    // connection, across all keys, exceeds the integrity limit for the selected AEAD, the
+    // endpoint MUST immediately close the connection with a connection error of type
+    // AEAD_LIMIT_REACHED and not process any more packets."
+    //
+    // CHECKED BEFORE THE FRAMES ARE ACTED ON rather than after, because "not process any more
+    // packets" is the second half of the same sentence. The receiver counts; only a connection
+    // can close.
+    private void ThrowIfIntegrityLimitReached()
+    {
+        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var write, out _))
+        {
+            return;
+        }
+
+        if (_receiver.AuthenticationFailures <= IntegrityLimitFor(write.PacketCipher))
+        {
+            return;
+        }
+
+        throw new TlsQuicTransportException(
+            TlsQuicTransportError.AeadLimitReached,
+            $"RFC 9001 s6.6's integrity limit was exceeded: {_receiver.AuthenticationFailures} "
+                + "received packets failed authentication.");
+    }
+
 
     /// <summary>Takes every RFC 9221 s4 DATAGRAM payload received since the last call and
     /// empties the store.</summary>
@@ -1741,6 +1877,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 string? protocolFailure = null;
                 var peerClosed = false;
 
+                // RFC 9001 s6.6's integrity limit, on BOTH sides of the walk. The clause is
+                // "MUST immediately close the connection with a connection error of type
+                // AEAD_LIMIT_REACHED and not process any more packets", and the two halves
+                // want different positions: this one is "not process any more packets", so a
+                // caller that pumps again after the close still refuses the next datagram, and
+                // the one below is "immediately", so the datagram that crossed the limit is the
+                // last thing that happens.
+                ThrowIfIntegrityLimitReached();
+
                 var outcome = _receiver.Receive(
                     packet,
                     (in TlsQuicFrame frame, in TlsQuicReceivedPacket source) =>
@@ -1975,6 +2120,8 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                         }
                     });
 
+                ThrowIfIntegrityLimitReached();
+
                 if (frameError is { } malformed)
                 {
                     // A CONNECTION-LEVEL FAILURE, NOT A LOOP KILL. Task 9b turns this into an
@@ -2063,6 +2210,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                         source2.Level, source2.PacketNumber, TypeOnlyFrames(frameTypes), now);
                 }
             }
+
+            // RFC 9001 s6.2: "Sending keys MUST be updated before sending an acknowledgment
+            // for the packet that was received with updated keys." BEFORE THE ANSWER, which is
+            // what makes this line's position the rule rather than a detail - SendAnswerAsync
+            // is where the ACK for that very packet goes out.
+            //
+            // AND AFTER THE WHOLE DATAGRAM IS WALKED, not inside the frame handler, for the
+            // reason HANDSHAKE_DONE and CONNECTION_CLOSE are also recorded and acted on
+            // afterwards: this rotates the write keys, and doing that mid-datagram would
+            // change the keys under a walk that is still reading with them.
+            ApplyKeyUpdateIfNeeded();
 
             if (!_draining)
             {
@@ -2890,6 +3048,19 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 if (retained[i].SentAt > latestAckedNow)
                 {
                     latestAckedNow = retained[i].SentAt;
+                }
+
+                // RFC 9001 s6.1's "highest acknowledged packet number in the 1-RTT space",
+                // which is half of the gate on initiating a second key update. Kept here
+                // because this is the only place a packet of ours is known to have been
+                // acknowledged; the ACK tracker's LargestAcked is the other direction - the
+                // largest number WE have acknowledged - and using it would satisfy the gate
+                // with the peer's traffic instead of the peer's acknowledgements.
+                if (level == TlsQuicEncryptionLevel.Application
+                    && (_highestAcknowledgedApplicationPacketNumber is not { } seen
+                        || retained[i].PacketNumber > seen))
+                {
+                    _highestAcknowledgedApplicationPacketNumber = retained[i].PacketNumber;
                 }
 
                 acked.Add(retained[i]);

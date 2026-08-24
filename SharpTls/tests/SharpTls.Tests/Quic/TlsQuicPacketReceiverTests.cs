@@ -249,7 +249,7 @@ public sealed class TlsQuicPacketReceiverTests
     // meeting a packet announcing 0.
     [InlineData(false, true)]
     [InlineData(true, false)]
-    public void AnAuthenticatedShortHeaderAnnouncingTheOtherKeyPhaseClosesTheConnection(
+    public void AnAuthenticatedShortHeaderAnnouncingTheOtherKeyPhaseWithNoNextKeysIsDiscarded(
         bool installedPhase, bool packetPhase)
     {
         var connectionId = Convert.FromHexString("C1C2C3");
@@ -276,12 +276,207 @@ public sealed class TlsQuicPacketReceiverTests
         var recorder = new Recorder(null);
         var result = receiver.Receive(packet, recorder.Handle);
 
-        // RFC 9000 s20.1: "KEY_UPDATE_ERROR (0x0e): An endpoint detected errors in
-        // performing key updates". Not ignored, and not a discard - the packet
-        // authenticated, so its Key Phase bit is the peer's own signed statement.
+        // THIS ASSERTED KEY_UPDATE_ERROR UNTIL RFC 9001 s6 WAS IMPLEMENTED, on the reasoning
+        // that "key update is out of scope for this phase, so a phase other than the one
+        // installed is not something to ignore". It is in scope now: a differing Key Phase bit
+        // is a peer announcing an update, and the answer is to try the NEXT read keys.
+        //
+        // NO NEXT KEYS ARE ARMED HERE - InstallReadKeys hands over one generation and nothing
+        // else - so there is nothing to try, and s5.5 decides it: "a packet that appears to
+        // trigger a key update but cannot be unprotected successfully MUST be discarded".
+        //
+        // THE CLOSE HAS NOT DISAPPEARED, IT HAS MOVED. s6.4's ordering violation is still
+        // KEY_UPDATE_ERROR; see APacketAtThePreviousPhaseAboveTheCurrentPhasesLowestIsAn
+        // Error below.
+        Assert.Null(result.CloseError);
+        Assert.Equal(0, result.Processed);
+        Assert.Equal(1, result.Discarded);
+        Assert.Empty(recorder.Frames);
+
+        // s6.6: "endpoints MUST count the number of received packets that fail authentication
+        // during the lifetime of a connection." A packet with no candidate keys is one this
+        // connection could not authenticate, and counting it is what keeps an attacker's
+        // forgery budget bounded by s6.6's limit rather than unbounded.
+        Assert.Equal(1, receiver.AuthenticationFailures);
+    }
+
+    // ------------------------------------------------------------------------
+    // RFC 9001 s6: key update.
+    // ------------------------------------------------------------------------
+
+    [Fact]
+    public void APacketProtectedWithTheNextKeysCompletesAKeyUpdate()
+    {
+        // s6.2: "If a packet is successfully processed using the next key and IV, then the
+        // peer has initiated a key update.  The endpoint MUST update its send keys to the
+        // corresponding key phase in response."
+        //
+        // THE CLIENT KEYS STAND IN FOR GENERATION n+1. What matters to this receiver is that
+        // the next set is DIFFERENT key material carrying the opposite phase - it never sees
+        // the "quic ku" derivation, which is TlsQuicKeySet's and is tested there. Using an
+        // unrelated second set also proves the promotion is not a no-op that happened to work
+        // because both generations shared bytes.
+        var connectionId = Convert.FromHexString("C1C2C3");
+        using var current = ServerInitialKeys();
+        using var next = ClientInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, connectionId.Length);
+        InstallApplication(receiver, current, keyPhase: false);
+        receiver.InstallNextApplicationReadKeys(next.CopyKey(), next.CopyIv());
+
+        Assert.False(receiver.ApplicationKeyPhase);
+        Assert.False(receiver.KeyUpdatePending);
+
+        // s6.1: "The header protection key is not updated." So the packet is sealed under the
+        // NEXT packet keys and header-protected under the CURRENT hp key - a packet built any
+        // other way would fail header protection removal and never reach the rule under test.
+        var packet = BuildShortPacket(
+            connectionId,
+            keyPhase: true,
+            spinBit: false,
+            fullPacketNumber: 4,
+            truncatedPacketNumber: [0x04],
+            plaintext: [0x1e, 0x01, 0x00],
+            keys: next,
+            headerProtectionKeys: current);
+
+        var recorder = new Recorder(null);
+        var result = receiver.Receive(packet, recorder.Handle);
+
+        Assert.Equal(1, result.Processed);
+        Assert.Null(result.CloseError);
+        Assert.Equal(
+            [TlsQuicFrameType.HandshakeDone, TlsQuicFrameType.Ping, TlsQuicFrameType.Padding],
+            recorder.Frames.Select(f => f.Type));
+
+        // THE READ HALF IS DONE HERE and the send half is the connection's, which is what
+        // KeyUpdatePending carries out of this class - s6.2: "Sending keys MUST be updated
+        // before sending an acknowledgment for the packet that was received with updated
+        // keys."
+        Assert.True(receiver.ApplicationKeyPhase);
+        Assert.True(receiver.KeyUpdatePending);
+        Assert.Equal(1, receiver.KeyUpdatesReceived);
+        Assert.Equal(0, receiver.AuthenticationFailures);
+
+        // And the signal is taken once. A second read would let a connection rotate its write
+        // keys twice for one update and leave the peer unable to read anything it sent.
+        Assert.True(receiver.ConsumeKeyUpdate());
+        Assert.False(receiver.ConsumeKeyUpdate());
+    }
+
+    [Fact]
+    public void ADelayedPacketBelowTheNewPhasesLowestIsOpenedWithThePreviousKeys()
+    {
+        // s6.5: "For receiving packets during a key update, packets protected with older keys
+        // might arrive if they were delayed by the network.  Retaining old packet protection
+        // keys allows these packets to be successfully processed." And the discriminator, from
+        // the same section: "A recovered packet number that is lower than any packet number
+        // from the current key phase uses the previous packet protection keys."
+        //
+        // PACKET 9 COMPLETES THE UPDATE, THEN PACKET 2 ARRIVES LATE at the old phase. Both
+        // carry a Key Phase bit that differs from something, and only the number tells them
+        // apart.
+        var connectionId = Convert.FromHexString("C1C2C3");
+        using var current = ServerInitialKeys();
+        using var next = ClientInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, connectionId.Length);
+        InstallApplication(receiver, current, keyPhase: false);
+        receiver.InstallNextApplicationReadKeys(next.CopyKey(), next.CopyIv());
+
+        var update = BuildShortPacket(
+            connectionId, keyPhase: true, spinBit: false,
+            fullPacketNumber: 9, truncatedPacketNumber: [0x09],
+            plaintext: [0x1e, 0x01, 0x00], keys: next, headerProtectionKeys: current);
+        Assert.Equal(1, receiver.Receive(update, Ignore).Processed);
+
+        var delayed = BuildShortPacket(
+            connectionId, keyPhase: false, spinBit: false,
+            fullPacketNumber: 2, truncatedPacketNumber: [0x02],
+            plaintext: [0x1e, 0x01, 0x00], keys: current, headerProtectionKeys: current);
+
+        var result = receiver.Receive(delayed, Ignore);
+
+        Assert.Equal(1, result.Processed);
+        Assert.Null(result.CloseError);
+        Assert.Equal(0, receiver.AuthenticationFailures);
+
+        // AND IT DID NOT LOOK LIKE A SECOND UPDATE. One update happened, not two - a receiver
+        // that routed the delayed packet to its next keys would either fail to open it or,
+        // worse, promote again.
+        Assert.Equal(1, receiver.KeyUpdatesReceived);
+        Assert.True(receiver.ApplicationKeyPhase);
+    }
+
+    [Fact]
+    public void APacketAtThePreviousPhaseAboveTheCurrentPhasesLowestIsAKeyUpdateError()
+    {
+        // s6.4: "Packets with higher packet numbers MUST be protected with either the same or
+        // newer packet protection keys than packets with lower packet numbers.  An endpoint
+        // that successfully removes protection with old keys when newer keys were used for
+        // packets with lower packet numbers MUST treat this as a connection error of type
+        // KEY_UPDATE_ERROR."
+        //
+        // PACKET 5 UPDATES THE KEYS, THEN PACKET 8 ARRIVES AT THE OLD PHASE AND OPENS. Eight
+        // is above five, so the peer protected a HIGHER number with OLDER keys - the exact
+        // ordering s6.4 forbids, and the exact reason the receiver tries the previous keys
+        // even after the next ones have failed. Without that second attempt this violation
+        // would be indistinguishable from a forgery and would go unreported.
+        var connectionId = Convert.FromHexString("C1C2C3");
+        using var current = ServerInitialKeys();
+        using var next = ClientInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, connectionId.Length);
+        InstallApplication(receiver, current, keyPhase: false);
+        receiver.InstallNextApplicationReadKeys(next.CopyKey(), next.CopyIv());
+
+        var update = BuildShortPacket(
+            connectionId, keyPhase: true, spinBit: false,
+            fullPacketNumber: 5, truncatedPacketNumber: [0x05],
+            plaintext: [0x1e, 0x01, 0x00], keys: next, headerProtectionKeys: current);
+        Assert.Equal(1, receiver.Receive(update, Ignore).Processed);
+
+        var backwards = BuildShortPacket(
+            connectionId, keyPhase: false, spinBit: false,
+            fullPacketNumber: 8, truncatedPacketNumber: [0x08],
+            plaintext: [0x1e, 0x01, 0x00], keys: current, headerProtectionKeys: current);
+
+        var result = receiver.Receive(backwards, Ignore);
+
         Assert.Equal(TlsQuicTransportError.KeyUpdateError, result.CloseError);
         Assert.Equal(0, result.Processed);
-        Assert.Empty(recorder.Frames);
+    }
+
+    [Fact]
+    public void AForgedKeyPhaseFlipIsDiscardedRatherThanPromotingTheKeys()
+    {
+        // s6.3: "Packets containing apparent key updates are easy to forge, and while the
+        // process of key update does not require significant effort, triggering this process
+        // could be used by an attacker for DoS." And s5.5: "a packet that appears to trigger a
+        // key update but cannot be unprotected successfully MUST be discarded."
+        //
+        // THE PACKET IS SEALED UNDER THE CURRENT KEYS AND CLAIMS THE NEXT PHASE, which is what
+        // an attacker who cannot derive the next generation would produce. It must not promote
+        // anything: a receiver that advanced its keys on the strength of the bit alone would
+        // hand any off-path sender a way to make it unable to read the real peer.
+        var connectionId = Convert.FromHexString("C1C2C3");
+        using var current = ServerInitialKeys();
+        using var next = ClientInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, connectionId.Length);
+        InstallApplication(receiver, current, keyPhase: false);
+        receiver.InstallNextApplicationReadKeys(next.CopyKey(), next.CopyIv());
+
+        var forged = BuildShortPacket(
+            connectionId, keyPhase: true, spinBit: false,
+            fullPacketNumber: 3, truncatedPacketNumber: [0x03],
+            plaintext: [0x1e, 0x01, 0x00], keys: current, headerProtectionKeys: current);
+
+        var result = receiver.Receive(forged, Ignore);
+
+        Assert.Equal(0, result.Processed);
+        Assert.Equal(1, result.Discarded);
+        Assert.Null(result.CloseError);
+        Assert.Equal(1, receiver.AuthenticationFailures);
+        Assert.False(receiver.ApplicationKeyPhase);
+        Assert.False(receiver.KeyUpdatePending);
+        Assert.Equal(0, receiver.KeyUpdatesReceived);
     }
 
     [Fact]
@@ -1340,6 +1535,33 @@ public sealed class TlsQuicPacketReceiverTests
         return secrets.DeriveServerPacketProtectionKeys(TlsQuicVersion.Version1);
     }
 
+    // A SECOND, UNRELATED SET OF KEY MATERIAL, standing in for RFC 9001 s6.1's generation n+1
+    // in the receiver's tests. The receiver never derives a generation - TlsQuicKeySet does,
+    // with the "quic ku" label, and is tested for it there - so what these tests need is
+    // simply keys that differ from the current ones. Client keys are the shortest honest way
+    // to get them out of the same Appendix A material.
+    private static TlsQuicPacketProtectionKeys ClientInitialKeys()
+    {
+        using var secrets = TlsQuicInitialSecrets.Derive(
+            TlsQuicVersion.Version1, Convert.FromHexString(AppendixAConnectionIdHex));
+        return secrets.DeriveClientPacketProtectionKeys(TlsQuicVersion.Version1);
+    }
+
+    private static void InstallApplication(
+        TlsQuicPacketReceiver receiver, TlsQuicPacketProtectionKeys keys, bool keyPhase) =>
+        receiver.InstallReadKeys(
+            TlsQuicEncryptionLevel.Application,
+            TlsQuicPacketProtectionCipher.AesGcm,
+            keys.CopyKey(), keys.CopyIv(),
+            TlsQuicHeaderProtectionCipher.Aes, keys.CopyHeaderProtectionKey(),
+            keyPhase);
+
+    private static void Ignore(in TlsQuicFrame frame, in TlsQuicReceivedPacket received)
+    {
+        _ = frame;
+        _ = received;
+    }
+
     private static void InstallInitial(TlsQuicPacketReceiver receiver, TlsQuicPacketProtectionKeys keys) =>
         receiver.InstallReadKeys(
             TlsQuicEncryptionLevel.Initial,
@@ -1585,7 +1807,8 @@ public sealed class TlsQuicPacketReceiverTests
         byte[] truncatedPacketNumber,
         byte[] plaintext,
         TlsQuicPacketProtectionKeys keys,
-        byte firstByteExtraBits = 0)
+        byte firstByteExtraBits = 0,
+        TlsQuicPacketProtectionKeys? headerProtectionKeys = null)
     {
         var header = new List<byte>
         {
@@ -1601,7 +1824,8 @@ public sealed class TlsQuicPacketReceiverTests
 
         var packetNumberOffset = header.Count;
         header.AddRange(truncatedPacketNumber);
-        return Protect(header, packetNumberOffset, fullPacketNumber, plaintext, keys);
+        return Protect(
+            header, packetNumberOffset, fullPacketNumber, plaintext, keys, headerProtectionKeys);
     }
 
     // RFC 9001 s5.3 then s5.4, in that order: "When constructing packets, the AEAD
@@ -1614,7 +1838,8 @@ public sealed class TlsQuicPacketReceiverTests
         int packetNumberOffset,
         ulong fullPacketNumber,
         byte[] plaintext,
-        TlsQuicPacketProtectionKeys keys)
+        TlsQuicPacketProtectionKeys keys,
+        TlsQuicPacketProtectionKeys? headerProtectionKeys = null)
     {
         var packet = new byte[header.Count + plaintext.Length + 16];
         header.CopyTo(packet);
@@ -1628,9 +1853,15 @@ public sealed class TlsQuicPacketReceiverTests
             plaintext,
             packet.AsSpan(header.Count));
 
+        // RFC 9001 s6.1: "The header protection key is not updated." So a packet from a peer
+        // that has performed a key update is sealed under the NEW packet keys and
+        // header-protected under the OLD hp key. Every caller but the key-update tests passes
+        // one set of keys and gets the ordinary behaviour; those tests pass the current keys
+        // here and the next generation above, which is the only combination a real peer
+        // produces and the only one this receiver can open.
         Assert.True(TlsQuicHeaderProtection.TryApply(
             TlsQuicHeaderProtectionCipher.Aes,
-            keys.CopyHeaderProtectionKey(),
+            (headerProtectionKeys ?? keys).CopyHeaderProtectionKey(),
             packet,
             packetNumberOffset));
 

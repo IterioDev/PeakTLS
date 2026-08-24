@@ -619,19 +619,37 @@ internal sealed partial class TlsQuicConnection
         PacketNumberEncodedLength = _options.Spec.PacketNumberEncodedLength,
         LargestAcknowledged = _acks.LargestAcked(TlsQuicEncryptionLevel.Application),
 
-        // RFC 9001 s5.4: both are protected bits of the short header, and both are false for
-        // a reason rather than by omission. KEY PHASE FOLLOWS THE INSTALLED PHASE, and
-        // TlsQuicKeySet installs every level at phase 0 - "keyPhase: false. Key update is out
-        // of scope for this phase" - so a true here would claim a phase whose keys do not
-        // exist and RFC 9001 s5.5 has the peer close on it. SPIN BIT: RFC 9000 s17.4's
-        // latency spin bit is a passive-measurement aid, not part of packet processing - a
-        // constant zero is the disabled reading, it is what the one other short header in
-        // this tree (LoopbackQuicPeer's HANDSHAKE_DONE packet) already writes, and it is not
-        // a dimension the fingerprint capture records. The section is cited rather than
-        // quoted: rfc9000-packet-formats-and-pn-pseudocode.txt truncates s17.4 mid-sentence,
-        // so the endpoint-behaviour paragraph is not checkable from this repo's captures.
-        // Neither bit is a TlsQuicConnectionSpec knob, so neither is claimed to be one.
+        // RFC 9001 s5.4: both are protected bits of the short header. KEY PHASE FOLLOWS THE
+        // INSTALLED PHASE, and it is now a value rather than a constant: RFC 9001 s6 toggles
+        // it on every key update and TlsQuicKeySet owns which generation the write keys are
+        // at. This line USED TO READ `KeyPhase = false` with the reason "TlsQuicKeySet
+        // installs every level at phase 0 - key update is out of scope for this phase"; that
+        // reason is gone, and reading the phase from the key set is what keeps the bit and the
+        // keys from ever disagreeing.
+        //
+        // SPIN BIT: RFC 9000 s17.4's latency spin bit is a passive-measurement aid, not part
+        // of packet processing - a constant zero is the disabled reading, it is what the one
+        // other short header in this tree (LoopbackQuicPeer's HANDSHAKE_DONE packet) already
+        // writes, and it is not a dimension the fingerprint capture records. The section is
+        // cited rather than quoted: rfc9000-packet-formats-and-pn-pseudocode.txt truncates
+        // s17.4 mid-sentence, so the endpoint-behaviour paragraph is not checkable from this
+        // repo's captures. It is not a TlsQuicConnectionSpec knob, so it is not claimed to be
+        // one.
         SpinBit = false,
-        KeyPhase = false,
+        KeyPhase = ProtectOneMoreApplicationPacket(),
     };
+
+    // RFC 9001 s6.6: "Endpoints MUST count the number of encrypted packets for each set of
+    // keys." Counted HERE, in the one method every 1-RTT packet's plan comes from - all three
+    // call sites reach it, and it is already the single place the Application packet number is
+    // spent, so a packet that is built and never sent still consumes both.
+    //
+    // RETURNING THE KEY PHASE IS WHAT MAKES THE COUNT UNSKIPPABLE. A separate void counter
+    // beside `KeyPhase = _keys.WriteKeyPhase` could be deleted and every test would still
+    // pass; folding the two together means a plan cannot get its phase without being counted.
+    private bool ProtectOneMoreApplicationPacket()
+    {
+        ApplicationPacketsProtectedWithCurrentKeys++;
+        return _keys.WriteKeyPhase;
+    }
 }

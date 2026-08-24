@@ -634,6 +634,7 @@ T: public sealed class SharpTls.Quic.TlsQuicTrafficSecretEvent : SharpTls.Quic.T
   M: public System.Void Dispose()
   P: public SharpTls.Quic.TlsQuicTrafficSecret Secret { get; }
 T: public enum SharpTls.Quic.TlsQuicTransportError : System.UInt64
+  F: public const SharpTls.Quic.TlsQuicTransportError AeadLimitReached = SharpTls.Quic.TlsQuicTransportError.AeadLimitReached
   F: public const SharpTls.Quic.TlsQuicTransportError ApplicationError = SharpTls.Quic.TlsQuicTransportError.ApplicationError
   F: public const SharpTls.Quic.TlsQuicTransportError CryptoBufferExceeded = SharpTls.Quic.TlsQuicTransportError.CryptoBufferExceeded
   F: public const SharpTls.Quic.TlsQuicTransportError FinalSizeError = SharpTls.Quic.TlsQuicTransportError.FinalSizeError

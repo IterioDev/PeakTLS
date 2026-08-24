@@ -221,6 +221,279 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
     }
 
+    // ---- RFC 9001 s6: following a peer-initiated key update, end to end -------------------
+
+    [Fact]
+    public async Task APeerInitiatedKeyUpdateIsFollowedAndTheAnswerCarriesTheNewPhase()
+    {
+        // s6.2: "If a packet is successfully processed using the next key and IV, then the
+        // peer has initiated a key update.  The endpoint MUST update its send keys to the
+        // corresponding key phase in response.  Sending keys MUST be updated before sending an
+        // acknowledgment for the packet that was received with updated keys."
+        //
+        // BOTH HALVES ARE HERE AND THE SECOND IS THE ONE A UNIT TEST CANNOT REACH. That the
+        // client can OPEN a rotated packet is TlsQuicPacketReceiverTests' subject; that its
+        // ANSWER goes out under the rotated keys, and is readable by a peer that has itself
+        // rotated, needs both endpoints. The peer's read keys are generation n+1 by then, so a
+        // client that acknowledged under the old keys would produce a datagram this peer
+        // simply could not open - which is what the final pump proves it does not.
+        //
+        // THE PEER DERIVES ITS GENERATION WITH THE SAME TlsQuicKeySet THE CLIENT USES. That is
+        // deliberate and is the one place this file's usual "two implementations" rule bends:
+        // "quic ku" is a KDF label, not a behaviour, and two hand-rolled copies would agree
+        // with each other while both being wrong about the label. What is genuinely doubled
+        // here is the state machine either side of it.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // s6: "The Key Phase bit is initially set to 0 for the first set of 1-RTT packets."
+        // Asserted before anything rotates, so the assertions after it cannot be satisfied by
+        // a connection that started at phase 1 by accident.
+        Assert.False(connection.WriteKeyPhase);
+        Assert.Equal(0, connection.KeyUpdatesApplied);
+
+        // s6.1: the peer moves first. Its next 1-RTT packet is sealed under generation n+1 and
+        // announces the flipped bit.
+        serverPeer.UpdateKeys();
+        Assert.True(serverPeer.WriteKeyPhase);
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+
+        var sentBefore = clientTransport.Sent.Count;
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // s6.2's response, both halves.
+        Assert.Equal(1, connection.KeyUpdatesApplied);
+        Assert.True(connection.WriteKeyPhase);
+
+        // AND THE ANSWER WENT OUT. A PING is ack-eliciting (s19.2), so the client owes an ACK
+        // and the datagram below is that acknowledgment - the very packet s6.2 requires to be
+        // protected with the updated keys.
+        Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
+
+        // THE PEER OPENS IT, which is the whole test. Its read keys are generation n+1; a
+        // client that had acknowledged under the old ones would leave this pump unable to
+        // open anything, and LoopbackQuicPeer's own guard turns that into a throw rather than
+        // a quiet zero.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ack),
+            serverPeer.LastDatagramFrames);
+
+        // NOTHING FAILED AUTHENTICATION ON THE WAY. s6.6's counter is the cheapest witness
+        // that the update was followed rather than survived: a client that discarded the
+        // rotated packet and answered for some other reason would show a failure here.
+        Assert.Equal(0, connection.AuthenticationFailures);
+    }
+
+    [Fact]
+    public async Task AKeyUpdateIsFollowedTwiceInARow()
+    {
+        // ONE UPDATE CAN PASS WITHOUT THE NEXT GENERATION EVER BEING RE-ARMED. The receiver
+        // starts with current and next in hand, so the first rotation is served out of state
+        // that existed before any code ran; only the second proves that TlsQuicKeySet advanced
+        // its own read secret in step and derived a fresh generation afterwards.
+        //
+        // s6.3 is what makes re-arming a requirement rather than an optimisation: "endpoints
+        // MUST be able to retain two sets of packet protection keys for receiving packets: the
+        // current and the next" - after the first update, "the next" is generation n+2 and
+        // nothing else can produce it.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        for (var round = 1; round <= 2; round++)
+        {
+            serverPeer.UpdateKeys();
+            await serverPeer.SendOneRttFramesAsync(
+                [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+                cancellation.Token);
+            Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+            Assert.Equal(round, connection.KeyUpdatesApplied);
+
+            // s6: "toggled to signal each subsequent key update". Odd rounds are phase 1 and
+            // even rounds phase 0, so a client that only ever set the bit would pass round one
+            // and fail round two.
+            Assert.Equal(round % 2 == 1, connection.WriteKeyPhase);
+            Assert.Equal(0, connection.AuthenticationFailures);
+
+            // The peer reads the client's acknowledgment at its own new generation, closing
+            // the round in both directions rather than only in the one under test.
+            Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        }
+    }
+
+    // ---- RFC 9001 s6.6: the AEAD counts and their limits ----------------------------------
+
+    [Theory]
+    [InlineData(false, 1L << 23, 1L << 52)]
+    [InlineData(true, 1L << 62, 1L << 36)]
+    public void TheAeadLimitsAreTheFiguresSection66States(
+        bool chaCha20, long confidentiality, long integrity)
+    {
+        // The cipher arrives as a bool because TlsQuicPacketProtectionCipher is internal and
+        // an xUnit theory method must be public. Named for the one that is not the default, so
+        // the rows read as "AES-GCM" and "ChaCha20" rather than as false and true.
+        var cipher = chaCha20
+            ? TlsQuicPacketProtectionCipher.ChaCha20Poly1305
+            : TlsQuicPacketProtectionCipher.AesGcm;
+
+        // s6.6, quoted for each number rather than summarised, because a transcription is the
+        // only way these can be wrong and a summary would hide which one moved:
+        //
+        //   "For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the confidentiality limit is 2^23
+        //    encrypted packets ... For AEAD_CHACHA20_POLY1305, the confidentiality limit is
+        //    greater than the number of possible packets (2^62) and so can be disregarded."
+        //
+        //   "For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the integrity limit is 2^52 invalid
+        //    packets ... For AEAD_CHACHA20_POLY1305, the integrity limit is 2^36 invalid
+        //    packets."
+        //
+        // THE FOUR ARE PINNED AND THE BRANCHES ARE NOT, deliberately. Reaching 2^23 protected
+        // packets in a test is not feasible and a limit made injectable to fake it would be a
+        // knob no shipped code path uses; what is actually at risk here is the arithmetic -
+        // 2^23 against 2^32, or the confidentiality and integrity figures swapped, both of
+        // which this catches and neither of which a branch test would.
+        //
+        // THE TWO CIPHERS ARE THE OPPOSITE WAY ROUND FOR THE TWO LIMITS, which is the shape a
+        // swap would break: ChaCha20 has the LARGER confidentiality limit and the SMALLER
+        // integrity limit.
+        Assert.Equal(confidentiality, TlsQuicConnection.ConfidentialityLimitFor(cipher));
+        Assert.Equal(integrity, TlsQuicConnection.IntegrityLimitFor(cipher));
+    }
+
+    [Fact]
+    public async Task ProtectedOneRttPacketsAreCountedAndAKeyUpdateRestartsTheCount()
+    {
+        // s6.6: "Endpoints MUST count the number of encrypted packets for each set of keys."
+        // FOR EACH SET, which is why the count restarts rather than accumulating - a running
+        // total across generations would trip the confidentiality limit on keys that had
+        // protected almost nothing.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // NOTHING IS COUNTED BEFORE A 1-RTT PACKET EXISTS. The handshake flight is Initial and
+        // Handshake packets, and s6.1's Note keeps them out of this entirely: "Keys of packets
+        // other than the 1-RTT packets are never updated". A counter that fired on every
+        // packet would already be non-zero here.
+        Assert.Equal(0, connection.ApplicationPacketsProtectedWithCurrentKeys);
+
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // HANDSHAKE_DONE is ack-eliciting, so the client answered with a 1-RTT packet.
+        var afterFirst = connection.ApplicationPacketsProtectedWithCurrentKeys;
+        Assert.True(afterFirst > 0, $"expected at least one 1-RTT packet, counted {afterFirst}");
+
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Equal(
+            afterFirst + 1, connection.ApplicationPacketsProtectedWithCurrentKeys);
+
+        // AND THE KEY UPDATE RESTARTS IT. The count after the update is exactly the ONE packet
+        // the answer to the update was - s6.2's acknowledgment, protected with the new keys -
+        // rather than that packet plus everything the old keys had protected.
+        serverPeer.UpdateKeys();
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Equal(1, connection.KeyUpdatesApplied);
+        Assert.Equal(1, connection.ApplicationPacketsProtectedWithCurrentKeys);
+    }
+
+    [Fact]
+    public async Task AForgedOneRttPacketIsCountedAsAnAuthenticationFailureAndNotFatal()
+    {
+        // s6.6: "In addition to counting packets sent, endpoints MUST count the number of
+        // received packets that fail authentication during the lifetime of a connection."
+        //
+        // AND THE COUNT IS NOT THE CLOSE. The limit is 2^52 for AES-GCM, so one forgery must
+        // leave the connection working - RFC 9000 s12.2 has a receiver "discard" what it
+        // cannot open, and a client that closed on the first stray datagram would be trivially
+        // killable from off path. This test is as much about the connection surviving as about
+        // the counter moving.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Equal(0, connection.AuthenticationFailures);
+
+        // A SHORT HEADER WITH THIS CONNECTION'S DESTINATION CONNECTION ID AND RANDOM BYTES
+        // AFTER IT. It reaches the AEAD - the header is well formed enough to be routed to the
+        // Application level - and fails there, which is the state s6.6 counts. Bytes that
+        // failed to parse would be discarded earlier and would prove nothing about this
+        // counter.
+        var forged = new byte[64];
+        forged[0] = 0x40;
+        await serverTransport.SendAsync(
+            clientTransport.LocalEndPoint, forged, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Equal(1, connection.AuthenticationFailures);
+
+        // STILL USABLE. One more real exchange after the forgery, which a connection that had
+        // closed could not complete.
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Equal(1, connection.AuthenticationFailures);
+    }
+
     // ---- s19.16 and s19.4: frame types the dispatch used to drop ---------------------------
 
     [Theory]

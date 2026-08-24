@@ -130,6 +130,19 @@ internal sealed class TlsQuicKeySet : IDisposable
     private readonly bool[] _discarded = new bool[LevelCount];
     private bool _disposed;
 
+    // RFC 9001 s6's key update needs the 1-RTT traffic SECRETS, not just the keys derived from
+    // them: s6.1 derives generation n+1 from "the existing write secret" with the "quic ku"
+    // label, and a key cannot be walked back to the secret that produced it. Kept only for
+    // Application, because s6.1's Note is explicit - "Keys of packets other than the 1-RTT
+    // packets are never updated".
+    //
+    // EACH ALWAYS DESCRIBES THE GENERATION CURRENTLY INSTALLED, which is what makes
+    // NextGeneration correct to call on it. The read secret advances in step with the
+    // receiver's current keys and the write secret in step with _write[Application]; letting
+    // either drift would derive a generation the other side of the connection is not at.
+    private TlsQuicTrafficSecret? _applicationReadSecret;
+    private TlsQuicTrafficSecret? _applicationWriteSecret;
+
     /// <param name="receiver">
     /// The receiver whose read keys this set sequences. Required, not optional: an
     /// unattached key set is exactly the second store the remarks above rule out.
@@ -148,6 +161,112 @@ internal sealed class TlsQuicKeySet : IDisposable
 
         _receiver = receiver;
         _version = version;
+    }
+
+    /// <summary>Gets the RFC 9001 s6 key phase this endpoint protects its 1-RTT packets
+    /// with.</summary>
+    /// <remarks>s6: "The Key Phase bit is initially set to 0 for the first set of 1-RTT packets
+    /// and toggled to signal each subsequent key update." The send path writes this into the
+    /// short header; it is a property here rather than a constant there because the two must
+    /// move together with <see cref="_applicationWriteSecret"/> and the write keys.</remarks>
+    internal bool WriteKeyPhase { get; private set; }
+
+    /// <summary>Gets how many RFC 9001 s6 key updates have been applied to this set, in either
+    /// direction.</summary>
+    internal int KeyUpdatesApplied { get; private set; }
+
+    /// <summary>Gets whether an RFC 9001 s6 key update can be performed - both 1-RTT secrets
+    /// are held.</summary>
+    /// <remarks>s6.6 makes the negative answer consequential rather than merely informative:
+    /// "If a key update is not possible or integrity limits are reached, the endpoint MUST stop
+    /// using the connection". The caller that reaches an AEAD confidentiality limit asks this
+    /// before it asks for the update.</remarks>
+    internal bool CanUpdateKeys =>
+        !_disposed
+        && _applicationReadSecret is not null
+        && _applicationWriteSecret is not null
+        && _write[(int)TlsQuicEncryptionLevel.Application] is not null;
+
+    /// <summary>Advances both 1-RTT directions one RFC 9001 s6 generation.</summary>
+    /// <param name="locallyInitiated">
+    /// <see langword="true"/> for s6.1's "initiating a key update", where this endpoint moves
+    /// first and the peer is still at the old phase; <see langword="false"/> for s6.2's
+    /// response, where the receiver has already promoted its read keys because a packet
+    /// arrived protected with them.
+    /// </param>
+    /// <remarks>
+    /// <para>BOTH DIRECTIONS, ALWAYS, WHICHEVER SIDE STARTED IT. s6: "Initiating a key update
+    /// results in both endpoints updating keys.  This differs from TLS where endpoints can
+    /// update keys independently."</para>
+    /// <para>THE READ SECRET ADVANCES EVEN WHEN THE RECEIVER PROMOTED ITS OWN KEYS, because
+    /// the receiver holds derived keys and this type holds the secret they came from. Skipping
+    /// it would leave the next generation being derived from the generation before last, and
+    /// the failure would be a peer whose second key update this endpoint cannot follow.</para>
+    /// <para>THE NEXT SET IS ARMED IMMEDIATELY, which is s6.3's answer to the timing question:
+    /// "Endpoints are generally expected to have current and next receive packet protection
+    /// keys available", precisely so that responding to an update does not have to derive
+    /// anything and cannot be timed.</para>
+    /// </remarks>
+    internal void ApplyKeyUpdate(bool locallyInitiated)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_applicationReadSecret is not { } readSecret
+            || _applicationWriteSecret is not { } writeSecret
+            || _write[(int)TlsQuicEncryptionLevel.Application] is not { } write)
+        {
+            throw new InvalidOperationException(
+                "RFC 9001 s6's key update needs both 1-RTT traffic secrets and installed write "
+                    + "keys. Ask CanUpdateKeys first; s6.6 makes a connection that cannot "
+                    + "update one that must stop being used.");
+        }
+
+        // READ SIDE FIRST, so that a throw anywhere in here leaves the write keys at a
+        // generation this endpoint can still be read at by the peer. A half-applied update
+        // that moved the write keys and not the read ones is a connection that talks and
+        // cannot listen.
+        var nextRead = readSecret.NextGeneration(_version);
+        _applicationReadSecret = nextRead;
+        readSecret.Dispose();
+
+        if (locallyInitiated)
+        {
+            // s6.1: "The endpoint that initiates a key update also updates the keys that it
+            // uses for receiving packets." For a peer-initiated update the receiver has
+            // already done this - it had to, to open the packet that announced it.
+            _receiver.PromoteApplicationKeysForLocalUpdate();
+        }
+
+        ArmNextReadKeys();
+
+        // WRITE SIDE. s6.1: "An endpoint initiates a key update by updating its packet
+        // protection write secret and using that to protect new packets ... The endpoint
+        // toggles the value of the Key Phase bit and uses the updated key and IV to protect
+        // all subsequent packets."
+        var nextWrite = writeSecret.NextGeneration(_version);
+        _applicationWriteSecret = nextWrite;
+        writeSecret.Dispose();
+
+        using var derived = nextWrite.DerivePacketProtectionKeys(_version);
+        var replacement = new WriteKeys
+        {
+            PacketCipher = write.PacketCipher,
+            HeaderCipher = write.HeaderCipher,
+            Key = derived.CopyKey(),
+            Iv = derived.CopyIv(),
+
+            // s6.1: "The header protection key is not updated." Carried across from the set
+            // being replaced rather than taken from `derived`, which did compute a new one -
+            // using it would leave the peer unable to remove header protection at all, and the
+            // symptom would be every subsequent packet silently discarded.
+            HeaderProtectionKey = (byte[])write.HeaderProtectionKey.Clone(),
+        };
+
+        _write[(int)TlsQuicEncryptionLevel.Application] = replacement;
+        write.Dispose();
+
+        WriteKeyPhase = !WriteKeyPhase;
+        KeyUpdatesApplied++;
     }
 
     /// <summary>
@@ -278,6 +397,76 @@ internal sealed class TlsQuicKeySet : IDisposable
         {
             Install(secret.Level, writeKeys: null, keys, packetCipher, headerCipher);
         }
+
+        if (secret.Level != TlsQuicEncryptionLevel.Application)
+        {
+            return;
+        }
+
+        // GENERATION ZERO OF THE 1-RTT SECRETS, kept because RFC 9001 s6.1 derives every later
+        // generation from the one before and a derived key cannot be walked back.
+        //
+        // A COPY, NOT THE CALLER'S OBJECT. The remarks above this method say why the material
+        // is copied at all - "RFC 9001's own key objects are caller-owned and
+        // TlsQuicProcessResult.Dispose zeroes unconsumed secrets" - and a secret is exactly
+        // that. Holding the caller's would give this set a field that turns into zeroes at a
+        // moment it does not control, and the first symptom would be a key update deriving
+        // from an all-zero secret.
+        var retained = secret.CopySecret();
+        try
+        {
+            var owned = new TlsQuicTrafficSecret(
+                secret.Level, secret.Direction, secret.CipherSuite, retained);
+
+            if (secret.Direction == TlsQuicSecretDirection.Write)
+            {
+                _applicationWriteSecret?.Dispose();
+                _applicationWriteSecret = owned;
+
+                // s6: "The Key Phase bit is initially set to 0 for the first set of 1-RTT
+                // packets." Reset rather than left, because installing a fresh Application
+                // write secret is generation zero however many updates preceded it.
+                WriteKeyPhase = false;
+            }
+            else
+            {
+                _applicationReadSecret?.Dispose();
+                _applicationReadSecret = owned;
+
+                // s6.3's next set, armed before any packet can need it.
+                ArmNextReadKeys();
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(retained);
+        }
+    }
+
+    // s6.3: "endpoints MUST be able to retain two sets of packet protection keys for receiving
+    // packets: the current and the next." Derives generation n+1 from the secret describing
+    // the generation currently installed and hands the receiver its key and IV; the header
+    // protection key is s6.1's "not updated" and the receiver copies its own.
+    private void ArmNextReadKeys()
+    {
+        if (_applicationReadSecret is not { } current)
+        {
+            return;
+        }
+
+        using var next = current.NextGeneration(_version);
+        using var keys = next.DerivePacketProtectionKeys(_version);
+        var key = keys.CopyKey();
+        var iv = keys.CopyIv();
+        try
+        {
+            _receiver.InstallNextApplicationReadKeys(key, iv);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+            CryptographicOperations.ZeroMemory(iv);
+        }
     }
 
     /// <summary>
@@ -302,6 +491,27 @@ internal sealed class TlsQuicKeySet : IDisposable
         _write[(int)level] = null;
         _discarded[(int)level] = true;
         _receiver.DiscardReadKeys(level);
+
+        if (level == TlsQuicEncryptionLevel.Application)
+        {
+            // The RFC 9001 s6 secrets go with the keys they describe. A retained 1-RTT secret
+            // after the level is discarded is live key material for a level this type has just
+            // declared unusable - the same disagreement between the two stores that Dispose's
+            // remarks below rule out, reached by the other path.
+            DisposeApplicationSecrets();
+        }
+    }
+
+    // Zeroes both 1-RTT secrets and forgets the key phase. Not a public step: every caller
+    // reaches it through a discard or a disposal, because a set with keys and no secret can no
+    // longer perform s6's update and a set with a secret and no keys can no longer use one.
+    private void DisposeApplicationSecrets()
+    {
+        _applicationReadSecret?.Dispose();
+        _applicationReadSecret = null;
+        _applicationWriteSecret?.Dispose();
+        _applicationWriteSecret = null;
+        WriteKeyPhase = false;
     }
 
     /// <summary>
@@ -355,6 +565,7 @@ internal sealed class TlsQuicKeySet : IDisposable
             _receiver.DiscardReadKeys((TlsQuicEncryptionLevel)level);
         }
 
+        DisposeApplicationSecrets();
         _disposed = true;
     }
 
