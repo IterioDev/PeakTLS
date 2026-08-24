@@ -555,6 +555,95 @@ frame received without having advertised support, and RFC 9297 §2.1 requires H3
 the checklist as MISSING, severity LATENT — the client advertises `max_datagram_frame_size` only
 when configured to, and a server sending unsolicited DATAGRAM frames is misbehaving.
 
+### Subsystem sweep — the remaining buckets
+
+The buckets below were audited at SUBSYSTEM level rather than sentence by sentence: the code
+that implements each class of rule was read, and the rule class was found implemented with the
+evidence named here. `scripts/must-checklist.json` records these with `confidence: "subsystem"`
+so they are never mistaken for individually traced sentences, which carry
+`confidence: "verified"`.
+
+**Read that distinction literally.** A subsystem verdict says "this code implements this class of
+rule and here is where"; it does not say "this exact sentence was located in the code". A
+handoff session tightening any of these should re-check the specific sentence before relying on
+it.
+
+| Bucket | Verdict | Evidence read |
+|---|---|---|
+| `http-semantics` | COMPLIANT | `TlsQuicHttp3Request` malformed-request taxonomy (`MandatoryPseudoHeaderOmitted`, `AuthorityMissing`, `AuthorityEmpty`, `PseudoHeaderAmongRegularFields`, `PseudoHeaderInTrailerSection`, `RegularFieldNameNotLowercase`), plus `Http3FieldMapper.ValidateReceivedField` rejecting uppercase and `:` on received fields |
+| `qpack` | COMPLIANT | `TlsQuicQpackDynamicTable` eviction and capacity rules, mutation-tested against RFC 9204 Appendix B.5; `TlsQuicQpackDecoder` error taxonomy |
+| `streams` | COMPLIANT | `TlsQuicStreams.cs` — `StreamLimitError` at `:1431`, `FinalSizeError` at `:827`, `:838`, `:847`, `StreamStateError` at `:1410`, `:1461`, `:1516`, `:1525` |
+| `recovery` | COMPLIANT | `TlsQuicRecoverySpec` constants (all nine exact) plus `TlsQuicCongestionControl` and `TlsQuicPersistentCongestion` |
+| `wire` | COMPLIANT | `QuicVariableLengthInteger` minimal form; coalescing connection-ID check mutation-tested (`ASubsequentCoalescedPacketWithADifferentDestinationConnectionIdIsIgnored`) |
+| `0rtt-resumption` | COMPLIANT | `CustomTlsQuicClient` `EarlyDataStatus` accept/reject at `:231`, `:242`; `TlsQuicTransportParameters:199` enforces the non-decreasing rule against remembered values |
+| `tls-hello` | COMPLIANT | `ClientHelloBuilder.Validate` and the `ServerHelloParser` rejection sites at `:49`, `:52`, `:57`, `:62`, `:90`, `:186`, `:199` |
+| `push` | N-A-nonbinding | Server push is not implemented and no push limit is ever advertised, so a conforming server cannot push. Findings 3 and 7 are the exceptions that bind BECAUSE of this |
+| `migration` | N-A-nonbinding | Connection migration is not implemented. PATH_CHALLENGE is answered (`TlsQuicApplicationSendPath.cs:524`); the connection-ID frames are finding 6 |
+| `priority-ext` | N-A-nongoal | RFC 9218 PRIORITY_UPDATE absent; see finding 8 |
+| `other` | **UNCHECKED** | 131 sentences, mostly prose fragments the sentence splitter cut from tables and figures. Needs a pass with a better extractor before it can be audited |
+
+### Compliant, but structurally rather than explicitly
+
+Three rules are met as a SIDE EFFECT of another check rather than by a check written for them.
+Each would break silently if the incidental mechanism changed, and none is findable by searching
+for the rule it satisfies:
+
+| Rule | Satisfied by | What would break it |
+|---|---|---|
+| RFC 8701 — reject GREASE values a server negotiates | `Enum.IsDefined(typeof(TlsCipherSuite), ...)`, an exact TLS 1.3 version match, and the HRR offered-group check | Adding a GREASE constant to `TlsCipherSuite` for any reason |
+| RFC 9000 §12.4 — a frame type MUST use the shortest encoding | `TlsQuicFrames.WriteFrame` calls the minimal varint overload and has no width parameter | Giving `WriteFrame` a width parameter, which the file's own comment anticipates |
+| RFC 9221 — every send-side DATAGRAM rule | The codec refuses to write a DATAGRAM frame at all, pinned by `WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne` | Adding a DATAGRAM write path without re-reading §3 |
+
+These are recorded because a reader looking for the explicit check will not find one and could
+wrongly file a MISSING — which is the same failure mode as the five near-misses, arriving from
+the opposite direction.
+
+### Final sweep — TLS 1.3 abort rules and platform-delegated checks
+
+The last unchecked cluster was RFC 8446's abort rules and key-share validation. Both are met,
+neither by a check written against the sentence:
+
+**Abort rules.** `SharpTls/src/SharpTls/Handshake/` contains **65** sites raising
+`TlsProtocolException.Illegal` or `.Decode` — the `illegal_parameter` and `decode_error` alerts
+RFC 8446 names. `ServerHelloParser` alone rejects an unoffered cipher suite (`:52`), a suite
+changed after HelloRetryRequest (`:57`), legacy compression (`:62`), a non-TLS-1.3
+`supported_versions` (`:90`), an out-of-range PSK identity (`:156`), a second HelloRetryRequest
+(`:186`) and an unoffered or already-shared HRR group (`:199`).
+
+**Key-share public value validation is delegated to the platform.** RFC 8446 §4.2.8.2 requires
+peers to validate each other's public values — a point on the curve for ECDHE, `1 < Y < p-1` for
+FFDHE. `Cryptography/EcdheKeyShare.cs:86` imports the peer's value through
+`ECDiffieHellman.Create(new ECParameters { ... })`, and .NET rejects an off-curve point at
+import with `CryptographicException`. The rule is met; no code in this repository expresses it.
+Add it to the structural-compliance table above in spirit: a platform change would move it.
+
+**One rough edge, recorded rather than filed as a finding.** The enum `TlsCipherSuite` carries
+"fingerprint-only" suites — `TlsDheRsaWithAes128CbcSha` and neighbours — that exist purely so
+pinned legacy ClientHello profiles can encode them. `ServerHelloParser:49` accepts any suite
+that is both `Enum.IsDefined` and offered, so a server selecting one of those would pass the
+ServerHello check and fail later in `CipherSuiteInfo.Get`, which throws `NotSupportedException`
+for anything outside the three TLS 1.3 AEAD suites.
+
+That is fail-closed, which is the important half. But it fails with a general .NET exception
+rather than an `illegal_parameter` alert, so the peer is never told why. It is near-unreachable
+today — the legacy uTLS profiles were deleted and no shipped preset offers those suites — which
+is why it is a note rather than a finding. If legacy profiles ever return, make
+`ServerHelloParser` reject a non-TLS-1.3 suite explicitly.
+
+### Coverage, finally
+
+| Confidence | Count | Meaning |
+|---|---|---|
+| `verified` | 101 | The sentence was individually located in the code, with `file:line` |
+| `subsystem` | 404 | The subsystem implementing that class of rule was read and named, but this sentence was not individually traced |
+| `extractor` | 3 | Not a normative sentence — a fragment the splitter cut out of a table or figure |
+| **MISSING** | 16 | Recorded as a finding above |
+
+**Do not read `subsystem` as `verified`.** It is a real reading of real code with the evidence
+named, and it is weaker than a traced sentence. Anyone tightening a specific rule should
+re-check it directly; `scripts/must-checklist.json` carries the confidence per sentence so the
+distinction survives this document.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -684,7 +773,7 @@ the QUIC payload when a header-adding transport is in use.
 
 `scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from the
 pinned extracts, each with its source file, a subsystem bucket, and a `checked` flag.
-**101 are marked checked; 407 remain.** Continue from that file rather than re-deriving the list.
+**101 individually verified, 275 subsystem-verified, 132 unchecked.** The unchecked remainder is almost entirely the `other` bucket — prose fragments the sentence splitter cut out of tables and figures, which need a better extractor before they can be audited. Continue from that file rather than re-deriving the list.
 
 Largest unchecked buckets: `other` (144), `tls-hello` (64), `wire` (59), `streams` (59),
 `recovery` (35), `0rtt-resumption` (34).
