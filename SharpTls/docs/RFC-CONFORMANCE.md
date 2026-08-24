@@ -212,13 +212,21 @@ mistaken for one.
 | 7.2.5 | PUSH_PROMISE on the control stream is H3_FRAME_UNEXPECTED | `Quic/TlsQuicHttp3Streams.cs:701` | COMPLIANT |
 | 7.2.8 | Unknown and reserved frame types are ignored | `Quic/TlsQuicHttp3Streams.cs:720` | COMPLIANT |
 | RFC 9297 §2.1.1 | SETTINGS_H3_DATAGRAM with a value other than 0 or 1 is H3_SETTINGS_ERROR | `Quic/TlsQuicHttp3Frames.cs:494` | COMPLIANT |
-| **7.2.7** | **"A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."** | `Quic/TlsQuicHttp3Streams.cs:716` | **MISSING** |
+| 7.2.7 | MAX_PUSH_ID on a stream other than the control stream is H3_FRAME_UNEXPECTED | `Quic/TlsQuicHttp3Request.cs:1637` | COMPLIANT |
+| **7.2.7** | **"A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."** (control stream) | `Quic/TlsQuicHttp3Streams.cs:716` | **MISSING** |
+| **7.2.5** | **"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push ID than the client has advertised as a connection error of H3_ID_ERROR."** | `Quic/TlsQuicHttp3Request.cs` default arm | **MISSING** |
 
 #### FINDING 3 — a server's MAX_PUSH_ID is accepted instead of rejected (MISSING)
 
 RFC 9114 §7.2.7, verbatim from the extract: *"A server MUST NOT send a MAX_PUSH_ID frame. A
 client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type
 H3_FRAME_UNEXPECTED."*
+
+**Scope correction.** RFC 9114 s7.2.7 states two rules and only the second is unmet.
+"Receipt of a MAX_PUSH_ID frame on any other stream MUST be treated as a connection error of
+type H3_FRAME_UNEXPECTED" IS enforced - `Quic/TlsQuicHttp3Request.cs:1637` rejects it on a
+request stream. The gap is the CONTROL stream, where the frame may legally appear and so
+reaches the accepting branch.
 
 `Quic/TlsQuicHttp3Streams.cs:714-717` handles it in a shared case block:
 
@@ -243,6 +251,23 @@ refused by never advertising a limit. It is nonetheless a MUST violation, and it
 laxness-on-inbound class that this audit exists to find: the client is more permissive than the
 specification allows, which is exactly what a peer probing for implementation quirks would
 measure.
+
+#### FINDING 5 - PUSH_PROMISE push IDs are never validated (MISSING)
+
+RFC 9114 s7.2.5: *"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger
+push ID than the client has advertised as a connection error of H3_ID_ERROR."*
+
+This client never sends MAX_PUSH_ID, so its advertised limit is unset and s7.2.7's default
+applies: *"a server cannot push until it receives a MAX_PUSH_ID frame."* Every push ID is
+therefore larger than advertised, and every PUSH_PROMISE should be H3_ID_ERROR.
+
+`Quic/TlsQuicHttp3Request.cs` routes PUSH_PROMISE to the `default:` arm, which returns `true` -
+accepted and skipped. The comment there is correct that s4.1 permits PUSH_PROMISE to APPEAR on a
+request stream; what is missing is the separate push-ID check. No push-ID state is tracked
+anywhere, and `H3IdError` appears in that file only inside a mutation-ledger comment.
+
+Severity **LATENT**: a conforming server does not push without a limit, so the frame should
+never arrive.
 
 **Inbound validation is otherwise present, which was the thing worth checking.** A client that validates
 only what it sends is the easy mistake: `ValidateReceivedField` applies RFC 9114 §4.2's rules to
@@ -506,16 +531,16 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 80 — every row in the verdict tables above, counted directly rather than
-estimated (74 + 1 + 5). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
-report is NOT, because it is an open question rather than a verdict. Confirmed: 74 compliant, 1 defect (already fixed), 5 MISSING (key update, AEAD packet counting,
-MAX_PUSH_ID acceptance, duplicate packet suppression, HTTP/3 PRIORITY_UPDATE — the last of which
-is a deliberate non-goal). No UNRESOLVED remain: the one that existed was settled by
+Findings raised: 82 — every row in the verdict tables above, counted directly rather than
+estimated (75 + 1 + 6). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
+report is NOT, because it is an open question rather than a verdict. Confirmed: 75 compliant, 1 defect (already fixed), 6 MISSING (key update, AEAD packet counting,
+MAX_PUSH_ID on the control stream, duplicate packet suppression, PUSH_PROMISE push-ID validation,
+and HTTP/3 PRIORITY_UPDATE — the last a deliberate non-goal). No UNRESOLVED remain: the one that existed was settled by
 reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
 Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Five near-misses against 74 confirmations is the
+as absent while the code implemented it. Five near-misses against 75 confirmations is the
 number a reader should weigh when deciding how much to trust a MISSING verdict here.
 
 The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
@@ -523,6 +548,86 @@ from an open question into a confirmed MUST violation. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
 packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
 code implemented them. Three near-misses in two passes is why the method note above exists.
+
+
+---
+
+## Handoff - for a fresh session picking this up
+
+Read this section first. Everything needed to act is here; nothing depends on the session that
+wrote it.
+
+### The open findings, in fix order
+
+**1. Key update is not implemented.** `Quic/TlsQuicKeySet.cs:436` states it is out of scope and
+builds every key set with `keyPhase: false`; no `quic ku` secret can be derived. RFC 9001 s6.2
+requires a client to update its send keys when a peer initiates one. The Key Phase bit is
+already parsed and written (`Quic/TlsQuicPacketHeader.cs:89`, `:133`, `:409`, `:463`), so the
+wire half exists and the key-schedule half does not. Fix: derive the next generation with the
+`quic ku` label in `Quic/TlsQuicSecrets.cs` (the prefix machinery at `:109` already composes
+version-dependent labels), retain the previous key set for reordered packets per s6.3, and flip
+the phase on send. Pinned text:
+`docs/superpowers/specs/reference-captures/rfc9001-section6-key-update.txt`.
+**This is the only finding that can break a live connection.**
+
+**2. AEAD packet counts are not tracked.** RFC 9001 s6.6 requires counting encrypted packets per
+key set and stopping at the confidentiality limit. Nothing counts. Depends on finding 1 - there
+is no action to take on reaching a limit without key update. Fix both together.
+
+**3. MAX_PUSH_ID is accepted on the control stream.** `Quic/TlsQuicHttp3Streams.cs:714-717`.
+Two-line fix: split the case so `MaxPushId` sets `error = H3FrameUnexpected; return false;`
+while `CancelPush` keeps the existing varint parse. Do NOT merge them again - they share a
+payload shape and have opposite rules, which is exactly what produced the bug.
+
+**4. Received packets are not duplicate-suppressed.** `Quic/TlsQuicPacketReceiver.cs:715` keeps
+only the largest packet number per space and `:754` dispatches frames unconditionally. RFC 9000
+s12.3 requires discarding an already-processed packet number, after removing protection. Fix: a
+per-space sliding window of seen numbers, consulted before the frame loop. The ACK tracker
+already deduplicates ACK RANGES and is mutation-tested - that is a different thing, do not treat
+it as this.
+
+**5. PUSH_PROMISE push IDs are not validated.** `Quic/TlsQuicHttp3Request.cs` default arm. The
+client never advertises a limit, so any PUSH_PROMISE is H3_ID_ERROR.
+
+**6. HTTP/3 PRIORITY_UPDATE (RFC 9218 s7.2) is absent.** Recorded as MISSING against the spec but
+a deliberate non-goal: no MUST compels a client to send one, and emitting priority signals no
+real target sends would make this client MORE distinguishable. Do not "fix" without a capture
+showing the impersonation target sends them.
+
+### Also open, not a conformance verdict
+
+The SOCKS5 WSAEMSGSIZE field report, recorded under the RFC 9000 s14 heading above. Not
+reproduced locally; loopback's 65535-byte MTU means a local test cannot settle it. The open code
+question is whether the padding target should be measured against the WIRE datagram rather than
+the QUIC payload when a header-adding transport is in use.
+
+### Rules for editing this document
+
+- Normative text is quoted ONLY from `docs/superpowers/specs/reference-captures/`, never from
+  memory. If a rule falls outside the pinned sections, pin the section first - that is what
+  closed the key-update question and turned it from a guess into a verdict.
+- A MISSING verdict MUST name the failed search patterns. Five findings were nearly filed in
+  error because a grep shaped around a rule's words returned nothing while the code implemented
+  it under a different spelling; one survived nine patterns and was found only by reading the
+  path.
+- Recount the tables before changing the attrition line. It has been wrong twice.
+
+### Remaining work, precisely
+
+`scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from the
+pinned extracts, each with its source file, a subsystem bucket, and a `checked` flag.
+**67 are marked checked; 441 remain.** Continue from that file rather than re-deriving the list.
+
+Largest unchecked buckets: `other` (144), `tls-hello` (64), `wire` (59), `streams` (59),
+`recovery` (35), `0rtt-resumption` (34).
+
+Two facts from this pass that change how those buckets should be read:
+
+- **0-RTT is implemented** (`Quic/CustomTlsQuicClient.cs:141`, `:189`), so its 34 MUSTs are live
+  requirements rather than non-goals. None has been checked.
+- **Server push is not implemented** and the client never advertises a push limit, so most of the
+  16 push MUSTs are unreachable - except findings 3 and 5, which bind precisely BECAUSE the
+  client does not push.
 
 ## Relationship to other documents
 
