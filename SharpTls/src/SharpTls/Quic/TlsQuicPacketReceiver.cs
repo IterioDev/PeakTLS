@@ -250,6 +250,25 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     private byte[] _scratch = [];
     private bool _disposed;
 
+    /// <summary>
+    /// Whether a packet whose QUIC Bit is 0 is accepted rather than discarded.
+    /// </summary>
+    /// <remarks>
+    /// <para>SET FROM WHAT THIS ENDPOINT ADVERTISED, NOT FROM A KNOB. RFC 9287 s3: "An endpoint
+    /// that advertises the grease_quic_bit transport parameter MUST accept packets with the
+    /// QUIC Bit set to 0." The obligation follows the advertisement, so
+    /// <c>CustomTlsQuicClient.AdvertisedGreaseQuicBit</c> is the only thing that may set this -
+    /// a separate knob could disagree with the wire and would be the advertise/enforce
+    /// divergence this tree refuses everywhere else.</para>
+    /// <para>A PROPERTY RATHER THAN A CONSTRUCTOR ARGUMENT because the ClientHello does not
+    /// exist when this receiver is built: the connection draws its source connection ID first
+    /// and composes the profile around it.</para>
+    /// <para>Default false is RFC 9000 s17.2's rule for an endpoint that granted no such
+    /// permission: "Packets containing a zero value for this bit are not valid packets in this
+    /// version and MUST be discarded."</para>
+    /// </remarks>
+    internal bool AcceptGreasedQuicBit { get; set; }
+
     /// <param name="version">
     /// The connection's QUIC version, compared against every long header's Version
     /// field. Not a constant: RFC 9369 defines a second version this project targets.
@@ -586,7 +605,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         ReadOnlyMemory<byte>? firstDestinationConnectionId = null;
 
         var offset = 0;
-        foreach (var coalesced in TlsQuicDatagramReader.Read(datagram))
+        foreach (var coalesced in TlsQuicDatagramReader.Read(datagram, AcceptGreasedQuicBit))
         {
             // The reader yields contiguous slices starting at the running offset - a
             // long header packet is remaining.Slice(0, consumed), and a short header or
@@ -612,7 +631,11 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                 case TlsQuicCoalescedPacketKind.Short:
                 {
                     if (!TlsQuicPacketHeader.TryReadShortHeader(
-                            packet, _destinationConnectionIdLength, out var shortHeader, out _))
+                            packet,
+                            _destinationConnectionIdLength,
+                            out var shortHeader,
+                            out _,
+                            AcceptGreasedQuicBit))
                     {
                         discarded++;
                         break;
@@ -646,7 +669,8 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
 
                 default:
                 {
-                    if (!TlsQuicPacketHeader.TryReadLongHeader(packet, out var longHeader, out _))
+                    if (!TlsQuicPacketHeader.TryReadLongHeader(
+                            packet, out var longHeader, out _, AcceptGreasedQuicBit))
                     {
                         // Unreachable from here by construction: the reader already ran
                         // this same parse to find the boundary and stopped the walk when

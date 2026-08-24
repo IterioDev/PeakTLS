@@ -103,6 +103,19 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
     // s5.1.1 makes this the number the PEER may not exceed and therefore the number this
     // endpoint enforces, so reading it from anywhere but the profile would be enforcing a limit
     // that was never sent - the divergence TlsQuicStreams.cs's block comment forbids.
+    // RFC 9287 s3's grease_quic_bit (0x2ab2), AS THIS CLIENT ADVERTISES IT. The parameter is
+    // zero-length - its presence IS the value - so this asks whether it is there rather than
+    // what it says.
+    //
+    // IT IS A PERMISSION THIS ENDPOINT GRANTS, NOT ONE IT TAKES. s3: "An endpoint that
+    // advertises the grease_quic_bit transport parameter MUST accept packets with the QUIC Bit
+    // set to 0." So advertising it obliges the RECEIVE path to stop discarding them, which is
+    // what TlsQuicPacketReceiver.AcceptGreasedQuicBit is wired from. Before that wiring, a
+    // profile could advertise 0x2ab2 and then drop every packet the peer greased in reply.
+    internal bool AdvertisedGreaseQuicBit =>
+        _configuration.ClientHello.Spec.QuicTransportParameters
+            ?.Get((ulong)TlsQuicTransportParameterId.GreaseQuicBit) is not null;
+
     internal ulong? AdvertisedActiveConnectionIdLimit =>
         _configuration.ClientHello.Spec.QuicTransportParameters
             ?.Get((ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit)

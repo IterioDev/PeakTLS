@@ -1112,6 +1112,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // cannot drift; this field exists because the tracker exposes no getter for it and A3-5
     // may not edit that file.
     private TimeSpan _peerMaxAckDelay = TlsQuicAckTracker.DefaultMaxAckDelay;
+
+    /// <summary>Whether the peer advertised RFC 9287's <c>grease_quic_bit</c> (0x2ab2), which
+    /// is what permits this endpoint to clear the QUIC Bit on a 1-RTT packet.</summary>
+    private bool _peerAllowsGreasedQuicBit;
     private bool _started;
     private bool _adoptedServerConnectionId;
     private bool _adoptedFromRetry;
@@ -1739,6 +1743,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // profile advertised. TlsQuicConnectionOptions.AckDelayExponent survives as the seed
         // for a connection whose profile carries neither parameter, which is s18.2's default
         // of 3 and 25 ms.
+        // RFC 9287 s3's obligation, adopted from the same profile in the same place as the ACK
+        // pair above: advertising grease_quic_bit is a promise to accept what it invites, and
+        // before this line a profile could make that promise and then discard every packet the
+        // peer greased in reply.
+        _receiver.AcceptGreasedQuicBit = _client.AdvertisedGreaseQuicBit;
+
         _acks.OnLocalAckParameters(
             (int)(_client.AdvertisedAckDelayExponent ?? (ulong)_options.AckDelayExponent),
             ToMaxAckDelay(_client.AdvertisedMaxAckDelay));
@@ -2912,6 +2922,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 peer.Parameters
                     .Get((ulong)TlsQuicTransportParameterId.MaxAckDelay)
                     ?.GetVariableInteger());
+
+            // RFC 9287 s3, read in the same step and for the same reason as the pair above: it
+            // is a permission the PEER grants, it arrives with the peer's transport parameters,
+            // and it is zero-length - its presence is the value. Until this line the parameter
+            // was length-validated by TlsQuicTransportParameters and then ignored, so the
+            // permission could not be acted on even by a caller who wanted to.
+            _peerAllowsGreasedQuicBit =
+                peer.Parameters.Get((ulong)TlsQuicTransportParameterId.GreaseQuicBit) is not null;
             _acks.OnPeerAckParameters(
                 ToAckDelayExponent(
                     peer.Parameters

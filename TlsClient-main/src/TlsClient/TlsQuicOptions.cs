@@ -283,6 +283,21 @@ public sealed class TlsQuicOptions
     /// the send path with no property at all.</remarks>
     public TlsQuicSpinBitPolicy SpinBit { get; set; } = (TlsQuicSpinBitPolicy)SpecDefaults.SpinBit;
 
+    /// <summary>
+    /// Gets or sets whether this client draws RFC 9000 section 17.2's QUIC Bit per 1-RTT packet
+    /// when the peer has advertised RFC 9287's <c>grease_quic_bit</c>. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>THIS IS THE SEND HALF ONLY. Advertising <c>grease_quic_bit</c> yourself is a
+    /// transport-parameter entry - <c>TlsQuicTransportParameterEntry.Literal(0x2AB2, [])</c> in
+    /// <see cref="TransportParameters"/> - and doing so obliges the receive path to accept a
+    /// greased packet, which it now does automatically because the obligation follows the
+    /// advertisement rather than a second knob.</para>
+    /// <para>Off by default because neither shipped capture greases, and the bit sits outside
+    /// header protection - it is plainly visible to a passive observer.</para>
+    /// </remarks>
+    public bool GreaseQuicBit { get; set; } = SpecDefaults.GreaseQuicBit;
+
     /// <summary>Gets or sets the source connection ID length in bytes.</summary>
     public int SourceConnectionIdLength { get; set; } = SpecDefaults.SourceConnectionIdLength;
 
@@ -482,6 +497,7 @@ public sealed class TlsQuicOptions
             MaximumPathMtu = MaximumPathMtu,
             PathMtuDiscovery = PathMtuDiscovery,
             SpinBit = (SharpTls.Quic.TlsQuicSpinBitPolicy)SpinBit,
+            GreaseQuicBit = GreaseQuicBit,
             InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
             InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
             InitialFrameOrder =

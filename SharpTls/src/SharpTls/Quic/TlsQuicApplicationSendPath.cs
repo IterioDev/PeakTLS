@@ -681,8 +681,19 @@ internal sealed partial class TlsQuicConnection
         // repo's captures. It is not a TlsQuicConnectionSpec knob, so it is not claimed to be
         // one.
         SpinBit = DrawSpinBit(),
+        GreaseFixedBit = DrawGreasedQuicBit(),
         KeyPhase = ProtectOneMoreApplicationPacket(),
     };
+
+    /// <summary>RFC 9287 s3's QUIC Bit, drawn per packet when both sides permit it.</summary>
+    /// <remarks>BOTH CONDITIONS, AND THE PEER'S IS NOT OPTIONAL. s3: an endpoint may clear the
+    /// bit only if its peer advertised grease_quic_bit; clearing it otherwise produces a packet
+    /// RFC 9000 s17.2 tells that peer to discard. The spec knob alone is therefore not enough
+    /// to make this true.</remarks>
+    private bool DrawGreasedQuicBit() =>
+        _options.Spec.GreaseQuicBit
+        && _peerAllowsGreasedQuicBit
+        && RandomNumberGenerator.GetInt32(2) == 1;
 
     /// <summary>One connection's spin-bit value, for
     /// <see cref="TlsQuicSpinBitPolicy.RandomPerConnection"/>.</summary>

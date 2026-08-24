@@ -296,6 +296,8 @@ TlsClient.TlsQuicOptions.CryptoOffsetVarintWidth.set -> void
 TlsClient.TlsQuicOptions.DestinationConnectionIdLength.get -> int
 TlsClient.TlsQuicOptions.DestinationConnectionIdLength.set -> void
 TlsClient.TlsQuicOptions.FlowControl.get -> TlsClient.TlsQuicFlowControlOptions!
+TlsClient.TlsQuicOptions.GreaseQuicBit.get -> bool
+TlsClient.TlsQuicOptions.GreaseQuicBit.set -> void
 TlsClient.TlsQuicOptions.HandshakeDeadline.get -> System.TimeSpan?
 TlsClient.TlsQuicOptions.HandshakeDeadline.set -> void
 TlsClient.TlsQuicOptions.HeaderLengthVarintWidth.get -> TlsClient.TlsQuicVarintWidth

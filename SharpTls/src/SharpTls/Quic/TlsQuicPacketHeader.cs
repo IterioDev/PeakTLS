@@ -26,6 +26,20 @@ internal enum TlsQuicLongPacketType
 // for a coalesced datagram, where several packets alias one buffer.
 internal readonly struct TlsQuicLongHeader
 {
+    /// <summary>RFC 9287 s3: write the QUIC Bit as 0 rather than 1.</summary>
+    /// <remarks>
+    /// <para>SAME INVERTED SENSE AS <see cref="TlsQuicShortHeader.GreaseFixedBit"/>, for the
+    /// same reason: a default-constructed header must still write RFC 9000 s17.2's mandatory
+    /// 1.</para>
+    /// <para>THIS CLIENT NEVER SETS IT ON A LONG HEADER, and cannot legally. s3 permits
+    /// clearing the bit only once the PEER has advertised grease_quic_bit, and the peer's
+    /// transport parameters do not arrive until its EncryptedExtensions - by which point every
+    /// packet this endpoint sends carries a short header. It exists here because the writer and
+    /// the reader are one codec and a codec that can read a shape it cannot write is a codec
+    /// with an untestable half.</para>
+    /// </remarks>
+    internal bool GreaseFixedBit { get; init; }
+
     internal TlsQuicLongPacketType Type { get; init; }
     internal uint Version { get; init; }
     internal ReadOnlyMemory<byte> DestinationConnectionId { get; init; }
@@ -82,6 +96,13 @@ internal readonly struct TlsQuicShortHeader
     // [QUIC-TLS] says its mask only ever touches the low 4 or 5 bits of byte
     // 0), so this is the true value even on a still-protected packet.
     internal bool SpinBit { get; init; }
+
+    /// <summary>RFC 9287 s3: write the QUIC Bit as 0 rather than 1.</summary>
+    /// <remarks>THE SENSE IS INVERTED ON PURPOSE - "grease it" rather than "set it" - so that
+    /// a default-constructed header still writes s17.2's mandatory 1. A `FixedBit` property
+    /// defaulting to true would read better and would be wrong for every `default` struct in
+    /// this tree.</remarks>
+    internal bool GreaseFixedBit { get; init; }
 
     // RFC 9000 s17.3.1: covered by header protection. The value read here
     // is only meaningful once a later stage removes protection; treated as
@@ -173,10 +194,17 @@ internal static class TlsQuicPacketHeader
     // ReadOnlyMemory<byte> without copying. Taking Memory here lets every stored field be
     // a zero-copy slice of the caller's buffer instead - ReceiveAsync already hands
     // callers a Memory<byte>, so the path from socket to parsed header stays copy-free.
+    // acceptGreasedQuicBit - RFC 9287 s3: true only when this endpoint advertised
+    // grease_quic_bit, which obliges it to "accept packets with the QUIC Bit set to 0".
+    // Default false keeps RFC 9000 s17.2's "packets containing a zero value for this bit are
+    // not valid packets in this version and MUST be discarded", which is the right answer for
+    // an endpoint that granted no such permission - and for every caller that is inspecting
+    // bytes rather than receiving them.
     internal static bool TryReadLongHeader(
         ReadOnlyMemory<byte> datagram,
         out TlsQuicLongHeader header,
-        out int consumed)
+        out int consumed,
+        bool acceptGreasedQuicBit = false)
     {
         header = default;
         consumed = 0;
@@ -194,7 +222,8 @@ internal static class TlsQuicPacketHeader
         // discarded." The Header Form bit (0x80) must also be set: a clear
         // bit means this is a short header, which this function does not
         // parse.
-        if ((firstByte & HeaderFormBit) == 0 || (firstByte & FixedBitMask) == 0)
+        if ((firstByte & HeaderFormBit) == 0
+            || ((firstByte & FixedBitMask) == 0 && !acceptGreasedQuicBit))
         {
             return false;
         }
@@ -343,7 +372,7 @@ internal static class TlsQuicPacketHeader
         var lowBits = header.Type == TlsQuicLongPacketType.Retry ? 0 : header.PacketNumberLength - 1;
         destination[offset++] = (byte)(
             HeaderFormBit
-            | FixedBitMask
+            | (header.GreaseFixedBit ? 0 : FixedBitMask)
             | (EncodeLongPacketType(header.Type, header.Version) << LongPacketTypeShift)
             | lowBits);
 
@@ -386,7 +415,8 @@ internal static class TlsQuicPacketHeader
         ReadOnlyMemory<byte> datagram,
         int destinationConnectionIdLength,
         out TlsQuicShortHeader header,
-        out int consumed)
+        out int consumed,
+        bool acceptGreasedQuicBit = false)
     {
         header = default;
         consumed = 0;
@@ -416,7 +446,7 @@ internal static class TlsQuicPacketHeader
         // below, the Header Form and Fixed Bit are outside the header
         // protection mask (RFC 9001 s5.4 preamble), so this check is
         // meaningful even on a still-protected packet.
-        if ((firstByte & FixedBitMask) == 0)
+        if ((firstByte & FixedBitMask) == 0 && !acceptGreasedQuicBit)
         {
             return false;
         }
@@ -496,7 +526,7 @@ internal static class TlsQuicPacketHeader
         // left at 0 per RFC 9000 s17.3.1: "The value included prior to
         // protection MUST be set to 0."
         destination[offset++] = (byte)(
-            FixedBitMask
+            (header.GreaseFixedBit ? 0 : FixedBitMask)
             | (header.SpinBit ? SpinBitMask : 0)
             | (header.KeyPhase ? KeyPhaseMask : 0)
             | (header.PacketNumberLength - 1));

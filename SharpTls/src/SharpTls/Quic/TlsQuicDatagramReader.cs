@@ -85,7 +85,13 @@ internal static class TlsQuicDatagramReader
     // a body that touches bytes past its own packet, and neither shows up as an exception - while
     // the broad rule can only be broken on purpose, by someone who then has to justify it. A
     // contract that is safe to obey mechanically beats one that is exactly true.
-    internal static IEnumerable<TlsQuicCoalescedPacket> Read(ReadOnlyMemory<byte> datagram)
+    // acceptGreasedQuicBit - RFC 9287 s3: true only when this endpoint advertised
+    // grease_quic_bit. It reaches TryReadLongHeader below, which is what finds each coalesced
+    // packet's boundary - so without it a greased long header does not merely fail to parse,
+    // it stops the walk and discards every packet behind it in the same datagram.
+    internal static IEnumerable<TlsQuicCoalescedPacket> Read(
+        ReadOnlyMemory<byte> datagram,
+        bool acceptGreasedQuicBit = false)
     {
         var offset = 0;
 
@@ -131,7 +137,8 @@ internal static class TlsQuicDatagramReader
                 yield break;
             }
 
-            if (!TlsQuicPacketHeader.TryReadLongHeader(remaining, out _, out var consumed))
+            if (!TlsQuicPacketHeader.TryReadLongHeader(
+                    remaining, out _, out var consumed, acceptGreasedQuicBit))
             {
                 // RFC 9000 s12.2: "Every QUIC packet that is coalesced into a single UDP
                 // datagram is separate and complete." A packet whose header cannot even be

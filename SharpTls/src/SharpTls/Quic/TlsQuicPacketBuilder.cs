@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 
 namespace SharpTls.Quic;
 
@@ -101,6 +101,14 @@ internal readonly struct TlsQuicPacketPlan
     /// choice - "endpoints MAY disable the spin bit" - so it is a knob and never derived.
     /// </summary>
     internal bool SpinBit { get; init; }
+
+    /// <summary>RFC 9287 s3: write the QUIC Bit as 0 on this 1-RTT packet.</summary>
+    /// <remarks>Inverted sense - "grease it" rather than "set it" - so a
+    /// default-constructed plan still writes RFC 9000 s17.2's mandatory 1. Short header
+    /// only: s3 permits clearing the bit only once the PEER has advertised
+    /// grease_quic_bit, and its transport parameters do not arrive until the
+    /// EncryptedExtensions, so no long header of ours can legally carry it.</remarks>
+    internal bool GreaseFixedBit { get; init; }
 
     /// <summary>RFC 9000 s17.3.1's Key Phase bit, short header only: which of the two
     /// 1-RTT key phases <see cref="TlsQuicPacketBuilder.Build"/> was handed keys for. The
@@ -504,6 +512,7 @@ internal static class TlsQuicPacketBuilder
             var shortHeader = new TlsQuicShortHeader
             {
                 SpinBit = plan.SpinBit,
+                GreaseFixedBit = plan.GreaseFixedBit,
                 KeyPhase = plan.KeyPhase,
                 DestinationConnectionId = plan.DestinationConnectionId,
                 PacketNumberLength = packetNumberLength,

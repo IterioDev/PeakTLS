@@ -421,6 +421,26 @@ internal sealed class TlsQuicConnectionSpec
     /// all.</remarks>
     public TlsQuicSpinBitPolicy SpinBit { get; init; } = TlsQuicSpinBitPolicy.Zero;
 
+    /// <summary>
+    /// Gets whether this endpoint draws RFC 9000 section 17.2's QUIC Bit per 1-RTT packet when
+    /// the peer has advertised RFC 9287's <c>grease_quic_bit</c>. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>1-RTT ONLY, AND THAT IS THE RFC'S SHAPE RATHER THAN A SHORTCUT. RFC 9287 s3 lets
+    /// an endpoint clear the bit only once its PEER has advertised the parameter, and the
+    /// peer's transport parameters do not arrive until its EncryptedExtensions - so there is no
+    /// packet before the handshake completes on which this could legally be done.</para>
+    /// <para>TWO INDEPENDENT HALVES, and this is only one of them. Advertising
+    /// <c>grease_quic_bit</c> is a transport-parameter entry - <c>Literal(0x2AB2, [])</c> - and
+    /// obliges the RECEIVE path to accept a greased packet; that half needs no knob because the
+    /// parameter list already says it. This half is what this endpoint SENDS, and it is off by
+    /// default because neither shipped capture greases.</para>
+    /// <para>The bit is outside header protection - s5.4.2 masks 0x0f of a long header's first
+    /// byte and 0x1f of a short header's, and this is 0x40 - so the choice is plainly visible
+    /// to a passive observer rather than inferred.</para>
+    /// </remarks>
+    public bool GreaseQuicBit { get; init; }
+
     /// <summary>Gets the largest datagram size path MTU discovery will search up to - RFC 8899
     /// s5.1.2's MAX_PLPMTU.</summary>
     /// <remarks>
