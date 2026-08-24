@@ -1,6 +1,7 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) is done. Every other
+Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and the RFC 9001 key
+schedule are done. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -80,6 +81,34 @@ for TLS 1.3 compatibility mode — correct over TCP, illegal over QUIC. Now forc
 QUIC factory and pinned by
 `TlsQuicClientHelloProfileFactoryTests.TheSessionIdIsEmptyBecauseQuicHasNoCompatibilityMode`.
 
+### RFC 9001 (QUIC-TLS) — key schedule only
+
+Pinned extracts: `rfc9001-section5-packet-protection.txt`, `rfc9001-section4-using-tls.txt`,
+`rfc9001-appendix-a-test-vectors.txt`.
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 5.2 | `initial_salt = 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a` | `Quic/TlsQuicSecrets.cs:147` | COMPLIANT, byte-exact |
+| 5.2 | `initial_secret = HKDF-Extract(initial_salt, client_dst_connection_id)` | `Cryptography/Tls13Hkdf.cs:21` | COMPLIANT |
+| 5.1 | `client in` / `server in` labels | `Quic/TlsQuicSecrets.cs:187`, `:193` | COMPLIANT |
+| 5.1 | `quic key` / `quic iv` / `quic hp` labels | `Quic/TlsQuicSecrets.cs:109` | COMPLIANT |
+| RFC 9369 | QUIC v2 salt and `quicv2 ` label prefix | `Quic/TlsQuicSecrets.cs:109`, `:150` | COMPLIANT |
+
+**The HKDF trap is avoided.** RFC 9001 §5.2 specifies HKDF-**Extract** for the Initial secret.
+A generic HKDF helper that performs extract-then-expand yields a different value, and the two
+are easy to confuse — the pcap analyser in `scripts/quic_initial_analyze.py` was written with
+that bug and only caught by its own RFC 9001 Appendix A self-check. `Tls13Hkdf.Extract`
+delegates to `HKDF.Extract`, so the library derivation is correct.
+
+The QUIC v2 row is coverage found rather than sought: labels are composed as a version-dependent
+prefix plus a suffix, so RFC 9369's `quicv2 ` schedule is handled alongside v1.
+
+Still unverified within RFC 9001, and therefore NOT covered by the rows above: header protection
+sample offset and mask application, AEAD nonce construction, key update and key phase, whether
+Initial secrets stay pinned to the ORIGINAL destination connection ID rather than being
+recomputed per packet, CRYPTO stream ordering, and whether the Appendix A test vectors are
+asserted anywhere in the test suite.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -94,10 +123,9 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 - RFC 9000 — transport. Wire encoding (§12, §14, §16, §18, §19, packet formats) and lifecycle
   (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20).
-- RFC 9001 — beyond the `legacy_session_id` rule above: Initial secret derivation and HKDF
-  labels, header protection, AEAD nonce construction, key update, CRYPTO stream ordering.
-  Specifically unverified: whether the Initial secret uses HKDF-**Extract** rather than
-  extract-then-expand, and whether Initial secrets stay pinned to the original DCID.
+- RFC 9001 — the key schedule is audited above. Still open: header protection, AEAD nonce
+  construction, key update, DCID pinning for Initial secrets, CRYPTO stream ordering, and
+  whether the Appendix A vectors are asserted in tests.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
   match exactly (a wrong constant is both a correctness and a fingerprint issue).
 - RFC 9114 — HTTP/3 framing, stream mapping, SETTINGS, pseudo-headers, error handling.
@@ -111,8 +139,10 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 8. Confirmed: 7 compliant, 1 defect (already fixed). Dropped as false
-positives before entry: 2, both caught by widening a search that had returned nothing.
+Findings raised: 13. Confirmed: 12 compliant, 1 defect (already fixed). Dropped as false
+positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
+packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
+code implemented them. Three near-misses in two passes is why the method note above exists.
 
 ## Relationship to other documents
 
