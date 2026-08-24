@@ -87,6 +87,15 @@ internal enum TlsQuicHttp3ErrorCode : ulong
     /// connection error under certain circumstances"), so the fact is stated here rather than
     /// modelled.</remarks>
     H3MessageError = 0x010e,
+
+    /// <summary><c>H3_DATAGRAM_ERROR</c>, RFC 9297 s2.1's 0x33.</summary>
+    /// <remarks>NOT FROM RFC 9114 s8.1, and the number says so: every other member of this
+    /// enum sits in s8.1's 0x0100..0x010e block, and this one is a bare 0x33 from a different
+    /// document. It shares the enum because both registries encode as one varint on the wire
+    /// and because the code paths that report an HTTP/3 connection error report it the same
+    /// way. RFC 9297 s2.1 gives it two receipts: a Quarter Stream ID above 2^60-1, and a
+    /// payload too short to hold one at all.</remarks>
+    H3DatagramError = 0x33,
 }
 
 /// <summary>An RFC 9114 s11.2.1 Table 2 frame type this client sends or must recognise.</summary>

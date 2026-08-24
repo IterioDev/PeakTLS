@@ -257,6 +257,20 @@ internal readonly struct TlsQuicFrame
     /// <summary>NEW_CONNECTION_ID: the Stateless Reset Token field, exactly 16 bytes (RFC 9000 s19.15).</summary>
     internal ReadOnlyMemory<byte> StatelessResetToken { get; init; }
 
+    /// <summary>
+    /// The whole encoded size of an RFC 9221 s4 DATAGRAM frame in bytes -
+    /// "including the frame type, length, and payload", which is s3's own
+    /// parenthesis and the unit max_datagram_frame_size is measured in. Zero
+    /// for every other frame type, none of which has a size rule.
+    /// </summary>
+    /// <remarks>CARRIED RATHER THAN RECOMPUTED, because it cannot be recovered
+    /// from <see cref="Data"/>. The Length field is a variable-length integer
+    /// and RFC 9000 s16 requires the minimal encoding only of frame TYPES, so a
+    /// peer may spend four bytes on a length that fits in one and the frame is
+    /// still legal and still larger than a derived figure would say. The reader
+    /// knows the two offsets; nothing downstream does.</remarks>
+    internal int EncodedLength { get; init; }
+
     /// <summary>CONNECTION_CLOSE: the Error Code field, in the transport space for 0x1c and the application space for 0x1d (RFC 9000 s19.19).</summary>
     internal ulong ErrorCode { get; init; }
 
@@ -566,7 +580,7 @@ internal static class TlsQuicFrames
             // rather than as a bare 0x31 because that is what the value means.
             case (ulong)TlsQuicFrameType.Datagram:
             case (ulong)TlsQuicFrameType.Datagram | DatagramLengthBit:
-                if (!TryReadDatagram(payload, ref typeOffset, rawType, out frame, out error))
+                if (!TryReadDatagram(payload, offset, ref typeOffset, rawType, out frame, out error))
                 {
                     return false;
                 }
@@ -662,17 +676,32 @@ internal static class TlsQuicFrames
     /// (RFC 9000 s12.4 Figure 11), so mis-measuring its extent corrupts every
     /// frame after it rather than only losing this one.</para>
     ///
-    /// <para>NO Data FIELD IS SET, deliberately. The bytes are not stored under
-    /// <see cref="TlsQuicFrame.Data"/> - which STREAM, CRYPTO, PATH_CHALLENGE
-    /// and PATH_RESPONSE share - because a populated field is an invitation to
-    /// use it, and there is nothing here that may. Dropping is the contract, so
-    /// the struct says so by holding nothing. It also keeps this method's
-    /// accepting path at zero allocations by construction rather than by care;
-    /// see QuicFuzzSeedsTests.ReadingAnyFrameInTheSeedCorpusAllocatesNothing,
-    /// whose corpus includes both DATAGRAM forms.</para>
+    /// <para>Data AND EncodedLength ARE NOW SET, AND THIS PARAGRAPH USED TO SAY
+    /// THE OPPOSITE. It read "no Data field is set, deliberately ... because a
+    /// populated field is an invitation to use it, and there is nothing here
+    /// that may", which held while nothing above this reader could act on a
+    /// datagram. Two receive-side rules ended that. RFC 9221 s3 measures a
+    /// DATAGRAM against max_datagram_frame_size "including the frame type,
+    /// length, and payload", so the whole encoded extent has to leave this
+    /// method; RFC 9297 s2.1 reads a Quarter Stream ID out of the payload's
+    /// first varint, so the payload does too. Neither can be recovered once the
+    /// span is gone, and the caller has neither offset.</para>
+    ///
+    /// <para>DROPPING IS STILL THE CONTRACT FOR THE PAYLOAD ITSELF. Nothing in
+    /// this tree consumes datagram data; the two fields exist to let
+    /// TlsQuicConnection and TlsQuicHttp3Connection REFUSE a datagram the RFCs
+    /// say to refuse, after which the bytes go nowhere. <see cref="TlsQuicFrame.Data"/> is a
+    /// slice of the receiver's decrypt scratch, so it stays valid only for the
+    /// walk - the same contract STREAM's and PATH_CHALLENGE's Data carry - and
+    /// the accepting path still allocates nothing, which
+    /// QuicFuzzSeedsTests.ReadingAnyFrameInTheSeedCorpusAllocatesNothing keeps
+    /// true over a corpus holding both DATAGRAM forms.</para>
     /// </remarks>
     /// <param name="payload">The packet's frame sequence, whose end bounds a
     /// LEN-clear DATAGRAM.</param>
+    /// <param name="frameStart">The offset of this frame's type varint, which
+    /// RFC 9221 s3's size includes and <paramref name="offset"/> is already
+    /// past.</param>
     /// <param name="offset">On entry, the first byte after the frame type; on
     /// success, the first byte after the Datagram Data field. Unchanged on
     /// failure, as <see cref="TryReadFrame"/> promises for its own caller.</param>
@@ -686,6 +715,7 @@ internal static class TlsQuicFrames
     /// NO_ERROR on success.</param>
     internal static bool TryReadDatagram(
         ReadOnlyMemory<byte> payload,
+        int frameStart,
         ref int offset,
         ulong rawType,
         out TlsQuicFrame frame,
@@ -695,6 +725,11 @@ internal static class TlsQuicFrames
         error = TlsQuicTransportError.NoError;
 
         var dataOffset = offset;
+
+        // Where the Datagram Data field begins. It equals `offset` in the
+        // LEN-clear form and moves past the Length field in the LEN-set one,
+        // which is why it is tracked rather than assumed to be either.
+        var dataStart = offset;
 
         // RFC 9221 s4, on the LEN bit, quoted whole because both halves are
         // load-bearing and the second is the one a reader guesses wrong: "if
@@ -734,6 +769,7 @@ internal static class TlsQuicFrames
                 return false;
             }
 
+            dataStart = dataOffset;
             dataOffset += (int)length;
         }
         else
@@ -751,11 +787,32 @@ internal static class TlsQuicFrames
             // datagrams are allowed." A 0x30 at the very end of a payload and a
             // 0x31 with Length 0 are both complete frames.
             dataOffset = payload.Length;
+            dataStart = offset;
         }
 
-        // The drop. Everything between `offset` and `dataOffset` was Datagram
-        // Data and is not carried out of this method in any form.
-        frame = new TlsQuicFrame { RawType = rawType };
+        // THE DATA IS NOW CARRIED, AND THIS COMMENT USED TO SAY THE OPPOSITE.
+        // It read "everything between `offset` and `dataOffset` was Datagram
+        // Data and is not carried out of this method in any form", and the drop
+        // was deliberate while nothing above this reader could act on a
+        // datagram. Two rules made it untenable: RFC 9221 s3's size rule needs
+        // the frame's whole encoded length, and RFC 9297 s2.1's two need the
+        // first varint of the payload. Neither is recoverable once the span is
+        // gone.
+        //
+        // IT IS A SLICE, NOT A COPY, and it aliases the receiver's decrypt
+        // scratch exactly as STREAM's and PATH_CHALLENGE's Data do. Whoever
+        // keeps it past the walk copies it, which is the contract those two
+        // already carry - see TlsQuicStreams.ReceiveStreamFrame.
+        //
+        // EncodedLength MEASURES FROM `frameStart`, NOT FROM `offset`. s3 says
+        // "including the frame type", and `offset` is already past the type
+        // varint when this reader is called.
+        frame = new TlsQuicFrame
+        {
+            RawType = rawType,
+            Data = payload[dataStart..dataOffset],
+            EncodedLength = dataOffset - frameStart,
+        };
         offset = dataOffset;
         return true;
     }

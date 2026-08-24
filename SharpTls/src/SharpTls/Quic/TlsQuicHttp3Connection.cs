@@ -747,6 +747,48 @@ internal sealed class TlsQuicHttp3Connection
             return false;
         }
 
+        // RFC 9297 s2.1's two receipt rules, BEFORE the streams, because both are connection
+        // errors and s2.1 attaches them to receipt rather than to use. A datagram naming a
+        // stream is not read as naming one until it has passed these.
+        //
+        // THE QUIC HALF IS ALREADY DONE. TlsQuicConnection applied RFC 9221 s3's transport
+        // rules as the frames arrived and refused anything this endpoint never invited; what
+        // reaches here is a payload it did.
+        foreach (var datagram in _connection.DrainReceivedDatagrams())
+        {
+            var cursor = 0;
+            if (!QuicVariableLengthInteger.TryRead(datagram, ref cursor, out var quarterStreamId))
+            {
+                // s2.1: "Receipt of a QUIC DATAGRAM frame whose payload is too short to allow
+                // parsing the Quarter Stream ID field MUST be treated as an HTTP/3 connection
+                // error of type H3_DATAGRAM_ERROR (0x33)." An empty payload is the whole of
+                // that case here - s4's "empty (i.e., zero-length) datagrams are allowed" at
+                // the QUIC layer is exactly what HTTP/3 refuses at this one - and so is a
+                // multi-byte varint prefix with its continuation bytes missing.
+                return Fail((ulong)TlsQuicHttp3ErrorCode.H3DatagramError, out errorCode);
+            }
+
+            if (quarterStreamId > MaximumQuarterStreamId)
+            {
+                // s2.1: "The largest legal QUIC stream ID value is 2^62-1, so the largest legal
+                // value of the Quarter Stream ID field is 2^60-1.  Receipt of an HTTP/3
+                // Datagram that includes a larger value MUST be treated as an HTTP/3 connection
+                // error of type H3_DATAGRAM_ERROR (0x33)."
+                //
+                // REACHABLE, WHICH IS NOT OBVIOUS. A variable-length integer holds up to
+                // 2^62-1, so the four values between 2^60 and 2^62-1 are encodable and this
+                // check is the only thing that refuses them.
+                return Fail((ulong)TlsQuicHttp3ErrorCode.H3DatagramError, out errorCode);
+            }
+
+            // AND THE PAYLOAD GOES NOWHERE. s2.1's remaining rule is "If a datagram is received
+            // after the corresponding stream's receive side is closed, the received datagrams
+            // MUST be silently dropped", and with no extension in this tree consuming HTTP
+            // datagrams every one of them is in that position. Dropping after validating is the
+            // point: the connection errors above are what a peer can observe, and they are
+            // raised whether or not anything would have used the bytes.
+        }
+
         // THE PEER'S STREAMS FIRST, AND C16 MADE THAT ORDERING LOAD-BEARING. It was already the
         // order - the control stream's SETTINGS decide what a request stream's bytes mean - and
         // it is now also what makes a parked field section unblock in the SAME pump the encoder
@@ -933,6 +975,11 @@ internal sealed class TlsQuicHttp3Connection
                 ? ConnectionErrorCode
                 : (ulong)TlsQuicHttp3ErrorCode.H3NoError,
             cancellationToken);
+
+    // RFC 9297 s2.1: "The largest legal QUIC stream ID value is 2^62-1, so the largest legal
+    // value of the Quarter Stream ID field is 2^60-1." Written as the shift rather than as a
+    // decimal literal so the arithmetic is the sentence's and not a transcription of it.
+    private const ulong MaximumQuarterStreamId = (1UL << 60) - 1;
 
     private bool Fail(ulong code, out ulong errorCode)
     {

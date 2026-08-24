@@ -1939,7 +1939,18 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         // TryReadFrame's dispatch would never route this way.
         ("TlsQuicFrames.TryReadDatagram",
             BuildQuicRawTypeRange((ulong)TlsQuicFrameType.Datagram, QuicDatagramWithLengthFrameType),
-            TlsQuicFrames.TryReadDatagram),
+            // WRAPPED, because TryReadDatagram takes a frameStart the other readers do not:
+            // RFC 9221 s3 measures a DATAGRAM "including the frame type", which every other
+            // family reader has no rule needing. Passing the entry offset makes EncodedLength
+            // exclude the type varint, which is wrong for the wire and irrelevant here - this
+            // target reads the accept/reject verdict and the final offset, never the size.
+            (ReadOnlyMemory<byte> payload,
+                ref int offset,
+                ulong rawType,
+                out TlsQuicFrame frame,
+                out TlsQuicTransportError error) =>
+                TlsQuicFrames.TryReadDatagram(
+                    payload, offset, ref offset, rawType, out frame, out error)),
     ];
 
     private static ulong[] BuildQuicRawTypeRange(ulong first, ulong last)

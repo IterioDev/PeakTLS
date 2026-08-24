@@ -1012,6 +1012,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     private CustomTlsQuicClient? _client;
     private byte[] _sourceConnectionId = [];
+
+    // RFC 9297 s2.1's payloads, waiting for TlsQuicHttp3Connection to apply its own two rules
+    // to them. COPIED, because TlsQuicFrame.Data aliases the receiver's decrypt scratch and
+    // the next Receive refills it, and the h3 layer reads these on its own pump rather than
+    // inside the frame walk.
+    //
+    // UNBOUNDED ONLY IN APPEARANCE. Nothing is added that has not already passed RFC 9221 s3's
+    // size rule against what this endpoint advertised, and the h3 layer empties the list every
+    // pump - the same pump the datagrams arrived under, since TlsQuicHttp3Connection pumps the
+    // connection and then processes. A connection with no h3 layer above it never advertises
+    // max_datagram_frame_size through a shipped preset without one either.
+    private readonly List<byte[]> _receivedDatagrams = [];
     private byte[] _destinationConnectionId = [];
 
     // RFC 9000 s7.2's "a valid Initial packet from the server": the Source Connection ID off a
@@ -1221,6 +1233,76 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// also what it advertised as <c>initial_source_connection_id</c>, because the factory
     /// was handed these exact bytes.</summary>
     internal ReadOnlyMemory<byte> SourceConnectionId => _sourceConnectionId;
+
+    /// <summary>Takes every RFC 9221 s4 DATAGRAM payload received since the last call and
+    /// empties the store.</summary>
+    /// <remarks>DRAINING RATHER THAN READING, so that a payload cannot be validated twice or
+    /// left behind by a caller that forgot to clear. The order is receipt order, which is what
+    /// RFC 9297 s2.1's per-datagram rules want; nothing here reorders or deduplicates, because
+    /// s5.3 makes datagrams "inherently unreliable" and neither rule depends on the
+    /// sequence.</remarks>
+    internal List<byte[]> DrainReceivedDatagrams()
+    {
+        if (_receivedDatagrams.Count == 0)
+        {
+            return [];
+        }
+
+        var drained = new List<byte[]>(_receivedDatagrams);
+        _receivedDatagrams.Clear();
+        return drained;
+    }
+
+    // RFC 9221 s3's two receive-side MUSTs, in the order the section states them.
+    //
+    // THE PARAMETER THIS ENDPOINT SENT, NOT THE ONE IT RECEIVED. Both rules measure against
+    // "the value it sent in its max_datagram_frame_size transport parameter" - the peer's
+    // value bounds what WE may send, and s3 gives that its own separate MUST NOT that this
+    // client satisfies by never writing a DATAGRAM frame at all
+    // (TlsQuicFrames.WriteFrame throws, pinned by
+    // TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne).
+    // AdvertisedMaxDatagramFrameSize reads our own ClientHello, which is the correct side.
+    //
+    // ZERO AND ABSENT ARE THE SAME VERDICT AND ARE NOT THE SAME STATE. s3: "The default for
+    // this parameter is 0, which indicates that the endpoint does not support DATAGRAM
+    // frames." So a preset that sends the parameter with value 0 has not "indicated support"
+    // any more than one that omits it, and both take the first rule. They are still
+    // distinguishable in the message, because a profile that sends an explicit 0 is a
+    // different thing to debug from one that sends nothing.
+    private void ReceiveDatagramFrame(in TlsQuicFrame frame, ref string? failure)
+    {
+        var advertised = AdvertisedMaxDatagramFrameSize;
+
+        if (advertised is not { } limit || limit == 0)
+        {
+            failure ??= "The peer sent a DATAGRAM frame (RFC 9221 s4) on a connection whose "
+                + "ClientHello "
+                + (advertised is null
+                    ? "carried no max_datagram_frame_size transport parameter"
+                    : "advertised max_datagram_frame_size = 0")
+                + ", so s3 makes it a PROTOCOL_VIOLATION.";
+            return;
+        }
+
+        // s3 measures "the maximum size of a DATAGRAM frame (including the frame type, length,
+        // and payload)", which is why the comparison is against EncodedLength and not against
+        // the payload's own length. A frame whose payload fits and whose framing does not is
+        // still over the limit.
+        if ((ulong)frame.EncodedLength > limit)
+        {
+            failure ??= "The peer sent a DATAGRAM frame (RFC 9221 s4) of "
+                + $"{frame.EncodedLength} byte(s) against the max_datagram_frame_size of "
+                + $"{limit} this endpoint advertised, so s3 makes it a PROTOCOL_VIOLATION.";
+            return;
+        }
+
+        // ACCEPTED, AND THE PAYLOAD IS COPIED FOR THE LAYER THAT HAS RULES OF ITS OWN. s5.3
+        // permits dropping outright - "since DATAGRAM frames are inherently unreliable, they
+        // MAY be dropped by the receiver if the receiver cannot process them" - and dropping
+        // is still what happens to the bytes. What may not be dropped is RFC 9297 s2.1's two
+        // checks on them, which belong to HTTP/3 and are applied by TlsQuicHttp3Connection.
+        _receivedDatagrams.Add(frame.Data.ToArray());
+    }
 
     /// <summary>The Destination Connection ID currently on our outgoing packets. RFC 9000
     /// s7.2: our own unpredictable choice until the server's first packet, the server's
@@ -1808,6 +1890,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 // s3.2's state transitions are separate work. What changed is
                                 // that the ones the RFC says to close on now close.
                                 ReceiveStreamStateSignal(frame, ref streamFailure);
+                                break;
+
+                            case TlsQuicFrameType.Datagram:
+                                // RFC 9221 s3's two receive-side rules, and the frame reached
+                                // this switch's default arm and was dropped before this.
+                                //
+                                // NOT AN ACADEMIC CASE FOR THIS LIBRARY. The Brave 151 preset
+                                // in TlsQuicTransportParameterSpec sends
+                                // max_datagram_frame_size = 65536 and TlsQuicHttp3Spec's
+                                // capture settings send SETTINGS_H3_DATAGRAM = 1, because the
+                                // client being impersonated does. That pair is a standing
+                                // invitation to the server to send DATAGRAM frames, so the
+                                // rules governing what arrives on it are live rather than
+                                // hypothetical.
+                                ReceiveDatagramFrame(frame, ref protocolFailure);
                                 break;
 
                             case TlsQuicFrameType.RetireConnectionId:

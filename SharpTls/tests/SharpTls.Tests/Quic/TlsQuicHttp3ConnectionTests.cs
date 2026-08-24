@@ -1545,6 +1545,138 @@ public sealed partial class TlsQuicConnectionTests
 
     // Every s7.1 frame in a request stream's bytes, through the reader rather than through a
     // second parser written for the assertion.
+    // ------------------------------------------------------------------------
+    // RFC 9221 s3 and RFC 9297 s2.1: what arrives on the datagram invitation.
+    // ------------------------------------------------------------------------
+    //
+    // THE INVITATION IS REAL, WHICH IS WHY THESE ARE NOT HYPOTHETICAL.
+    // TlsQuicTransportParameterSpec's Brave 151 preset sends max_datagram_frame_size = 65536
+    // and TlsQuicHttp3Spec.CaptureSettings sends SETTINGS_H3_DATAGRAM = 1, because the client
+    // being impersonated does. A server is entitled to take both at their word.
+    //
+    // THE FRAMES ARE HAND-ENCODED against RFC 9221 s4's two fields - Type 0x30 or 0x31, then
+    // an optional Length, then Datagram Data - because TlsQuicFrames.WriteFrame throws on a
+    // DATAGRAM frame and must keep throwing. 0x31 is the LEN-present form.
+
+    [Fact]
+    public async Task ADatagramFrameWithoutTheTransportParameterClosesTheConnection()
+    {
+        // RFC 9221 s3: "An endpoint that receives a DATAGRAM frame when it has not indicated
+        // support via the transport parameter MUST terminate the connection with an error of
+        // type PROTOCOL_VIOLATION."
+        //
+        // THE HARDEST VERSION OF THE CASE, DELIBERATELY. SETTINGS_H3_DATAGRAM = 1 still goes
+        // out, so the server has seen this client claim at the HTTP/3 layer that it will
+        // receive datagrams; only the QUIC transport parameter is missing. s3 does not care -
+        // it names the transport parameter and nothing else - and the connection closes anyway.
+        //
+        // AllowDatagramSettingWithoutTransportParameter IS WHAT LETS THAT PAIR BE BUILT.
+        // TlsQuicHttp3Connection normally refuses the inconsistent spec in its constructor, so
+        // without this knob the test would die before reaching the rule it is about.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(
+            cancellation.Token,
+            spec: new TlsQuicHttp3Spec { AllowDatagramSettingWithoutTransportParameter = true },
+            maxDatagramFrameSize: null);
+
+        await harness.Peer.SendOneRttRawFrameAsync(
+            [0x31, 0x03, 0xaa, 0xbb, 0xcc], cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await harness.Connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("max_datagram_frame_size", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADatagramFrameLargerThanWeAdvertisedClosesTheConnection()
+    {
+        // RFC 9221 s3: "an endpoint that receives a DATAGRAM frame that is larger than the
+        // value it sent in its max_datagram_frame_size transport parameter MUST terminate the
+        // connection with an error of type PROTOCOL_VIOLATION."
+        //
+        // THE FRAME IS FIVE BYTES AND THE LIMIT IS FOUR, AND THE PAYLOAD IS THREE. s3 measures
+        // "including the frame type, length, and payload", so a check written against the
+        // payload alone would see 3 against 4 and accept this. That is the whole point of the
+        // row: 0x31 0x03 aa bb cc is five bytes on the wire.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(
+            cancellation.Token, maxDatagramFrameSize: 4);
+
+        await harness.Peer.SendOneRttRawFrameAsync(
+            [0x31, 0x03, 0xaa, 0xbb, 0xcc], cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await harness.Connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("5 byte(s) against", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ADatagramTooShortForAQuarterStreamIdIsH3DatagramError()
+    {
+        // RFC 9297 s2.1: "Receipt of a QUIC DATAGRAM frame whose payload is too short to allow
+        // parsing the Quarter Stream ID field MUST be treated as an HTTP/3 connection error of
+        // type H3_DATAGRAM_ERROR (0x33)."
+        //
+        // AND RFC 9221 s4 CALLS THE SAME FRAME LEGAL: "Note that empty (i.e., zero-length)
+        // datagrams are allowed." So the transport accepts it and HTTP/3 refuses it, which is
+        // why the QUIC pump below does NOT throw and TryProcess does fail. A test that only
+        // pumped would see nothing wrong.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(cancellation.Token);
+
+        await harness.Peer.SendOneRttRawFrameAsync([0x31, 0x00], cancellation.Token);
+        await harness.Connection.PumpOnceAsync(cancellation.Token);
+
+        Assert.False(harness.Http3.TryProcess(out var errorCode));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3DatagramError, errorCode);
+        Assert.Equal(0x33UL, errorCode);
+    }
+
+    [Fact]
+    public async Task ADatagramWithAQuarterStreamIdAbove2Pow60MinusOneIsH3DatagramError()
+    {
+        // RFC 9297 s2.1: "The largest legal QUIC stream ID value is 2^62-1, so the largest
+        // legal value of the Quarter Stream ID field is 2^60-1.  Receipt of an HTTP/3 Datagram
+        // that includes a larger value MUST be treated as an HTTP/3 connection error of type
+        // H3_DATAGRAM_ERROR (0x33)."
+        //
+        // 0xd0 0x00 ... 0x00 IS THE EIGHT-BYTE VARINT FOR EXACTLY 2^60: the 0b11 prefix marks the RFC 9000 s16 gives the
+        // eight-byte form and the remaining 62 bits carry 0x1000000000000000. RFC 9000 s16 gives
+        // that field 62 bits, so 2^60 is encodable and is the first value this rule refuses -
+        // exactly one above 2^60-1, which is what separates a > from a >= here.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(cancellation.Token);
+
+        await harness.Peer.SendOneRttRawFrameAsync(
+            [0x31, 0x08, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], cancellation.Token);
+        await harness.Connection.PumpOnceAsync(cancellation.Token);
+
+        Assert.False(harness.Http3.TryProcess(out var errorCode));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3DatagramError, errorCode);
+    }
+
+    [Fact]
+    public async Task ADatagramWithALegalQuarterStreamIdIsAcceptedAndDropped()
+    {
+        // THE NEGATIVE CONTROL, without which the two rules above would pass against an
+        // implementation that refused every datagram. Quarter Stream ID 0 names client stream
+        // 0, s2.1's division by four run backwards, and the payload after it is free-form.
+        //
+        // ACCEPTED IS NOT DELIVERED. s2.1: "If a datagram is received after the corresponding
+        // stream's receive side is closed, the received datagrams MUST be silently dropped" -
+        // and with no extension in this tree consuming HTTP datagrams, every one is dropped
+        // after validating. There is deliberately nothing to assert about the bytes.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(cancellation.Token);
+
+        await harness.Peer.SendOneRttRawFrameAsync(
+            [0x31, 0x03, 0x00, 0xaa, 0xbb], cancellation.Token);
+        await harness.Connection.PumpOnceAsync(cancellation.Token);
+
+        Assert.True(harness.Http3.TryProcess(out var errorCode));
+        Assert.Equal(0UL, errorCode);
+    }
+
     private static List<(ulong Type, byte[] Payload)> ReadHttp3Frames(ReadOnlyMemory<byte> bytes)
     {
         var frames = new List<(ulong, byte[])>();

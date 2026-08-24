@@ -455,23 +455,51 @@ public sealed class TlsQuicFramesTests
         Assert.Equal(TlsQuicTransportError.NoError, error);
     }
 
-    // The drop, asserted rather than described. TlsQuicFrame.Data is the field
-    // STREAM, CRYPTO, PATH_CHALLENGE and PATH_RESPONSE deliver their bytes in, and
-    // a DATAGRAM must arrive carrying none of them - not an empty slice of the
-    // right bytes, no bytes at all.
+    // THIS TEST USED TO ASSERT THE OPPOSITE AND IS INVERTED RATHER THAN DELETED. It read
+    // `Assert.True(frame.Data.IsEmpty)` under the heading "the drop, asserted rather than
+    // described", and its reason was that nothing above the reader could act on a datagram, so
+    // a populated field was an invitation with no legitimate taker. Two receive-side rules
+    // ended that: RFC 9221 s3 measures the frame against max_datagram_frame_size and RFC 9297
+    // s2.1 reads a Quarter Stream ID out of the payload, and neither can run on bytes the
+    // reader threw away. What was a deliberate omission is now a defect, so the assertion
+    // turns over and keeps the row a reader can find the change at.
     //
-    // Both forms, because they drop by different routes: the LEN-present one knows
-    // how many bytes it skipped and the LEN-clear one jumps to the end.
+    // Both forms, because they reach the payload by different routes: the LEN-present one
+    // starts after a Length field and the LEN-clear one starts immediately and runs to the end.
     [Theory]
-    [InlineData(new byte[] { 0x30, 0xaa, 0xbb, 0xcc })]
-    [InlineData(new byte[] { 0x31, 0x03, 0xaa, 0xbb, 0xcc })]
-    public void TheDatagramPayloadIsDroppedRatherThanCarried(byte[] payload)
+    [InlineData(new byte[] { 0x30, 0xaa, 0xbb, 0xcc }, 4)]
+    [InlineData(new byte[] { 0x31, 0x03, 0xaa, 0xbb, 0xcc }, 5)]
+    public void TheDatagramPayloadAndItsEncodedLengthAreCarried(byte[] payload, int encoded)
     {
         var offset = 0;
 
         Assert.True(TlsQuicFrames.TryReadFrame(payload, ref offset, out var frame, out _));
         Assert.Equal(payload.Length, offset);
-        Assert.True(frame.Data.IsEmpty);
+
+        // THE SAME THREE BYTES OUT OF TWO DIFFERENT FRAMINGS. The LEN-clear row has no Length
+        // field at all and the LEN-present row spends a byte on one, so a reader that returned
+        // the whole frame instead of its Datagram Data field would pass one row and fail the
+        // other.
+        Assert.Equal(new byte[] { 0xaa, 0xbb, 0xcc }, frame.Data.ToArray());
+
+        // AND THE SIZE IS THE WHOLE FRAME, NOT THE PAYLOAD. RFC 9221 s3 measures "including
+        // the frame type, length, and payload", which is why the two rows expect 4 and 5
+        // against the same 3 bytes of data.
+        Assert.Equal(encoded, frame.EncodedLength);
+    }
+
+    // Every frame type but DATAGRAM leaves EncodedLength at zero, because no other frame has a
+    // size rule to measure. Asserted on PING rather than described, so that a reader who added
+    // the field to another reader would have to change a test to do it.
+    [Fact]
+    public void ANonDatagramFrameCarriesNoEncodedLength()
+    {
+        var offset = 0;
+
+        Assert.True(TlsQuicFrames.TryReadFrame(
+            new byte[] { 0x01 }, ref offset, out var frame, out _));
+        Assert.Equal(TlsQuicFrameType.Ping, frame.Type);
+        Assert.Equal(0, frame.EncodedLength);
     }
 
     // RFC 9221 s4: "Note that empty (i.e., zero-length) datagrams are allowed."

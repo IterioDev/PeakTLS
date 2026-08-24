@@ -757,6 +757,21 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
     }
 
+    /// <summary>Sends one 1-RTT packet whose payload is the given already-encoded frame
+    /// bytes.</summary>
+    /// <remarks>FOR RFC 9221 s4's DATAGRAM FRAME AND NOTHING ELSE SO FAR. Every other frame
+    /// this peer sends goes through TlsQuicFrames.WriteFrame; DATAGRAM cannot, because that
+    /// writer throws on it deliberately. The bytes are written by the caller against s4's
+    /// two-field format, which keeps the encoding in the test that asserts on it rather than
+    /// in a helper no test reads back.</remarks>
+    internal ValueTask SendOneRttRawFrameAsync(
+        byte[] encodedFrame, CancellationToken cancellationToken = default)
+    {
+        var written = BuildShortHeaderDatagram([], rawFrames: encodedFrame);
+        return _transport.SendAsync(
+            _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
+    }
+
     /// <summary>Sends one datagram carrying an ack-eliciting Handshake packet coalesced with
     /// the 1-RTT packet that carries HANDSHAKE_DONE.</summary>
     /// <remarks>
@@ -895,7 +910,8 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
     // send side the SAME code, and this file's whole reason for existing is that they are not:
     // a defect in the builder would then be written and read by one implementation and cancel
     // itself in every loopback test. The duplication IS the evidence.
-    private int BuildShortHeaderDatagram(IReadOnlyList<TlsQuicFrame> frames, int at = 0)
+    private int BuildShortHeaderDatagram(
+        IReadOnlyList<TlsQuicFrame> frames, int at = 0, byte[]? rawFrames = null)
     {
         // RFC 9000 s12.2 puts a short-header packet last in its datagram, so this may follow
         // long-header bytes already in the buffer but nothing may follow it.
@@ -911,6 +927,18 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
         foreach (var frame in frames)
         {
             TlsQuicFrames.WriteFrame(payload, frame);
+        }
+
+        // THE ESCAPE HATCH FOR FRAMES THE LIBRARY REFUSES TO WRITE. TlsQuicFrames.WriteFrame
+        // throws on a DATAGRAM frame by design - this client never sends one, and
+        // TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne pins
+        // that - so a test peer that needs to send one has to hand-encode it. RFC 9221 s4's
+        // format is two fields, which is why the bytes come in already formed rather than
+        // through a second writer here: a writer would be the very thing the library refuses
+        // to own, and it would drift from s4 with nothing reading it back.
+        if (rawFrames is not null)
+        {
+            payload.AddRange(rawFrames);
         }
 
         // RFC 9001 s5.4.2: "sample_offset = pn_offset + 4", and the sample is 16 bytes of the

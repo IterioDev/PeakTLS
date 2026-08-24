@@ -65,6 +65,12 @@ public sealed class TlsQuicHttp3FramesTests
     // reconciles" - so every member except None belongs inside it, and no two members may share
     // a value. A future addition that typed 0x0210 for an s8.1 code, or reused an existing
     // number, fails here rather than on the wire.
+    //
+    // ONE MEMBER IS EXEMPT AND IS NAMED, NOT SKIPPED BY A PREDICATE. H3_DATAGRAM_ERROR is
+    // RFC 9297 s2.1's 0x33, from a different document and outside s8.1's block entirely; it
+    // shares this enum because both registries are one varint on the wire. Exempting it by
+    // name means a second out-of-range member cannot arrive quietly behind it - the next one
+    // has to be argued for here.
     [Fact]
     public void EveryErrorCodeExceptNoneLiesInsideSection81sContiguousRange()
     {
@@ -73,6 +79,13 @@ public sealed class TlsQuicHttp3FramesTests
         {
             if (code == TlsQuicHttp3ErrorCode.None)
             {
+                continue;
+            }
+
+            if (code == TlsQuicHttp3ErrorCode.H3DatagramError)
+            {
+                Assert.Equal(0x33UL, (ulong)code);
+                Assert.True(seen.Add((ulong)code), $"{code} duplicates another member's value");
                 continue;
             }
 
