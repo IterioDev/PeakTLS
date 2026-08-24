@@ -309,6 +309,8 @@ TlsClient.TlsQuicOptions.PacketNumberEncodedLength.get -> int
 TlsClient.TlsQuicOptions.PacketNumberEncodedLength.set -> void
 TlsClient.TlsQuicOptions.PaddingTarget.get -> int
 TlsClient.TlsQuicOptions.PaddingTarget.set -> void
+TlsClient.TlsQuicOptions.PathMtuDiscovery.get -> bool
+TlsClient.TlsQuicOptions.PathMtuDiscovery.set -> void
 TlsClient.TlsQuicOptions.Recovery.get -> TlsClient.TlsQuicRecoveryOptions!
 TlsClient.TlsQuicOptions.SourceConnectionIdLength.get -> int
 TlsClient.TlsQuicOptions.SourceConnectionIdLength.set -> void

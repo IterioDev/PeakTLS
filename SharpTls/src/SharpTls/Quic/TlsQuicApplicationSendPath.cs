@@ -429,8 +429,17 @@ internal sealed partial class TlsQuicConnection
         // NO CRYPTO EVENTS, because nothing was received to produce any. Everything else
         // BuildAnswerDatagram does - the pending ACKs at each level, the PATH_RESPONSE - is
         // read from state that is already there.
-        return await SendAnswerAsync([], _options.TimeProvider.GetUtcNow(), cancellationToken)
+        var sent = await SendAnswerAsync([], _options.TimeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
+
+        // AFTER the ordinary answer and reported separately from it. RFC 9000 s14.4: "PMTU
+        // probes consume congestion window, which could delay subsequent transmission by an
+        // application" - so a probe must never take the place of data that was already ready to
+        // go. Folding it into the return would also make a pass that sent ONLY a probe look
+        // like a pass that sent application data, which every caller of this method reads as
+        // "there was something to send".
+        await SendPathMtuProbeAsync(cancellationToken).ConfigureAwait(false);
+        return sent;
     }
 
     // The three preconditions both entry points share, lifted out of PumpOnceAsync so that

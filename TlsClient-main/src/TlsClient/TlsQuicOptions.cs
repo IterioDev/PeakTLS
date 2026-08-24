@@ -269,6 +269,20 @@ public sealed class TlsQuicOptions
     public int MaximumPathMtu { get; set; } = EthernetMaximumUdpPayload;
 
     /// <summary>
+    /// Gets or sets whether RFC 8899 path MTU discovery runs, searching upward from
+    /// <see cref="BasePathMtu"/> toward <see cref="MaximumPathMtu"/>. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// OFF BECAUSE A PROBE IS OBSERVABLE. It is an extra PING-and-PADDING datagram at a size
+    /// nothing else in the flight uses, sent on a schedule chosen by this library rather than
+    /// measured from a capture of the client being impersonated - so turning it on trades
+    /// fingerprint fidelity for throughput. Worth it for a large upload over a path that
+    /// carries more than 1200 bytes, which then moves in roughly a fifth the datagrams; not
+    /// worth it when the connection has to look like the capture.
+    /// </remarks>
+    public bool PathMtuDiscovery { get; set; }
+
+    /// <summary>
     /// Gets or sets the exact byte count of each CRYPTO frame in the Initial flight, in order.
     /// Empty means one frame carrying everything.
     /// </summary>
@@ -400,6 +414,7 @@ public sealed class TlsQuicOptions
             PaddingTarget = PaddingTarget,
             BasePathMtu = BasePathMtu,
             MaximumPathMtu = MaximumPathMtu,
+            PathMtuDiscovery = PathMtuDiscovery,
             InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
             InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
             InitialFrameOrder =

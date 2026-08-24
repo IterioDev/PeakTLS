@@ -475,6 +475,24 @@ internal sealed partial class TlsQuicConnection
 
         PacketsDeclaredLost += _lostPackets.Count;
 
+        // RFC 8899 s4.3's black hole detection and s5.3.1's failed probe, both fed from the one
+        // place a packet is declared lost so that neither call site can be added without the
+        // other. The state machine sorts them out: a lost PROBE advances PROBE_COUNT, a lost
+        // ordinary packet larger than BASE_PLPMTU counts toward "excessive loss of data sent
+        // with a specific packet size", and anything at or below BASE_PLPMTU says nothing about
+        // size at all.
+        //
+        // THE SIZE IS THE DATAGRAM'S, which is what TlsQuicSentPacket.Size records and what
+        // s4.3's indicator is about. A frame count or a payload length would make the same call
+        // shape mean a different thing.
+        foreach (var lost in _lostPackets)
+        {
+            if (lost.Level == TlsQuicEncryptionLevel.Application)
+            {
+                _pathMtu.OnPacketLost(lost.PacketNumber, lost.Size);
+            }
+        }
+
         // RFC 9002 A.7's "if (!lost_packets.empty()): OnPacketsLost(lost_packets)" and B.8,
         // which A3-7 recorded as a seam it could not close: "A.7's consumer of the list is
         // OnPacketsLost, which is the congestion controller's (task A3-9) and the

@@ -993,6 +993,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // per connection rather than once per datagram. See TlsQuicFrames.MeasureFrame.
     private readonly List<byte> _frameMeasureScratch = new(64);
 
+    // RFC 8899's search, created with the connection because RFC 9000 s14.2 makes the maximum
+    // datagram size a property of "each combination of local and remote IP addresses" and this
+    // client never migrates - one connection, one path, one state machine.
+    private readonly TlsQuicPathMtu _pathMtu;
+
     // Indexed by TlsQuicEncryptionLevel. RFC 9000 s12.3's three packet number spaces are
     // Initial, Handshake and Application; EarlyData shares Application's and is unused here
     // because A4-minimal sends no 0-RTT.
@@ -1164,6 +1169,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             (uint)Version, options.Spec.SourceConnectionIdLength);
         _keys = new TlsQuicKeySet(_receiver, Version);
 
+        // RFC 8899's search range, from the spec's two knobs. MAX_PLPMTU is also bounded by
+        // what the transport can carry at all - s5.1.2 makes it "less than or equal to the
+        // maximum size of the PL packet that can be sent on the outgoing interface" - which for
+        // an encapsulating transport is its ceiling less its own header.
+        _pathMtu = new TlsQuicPathMtu(
+            options.Spec.BasePathMtu,
+            Math.Max(
+                options.Spec.BasePathMtu,
+                Math.Min(
+                    options.Spec.MaximumPathMtu,
+                    options.Transport.MaxDatagramPayloadSize + options.Transport.DatagramOverhead)));
+
         // THE TASK-8 WIRING. Before this line nothing under src/ constructed a tracker from a
         // spec, so TlsQuicConnectionSpec.AckRangeLimit was a present-but-inert knob: setting
         // it changed no byte. It now bounds the ranges this connection remembers and sends.
@@ -1257,11 +1274,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     /// <summary>Gets the largest UDP payload this connection will put on the wire - RFC 8899
     /// s5.1.3's PLPMTU, and RFC 9000 s14.2's "maximum datagram size".</summary>
-    /// <remarks>RFC 9000 s14.2: "In the absence of these mechanisms, QUIC endpoints SHOULD NOT
-    /// send datagrams larger than the smallest allowed maximum datagram size." Until path MTU
-    /// discovery has confirmed anything larger this is the spec's BasePathMtu, which defaults
-    /// to that smallest allowed size.</remarks>
-    internal int CurrentMaxDatagramSize => _options.Spec.BasePathMtu;
+    /// <remarks>Starts at the spec's BasePathMtu, which defaults to s14.2's smallest allowed
+    /// maximum datagram size, and moves only on evidence: up when a PMTU probe of a larger size
+    /// is acknowledged, back down when RFC 8899 s4.3's black hole detection fires. See
+    /// <see cref="TlsQuicPathMtu"/>.</remarks>
+    internal int CurrentMaxDatagramSize => _pathMtu.MaximumDatagramSize;
+
+    /// <summary>Gets this connection's RFC 8899 path MTU search, for tests and diagnostics.
+    /// </summary>
+    internal TlsQuicPathMtu PathMtu => _pathMtu;
 
     /// <summary>Gets the QUIC payload one datagram may carry: the path MTU less what the
     /// transport prepends, and never more than the transport can carry at all.</summary>
@@ -3102,6 +3123,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                     _highestAcknowledgedApplicationPacketNumber = retained[i].PacketNumber;
                 }
 
+                // RFC 8899 s5.3.1: an acknowledgment "confirms that the PROBED_SIZE is
+                // supported, and the PROBED_SIZE value is then assigned to the PLPMTU". The
+                // search recognises its own probe by packet number and ignores every other one,
+                // so handing it all of them here costs a comparison and keeps this call site
+                // from having to know which packet was a probe.
+                if (level == TlsQuicEncryptionLevel.Application)
+                {
+                    _pathMtu.OnPacketAcknowledged(retained[i].PacketNumber);
+                }
+
                 acked.Add(retained[i]);
                 Forget(retained, i);
                 newlyAcked = true;
@@ -3848,6 +3879,144 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // discarded" is an ordinary race with RFC 9001 s4.9's discards and not a defect. AND THE
     // DEBT IS CLEARED BEFORE THE FIRST SEND, so a send that throws cannot leave a probe owed
     // for ever - the next expiry re-owes it, which is what the backoff is for.
+    // RFC 9000 s14.4's PMTU probe. "PMTU probes are ack-eliciting packets", and: "Endpoints
+    // could limit the content of PMTU probes to PING and PADDING frames, since packets that are
+    // larger than the current maximum datagram size are more likely to be dropped by the
+    // network." That is exactly what this builds - one PING, then PADDING out to the size under
+    // test - and it is RFC 8899 s4.1's "probing using padding data", which s14.3 names as the
+    // construction QUIC uses.
+    //
+    // A DATAGRAM OF ITS OWN, NEVER COALESCED WITH REAL DATA. s14.4's next sentence is the
+    // reason: a probe is EXPECTED to be dropped when it is too large, so anything riding with
+    // it would be lost for a reason that has nothing to do with the application. Carrying only
+    // PING and PADDING also means there is nothing to retransmit - s13.3 owes a repair for
+    // neither frame - which is why a failed probe costs a round trip and no data.
+    //
+    // ITS SIZE IS THE WHOLE DATAGRAM, which is what RFC 9000 s14.2 measures: "the total UDP
+    // payload size of a single UDP datagram". The transport's own header is charged against it
+    // by DatagramPayloadBudget rather than here, for the same reason every other datagram
+    // charges for it in one place.
+    private bool TryBuildPathMtuProbeDatagram(int size, out int written, out ulong packetNumber)
+    {
+        written = 0;
+        packetNumber = 0;
+
+        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var keys, out _))
+        {
+            return false;
+        }
+
+        var frames = new List<TlsQuicFrame>
+        {
+            new() { RawType = (ulong)TlsQuicFrameType.Ping },
+        };
+
+        var plan = ShortHeaderPlan();
+        packetNumber = plan.PacketNumber;
+
+        var packet = new TlsQuicPacketToSend
+        {
+            Plan = plan,
+            Frames = frames,
+            PacketProtectionCipher = keys.PacketCipher,
+            Key = keys.Key.ToArray(),
+            Iv = keys.Iv.ToArray(),
+            HeaderProtectionCipher = keys.HeaderCipher,
+            HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+        };
+
+        var now = _options.TimeProvider.GetUtcNow();
+
+        // MEASURED RATHER THAN SOLVED, exactly as TryBuildProbeDatagram does it and for the
+        // same reason: the padding solver is private to TlsQuicDatagramBuilder and a second
+        // copy of its fixed-point search here would be a second solver to keep in step. One
+        // throwaway build gives the size, and s19.1's PADDING is one byte per frame, so the
+        // deficit is the count.
+        var bare = TlsQuicDatagramBuilder.BuildDatagram(
+            _options.Spec, [packet], now, _sendBuffer, null);
+
+        // The probe is the one datagram this connection sends that is DELIBERATELY larger than
+        // the current maximum datagram size - s14.2: "Both DPLPMTUD and PMTUD send datagrams
+        // that are larger than the current maximum datagram size, referred to as PMTU probes."
+        // A probe smaller than what is already confirmed would prove nothing, so a size that
+        // cannot be reached is refused rather than sent short.
+        if (bare > size)
+        {
+            return false;
+        }
+
+        for (var i = bare; i < size; i++)
+        {
+            frames.Add(default);
+        }
+
+        // _justSent AND NOT _sentPackets DIRECTLY, which is the whole registration contract and
+        // was worth getting wrong once to find. RetainSentPackets drains this scratch through
+        // RFC 9002 A.1's OnPacketSent, which is what puts the packet in its space AND counts its
+        // bytes in flight AND tells the congestion controller. Appending to the retained list
+        // behind that method's back produced a probe that was retained but never accounted for -
+        // and whose acknowledgment therefore never reached the search, so the PLPMTU stayed at
+        // BASE_PLPMTU however many probes succeeded.
+        written = TlsQuicDatagramBuilder.BuildDatagram(
+            _options.Spec, [packet], now, _sendBuffer, _justSent);
+        return true;
+    }
+
+    // Sends the probe the search asked for, if it asked for one and the connection is in a
+    // state to send it. Called from the send pass, after the ordinary answer, so a probe never
+    // displaces application data or an acknowledgment that was already due.
+    private async ValueTask SendPathMtuProbeAsync(CancellationToken cancellationToken)
+    {
+        // s14.2 makes discovery a SHOULD and TlsQuicConnectionSpec.PathMtuDiscovery is where
+        // this client answers it; see that property for why the default is off. With it off the
+        // search never leaves BASE and every datagram stays inside BasePathMtu, which is the
+        // same sentence's other half.
+        if (!_options.Spec.PathMtuDiscovery || !_confirmed || _draining
+            || _pathMtu.HasOutstandingProbe)
+        {
+            return;
+        }
+
+        if (!_pathMtu.TryGetProbeSize(out var size))
+        {
+            return;
+        }
+
+        // THE TRANSPORT'S HEADER COMES OFF THE PROBE TOO. The point of the probe is to learn
+        // what the PATH carries, and the path sees header + datagram; a probe built to the full
+        // path size would be that much larger on the wire and would fail for a reason the
+        // search would then attribute to the size it was testing.
+        var payload = size - _options.Transport.DatagramOverhead;
+        if (payload <= 0
+            || payload > _options.Transport.MaxDatagramPayloadSize
+            || !TryBuildPathMtuProbeDatagram(payload, out var written, out var packetNumber))
+        {
+            return;
+        }
+
+        // BEFORE THE AWAIT, which is RetainSentPackets' own documented ordering: "Called in the
+        // same synchronous step as the build and BEFORE the await that sends." A send that
+        // throws then leaves the packet retained, which over-counts bytes in flight for a
+        // connection that is failing anyway; retaining afterwards would under-count for every
+        // packet already on the wire, which is the error that costs.
+        RetainSentPackets();
+
+        await _options.Transport
+            .SendAsync(_options.RemoteEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken)
+            .ConfigureAwait(false);
+
+        _pathMtu.OnProbeSent(packetNumber);
+        PathMtuProbesSent++;
+
+        // s10.1's restart on "the first ack-eliciting packet sent after receiving a packet";
+        // s14.4 makes every probe ack-eliciting, so the test SendAnswerAsync applies is a
+        // constant here, exactly as it is for the PTO probe beside this.
+        RestartIdleTimerOnAckElicitingSend(_options.TimeProvider.GetUtcNow());
+    }
+
+    /// <summary>Gets how many RFC 9000 s14.4 PMTU probes this connection has sent.</summary>
+    internal int PathMtuProbesSent { get; private set; }
+
     private async ValueTask SendOwedProbeAsync(CancellationToken cancellationToken)
     {
         if (_owedProbe is not { } owed)
@@ -4336,6 +4505,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         using var confirmed = _client!.ConfirmHandshake();
         ApplyDiscards(confirmed);
         _confirmed = true;
+
+        // RFC 9000 s14.3.1: "A QUIC sender can therefore enter the DPLPMTUD BASE state when the
+        // QUIC connection handshake has been completed." This is that instant, and it is the
+        // same one s14.3.1 names rather than a second notion of completion.
+        _pathMtu.OnHandshakeConfirmed();
 
         // A3-4's OTHER SEAM, WIRED AT THE ONE INSTANT IT IS ABOUT. Its remarks: "Call this
         // once, when it is. Idempotent, and one-way - nothing unconfirms a handshake ... this

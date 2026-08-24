@@ -221,6 +221,121 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
     }
 
+    // ---- RFC 8899 / RFC 9000 s14.3: the path MTU search, end to end -----------------------
+
+    [Fact]
+    public async Task PathMtuDiscoveryProbesAndRaisesTheDatagramSize()
+    {
+        // RFC 9000 s14.3 with s14.4's probe: "PMTU probes are ack-eliciting packets" and
+        // "Endpoints could limit the content of PMTU probes to PING and PADDING frames". The
+        // state machine is tested on its own in TlsQuicPathMtuTests; what needs two endpoints
+        // is that a probe is BUILT at the size the search asked for, SURVIVES the wire, and is
+        // ACKNOWLEDGED in a way the search recognises.
+        //
+        // DISCOVERY IS TURNED ON EXPLICITLY, because the default is off - see
+        // TlsQuicConnectionSpec.PathMtuDiscovery for why. That default is also what keeps every
+        // other test in this file reading the datagram sequence it was written against.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        var spec = new TlsQuicConnectionSpec
+        {
+            PaddingTarget = Spec().PaddingTarget,
+            SourceConnectionIdLength = Spec().SourceConnectionIdLength,
+            PathMtuDiscovery = true,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // THE PEER'S INBOX IS DRAINED FIRST, and leaving it full is how this test failed once.
+        // Answering HANDSHAKE_DONE put an acknowledgment datagram on the wire; LoopbackQuicPeer
+        // reads exactly ONE datagram per pump, so a peer pumped once after the probe went out
+        // would open that stale answer instead and acknowledge a packet number below the
+        // probe's. The search would then be handed an acknowledgment that was truthful and
+        // irrelevant.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // NOTHING IS RAISED ON HOPE. s5.1.3 calls PROBED_SIZE "a tentative value for the
+        // PLPMTU, which is awaiting confirmation by an acknowledgment", so until the peer
+        // answers, every datagram is still bounded by BASE_PLPMTU.
+        Assert.Equal(spec.BasePathMtu, connection.CurrentMaxDatagramSize);
+
+        var before = clientTransport.Sent.Count;
+        Assert.False(await connection.SendPendingAsync(cancellation.Token));
+
+        // THE PROBE WENT OUT AT MAX_PLPMTU, which is s5.3.2's "maximize the gain in PLPMTU from
+        // each search step" taken on the first step. Its size is asserted on the wire rather
+        // than on a counter: a probe built at the wrong size is the one defect this whole
+        // feature turns on.
+        Assert.Equal(1, connection.PathMtuProbesSent);
+        var probe = Assert.Single(clientTransport.Sent.Skip(before));
+        Assert.Equal(spec.MaximumPathMtu, probe.Length);
+
+        // SendPendingAsync REPORTED FALSE while still sending a datagram, and that is
+        // deliberate: s14.4 warns that "PMTU probes consume congestion window, which could
+        // delay subsequent transmission by an application", so a probe must never be mistaken
+        // by a caller for application data going out.
+
+        // The peer opens it - a 1472-byte PING-and-PADDING datagram is an ordinary 1-RTT packet
+        // - and acknowledges it.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendCumulativeAckAsync(cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // s5.3.1: the acknowledgment "confirms that the PROBED_SIZE is supported, and the
+        // PROBED_SIZE value is then assigned to the PLPMTU".
+        Assert.Equal(spec.MaximumPathMtu, connection.CurrentMaxDatagramSize);
+        Assert.Equal(TlsQuicPathMtuState.SearchComplete, connection.PathMtu.State);
+        Assert.Equal(1, connection.PathMtu.Raises);
+
+        // AND THE SEARCH STOPS. s5.2 exits SEARCHING when "a probe of size MAX_PLPMTU is
+        // acknowledged"; a client that kept probing would spend a datagram per pass forever.
+        Assert.False(await connection.SendPendingAsync(cancellation.Token));
+        Assert.Equal(1, connection.PathMtuProbesSent);
+    }
+
+    [Fact]
+    public async Task NoProbeIsSentWhenPathMtuDiscoveryIsOff()
+    {
+        // THE DEFAULT, ASSERTED RATHER THAN ASSUMED. RFC 9000 s14.2 makes discovery a SHOULD,
+        // and this client declines it by default because a probe is a wire-visible behaviour
+        // no capture in this repository records the imitated client performing. A regression
+        // that turned it on would be invisible in every other test - they would simply see one
+        // more datagram - so the absence is pinned here.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        var before = clientTransport.Sent.Count;
+        Assert.False(await connection.SendPendingAsync(cancellation.Token));
+
+        Assert.Equal(before, clientTransport.Sent.Count);
+        Assert.Equal(0, connection.PathMtuProbesSent);
+        Assert.Equal(1200, connection.CurrentMaxDatagramSize);
+    }
+
     // ---- RFC 9001 s6: following a peer-initiated key update, end to end -------------------
 
     [Fact]
