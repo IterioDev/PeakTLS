@@ -308,9 +308,15 @@ public sealed partial class TlsQuicConnectionTests
         // in well under one pacing interval, so the run would end with packets still held and
         // report them as body bytes that never arrived. Advancing the clock between rounds
         // takes that limit out of the way; it grants no credit and moves no window.
+        // AND THE PATH MTU SEARCH IS OFF, WHICH IS A FOURTH LIMIT BY THE SAME ARGUMENT. The
+        // paragraph above takes the pacer out of the way and the one above that takes the
+        // congestion window out of the way, both so that RFC 9000 s19.10's flow control is the
+        // only limit being measured. An RFC 9000 s14.4 PMTU probe is another ack-eliciting
+        // datagram competing for the same window and pacing slots, and it grants no credit
+        // either. See SpecWithoutPathMtuSearch.
         var clock = new ManualTimeProvider(SentAt);
         await using var connection = Connection(
-            clientTransport, serverTransport, pki, clock: clock);
+            clientTransport, serverTransport, pki, SpecWithoutPathMtuSearch(), clock: clock);
         await using var server = Server(
             credential,
             connection.OriginalDestinationConnectionId,

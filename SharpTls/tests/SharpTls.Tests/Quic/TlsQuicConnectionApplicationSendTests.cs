@@ -270,24 +270,36 @@ public sealed partial class TlsQuicConnectionTests
         // answers, every datagram is still bounded by BASE_PLPMTU.
         Assert.Equal(spec.BasePathMtu, connection.CurrentMaxDatagramSize);
 
+        // APPLICATION DATA IS WHAT MAKES A PROBE DUE, which is RFC 8899 s5.1.1's condition:
+        // "DPLPMTUD MAY inhibit sending probe packets when no application data has been sent
+        // since the previous probe packet." A connection that has sent nothing does not probe.
         var before = clientTransport.Sent.Count;
-        Assert.False(await connection.SendPendingAsync(cancellation.Token));
+        var stream = connection.Streams.OpenBidirectional();
+        connection.Streams.Send(stream, new byte[] { 0x11, 0x22, 0x33 });
+        Assert.True(await connection.SendPendingAsync(cancellation.Token));
+
+        // TWO DATAGRAMS, IN THIS ORDER, FROM ONE PASS: the data, then the probe behind it. The
+        // probe rides the same send pass rather than waiting for the next one, and it goes
+        // SECOND - RFC 9000 s14.4 warns that "PMTU probes consume congestion window, which
+        // could delay subsequent transmission by an application", so a probe must never take
+        // the place of data that was already ready to go.
+        var sent = clientTransport.Sent.Skip(before).ToArray();
+        Assert.Equal(2, sent.Length);
+        Assert.Equal(1, connection.PathMtuProbesSent);
 
         // THE PROBE WENT OUT AT MAX_PLPMTU, which is s5.3.2's "maximize the gain in PLPMTU from
         // each search step" taken on the first step. Its size is asserted on the wire rather
         // than on a counter: a probe built at the wrong size is the one defect this whole
-        // feature turns on.
-        Assert.Equal(1, connection.PathMtuProbesSent);
-        var probe = Assert.Single(clientTransport.Sent.Skip(before));
-        Assert.Equal(spec.MaximumPathMtu, probe.Length);
+        // feature turns on. And the data datagram beside it is still bounded by BASE_PLPMTU,
+        // which is what keeps the probe the ONLY oversized thing on this connection.
+        Assert.Equal(spec.MaximumPathMtu, sent[1].Length);
+        Assert.True(
+            sent[0].Length <= spec.BasePathMtu,
+            $"the data datagram was {sent[0].Length} bytes, over the {spec.BasePathMtu} ceiling");
 
-        // SendPendingAsync REPORTED FALSE while still sending a datagram, and that is
-        // deliberate: s14.4 warns that "PMTU probes consume congestion window, which could
-        // delay subsequent transmission by an application", so a probe must never be mistaken
-        // by a caller for application data going out.
-
-        // The peer opens it - a 1472-byte PING-and-PADDING datagram is an ordinary 1-RTT packet
-        // - and acknowledges it.
+        // The peer opens both - a 1472-byte PING-and-PADDING datagram is an ordinary 1-RTT
+        // packet - and acknowledges them.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
         Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
         await serverPeer.SendCumulativeAckAsync(cancellation.Token);
         Assert.True(await connection.PumpOnceAsync(cancellation.Token));
@@ -316,10 +328,11 @@ public sealed partial class TlsQuicConnectionTests
         using var pki = TestPki.Create();
         using var credential = Credential(pki);
         var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
-        await using var connection = Connection(clientTransport, serverTransport, pki);
+        var spec = SpecWithoutPathMtuSearch();
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
         await using var server = Server(credential, connection.OriginalDestinationConnectionId);
         await using var serverPeer = LoopbackQuicPeer.ForServer(
-            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
 
         await connection.StartAsync(cancellation.Token);
         Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
@@ -327,6 +340,15 @@ public sealed partial class TlsQuicConnectionTests
         Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
         await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
         Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // THE SAME APPLICATION DATA THE POSITIVE TEST SENDS, so this proves the KNOB is what
+        // stops the probe. Without it the test would pass on RFC 8899 s5.1.1's inhibition
+        // instead - true, but a different rule, and it would keep passing if the knob stopped
+        // being read at all.
+        var stream = connection.Streams.OpenBidirectional();
+        connection.Streams.Send(stream, new byte[] { 0x11, 0x22, 0x33 });
+        Assert.True(await connection.SendPendingAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
 
         var before = clientTransport.Sent.Count;
         Assert.False(await connection.SendPendingAsync(cancellation.Token));

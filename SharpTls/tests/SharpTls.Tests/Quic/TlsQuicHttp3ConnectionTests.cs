@@ -1852,8 +1852,22 @@ public sealed partial class TlsQuicConnectionTests
             if (openLocalStreams)
             {
                 http3.OpenLocalStreams();
+
+                // EVERY DATAGRAM THIS SEND PRODUCED, not one. The Harness constructor then sets
+                // _peerConsumed to the sent count, so anything left unread here would be
+                // recorded as consumed and never pumped again - and the next FlushAsync would
+                // open THAT stale datagram instead of the one the test had just sent.
+                //
+                // It became two once RFC 9000 s14.3's path MTU search was on by default: opening
+                // the control streams is application data, which is what RFC 8899 s5.1.1 makes
+                // a probe wait for, so the probe follows in the same pass.
+                var before = clientTransport.Sent.Count;
                 Assert.True(await connection.SendPendingAsync(cancellationToken));
-                Assert.False(await peer.PumpOnceAsync(SentAt, cancellationToken));
+                for (var datagram = before; datagram < clientTransport.Sent.Count; datagram++)
+                {
+                    Assert.False(await peer.PumpOnceAsync(SentAt, cancellationToken));
+                }
+
                 peer.ReceivedStreamFrames.Clear();
             }
 
@@ -1897,7 +1911,18 @@ public sealed partial class TlsQuicConnectionTests
             CancellationToken cancellationToken, bool expectPacket = true)
         {
             Assert.Equal(expectPacket, await Connection.SendPendingAsync(cancellationToken));
-            if (expectPacket)
+
+            // EVERY UNCONSUMED DATAGRAM, NOT ONE. This pumped exactly once per send, which held
+            // while one SendPendingAsync produced at most one datagram. RFC 9000 s14.3's path
+            // MTU search broke that: a pass may now send its answer AND a PMTU probe, and a peer
+            // pumped once would read the answer and leave the probe in the inbox - so the NEXT
+            // flush's single pump would open that stale probe instead of the datagram the test
+            // had just sent. The symptom was a request stream that never reached the peer at
+            // all, which the HTTP/3 readout reported as an absent pseudo-header order.
+            //
+            // DrainToPeerAsync below has always done it this way and says why. This is the same
+            // loop, and the counter it advances is the same one.
+            while (_peerConsumed < ClientTransport.Sent.Count)
             {
                 Assert.False(await Peer.PumpOnceAsync(SentAt, cancellationToken));
                 _peerConsumed++;

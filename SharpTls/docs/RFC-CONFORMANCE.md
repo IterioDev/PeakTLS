@@ -530,9 +530,12 @@ overflowing.
 `DatagramOverhead` so an encapsulating transport's header is charged against the path budget,
 `Drain` segments a body into datagram-sized STREAM frames (RFC 8899 §4.4), and
 `TakePendingFrames` takes only as many frames as fit, measured with the encoder that will write
-them. `ed3412f` adds RFC 8899 DPLPMTUD to raise that ceiling above 1200 — **off by default**,
-because a probe is a wire-visible behaviour on a schedule no capture in this repository
-records; see `TlsQuicConnectionSpec.PathMtuDiscovery`.
+them. `ed3412f` adds RFC 8899 DPLPMTUD to raise that ceiling above 1200, **on by default** —
+§14.2 makes discovery a SHOULD, and a default that has to be remembered is one that gets
+forgotten. The probe waits for §5.1.1's "application data has been sent since the previous
+probe packet", so it never appears in the opening flight, and the search normally ends after
+one probe. `TlsQuicConnectionSpec.PathMtuDiscovery = false` restores the fixed 1200-byte
+ceiling for a connection that has to match a capture byte for byte.
 
 **What is still not settled.** Whether the collaborator's specific failures were the 32-byte
 header crossing 1472 on a 1500-byte path, or a smaller MTU on their proxy route. Both produce

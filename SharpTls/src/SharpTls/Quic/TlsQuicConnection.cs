@@ -3968,9 +3968,9 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private async ValueTask SendPathMtuProbeAsync(CancellationToken cancellationToken)
     {
         // s14.2 makes discovery a SHOULD and TlsQuicConnectionSpec.PathMtuDiscovery is where
-        // this client answers it; see that property for why the default is off. With it off the
-        // search never leaves BASE and every datagram stays inside BasePathMtu, which is the
-        // same sentence's other half.
+        // this client answers it; see that property for the trade the default makes. With it
+        // off the search never leaves BASE and every datagram stays inside BasePathMtu, which
+        // is the same sentence's other half and equally conformant.
         if (!_options.Spec.PathMtuDiscovery || !_confirmed || _draining
             || _pathMtu.HasOutstandingProbe)
         {

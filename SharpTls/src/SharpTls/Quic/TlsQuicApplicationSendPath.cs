@@ -601,7 +601,16 @@ internal sealed partial class TlsQuicConnection
                 spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
             }
 
-            frames.AddRange(streams.TakePendingFrames(DatagramPayloadBudget - spent));
+            var taken = streams.TakePendingFrames(DatagramPayloadBudget - spent);
+            frames.AddRange(taken);
+
+            // RFC 8899 s5.1.1's "application data has been sent", reported from the one place
+            // that knows it did. A probe before this has nothing to be for: the connection has
+            // not yet shown it wants to send anything a larger datagram would carry.
+            if (taken.Count > 0)
+            {
+                PathMtu.OnApplicationDataSent();
+            }
         }
 
         if (hasAck && !_options.Spec.AckLeadsInPacket)

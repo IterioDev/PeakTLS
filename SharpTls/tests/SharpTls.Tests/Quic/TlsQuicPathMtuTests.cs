@@ -23,10 +23,53 @@ public sealed class TlsQuicPathMtuTests
         // with - s14.4 makes PMTU probes ack-eliciting 1-RTT traffic - and the handshake's own
         // 1200-byte Initial datagrams are already establishing BASE_PLPMTU.
         var path = new TlsQuicPathMtu(Base, Maximum);
+        path.OnApplicationDataSent();
 
         Assert.Equal(TlsQuicPathMtuState.Base, path.State);
         Assert.Equal(Base, path.MaximumDatagramSize);
         Assert.False(path.TryGetProbeSize(out _));
+    }
+
+    [Fact]
+    public void NoProbeIsSentUntilApplicationDataHas()
+    {
+        // RFC 8899 s5.1.1: "DPLPMTUD MAY inhibit sending probe packets when no application data
+        // has been sent since the previous probe packet." A connection that opens, confirms its
+        // handshake and sends nothing gains nothing from a larger datagram, so probing it would
+        // spend a round trip and an extra datagram learning a number nothing will use.
+        //
+        // IT ALSO KEEPS THE PROBE OUT OF THE OPENING FLIGHT, which is the part of a connection
+        // an observer is most likely to be reading.
+        var path = new TlsQuicPathMtu(Base, Maximum);
+        path.OnHandshakeConfirmed();
+
+        Assert.Equal(TlsQuicPathMtuState.Searching, path.State);
+        Assert.False(path.TryGetProbeSize(out _));
+
+        path.OnApplicationDataSent();
+        Assert.True(path.TryGetProbeSize(out var size));
+        Assert.Equal(Maximum, size);
+    }
+
+    [Fact]
+    public void OneProbePerBurstOfApplicationData()
+    {
+        // s5.1.1 says "since the previous probe packet", so sending the probe consumes the
+        // permission. Without that, a search that lost a probe would re-probe on every pass
+        // while the connection sat idle - which is the "additional packets" the same paragraph
+        // warns about.
+        var path = new TlsQuicPathMtu(Base, Maximum);
+        path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
+
+        Assert.True(path.TryGetProbeSize(out _));
+        path.OnProbeSent(1);
+        path.OnPacketLost(1, Maximum);
+
+        Assert.False(path.TryGetProbeSize(out _));
+
+        path.OnApplicationDataSent();
+        Assert.True(path.TryGetProbeSize(out _));
     }
 
     [Fact]
@@ -38,6 +81,7 @@ public sealed class TlsQuicPathMtuTests
         // where a binary search from the midpoint would spend five.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         Assert.Equal(TlsQuicPathMtuState.Searching, path.State);
         Assert.True(path.TryGetProbeSize(out var size));
@@ -52,6 +96,7 @@ public sealed class TlsQuicPathMtuTests
         // MAX_PLPMTU is acknowledged (PLPMTU = MAX_PLPMTU)".
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out var size));
         path.OnProbeSent(7);
 
@@ -77,9 +122,11 @@ public sealed class TlsQuicPathMtuTests
         // by congestion rather than by size must not narrow the search.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out var first));
         path.OnProbeSent(1);
         path.OnPacketLost(1, first);
+        path.OnApplicationDataSent();
 
         Assert.True(path.TryGetProbeSize(out var second));
         Assert.Equal(first, second);
@@ -95,6 +142,7 @@ public sealed class TlsQuicPathMtuTests
         // unexplored, which on a 1400-byte tunnel means staying at 1200 forever.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         for (var attempt = 1; attempt <= TlsQuicPathMtu.MaximumProbes; attempt++)
         {
@@ -102,6 +150,7 @@ public sealed class TlsQuicPathMtuTests
             Assert.Equal(Maximum, size);
             path.OnProbeSent((ulong)attempt);
             path.OnPacketLost((ulong)attempt, size);
+            path.OnApplicationDataSent();
         }
 
         Assert.Equal(TlsQuicPathMtuState.Searching, path.State);
@@ -124,11 +173,13 @@ public sealed class TlsQuicPathMtuTests
         const int Actual = 1400;
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         ulong packet = 0;
         for (var step = 0; step < 64 && path.TryGetProbeSize(out var size); step++)
         {
             path.OnProbeSent(++packet);
+            path.OnApplicationDataSent();
             if (size <= Actual)
             {
                 path.OnPacketAcknowledged(packet);
@@ -156,11 +207,13 @@ public sealed class TlsQuicPathMtuTests
         // same as BASE_PLPMTU - and must stop probing rather than retry forever.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         ulong packet = 0;
         for (var step = 0; step < 64 && path.TryGetProbeSize(out var size); step++)
         {
             path.OnProbeSent(++packet);
+            path.OnApplicationDataSent();
             path.OnPacketLost(packet, size);
         }
 
@@ -177,6 +230,7 @@ public sealed class TlsQuicPathMtuTests
         // out, which is the ordinary traffic the probe was sent alongside.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(42);
 
@@ -196,6 +250,7 @@ public sealed class TlsQuicPathMtuTests
         // acknowledgment ambiguous about which size it confirmed.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
@@ -213,6 +268,7 @@ public sealed class TlsQuicPathMtuTests
         // THE PATH IS RAISED FIRST, so the drop is a drop rather than a no-op.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
         path.OnPacketAcknowledged(1);
@@ -236,6 +292,7 @@ public sealed class TlsQuicPathMtuTests
         // raise it again.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
         path.OnPacketAcknowledged(1);
@@ -257,6 +314,7 @@ public sealed class TlsQuicPathMtuTests
         // that can least afford it.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
         path.OnPacketAcknowledged(1);
@@ -281,6 +339,7 @@ public sealed class TlsQuicPathMtuTests
         // permanent.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
         path.OnPacketAcknowledged(1);
@@ -291,6 +350,7 @@ public sealed class TlsQuicPathMtuTests
         }
 
         Assert.Equal(TlsQuicPathMtuState.Searching, path.State);
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out var size));
         Assert.Equal(Maximum, size);
     }
@@ -303,6 +363,7 @@ public sealed class TlsQuicPathMtuTests
         // has already got.
         var path = new TlsQuicPathMtu(Base, Base);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         Assert.Equal(TlsQuicPathMtuState.SearchComplete, path.State);
         Assert.False(path.TryGetProbeSize(out _));
@@ -325,13 +386,16 @@ public sealed class TlsQuicPathMtuTests
         // raised and spend the round trips again.
         var path = new TlsQuicPathMtu(Base, Maximum);
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         Assert.True(path.TryGetProbeSize(out _));
         path.OnProbeSent(1);
         path.OnPacketAcknowledged(1);
         Assert.Equal(Maximum, path.MaximumDatagramSize);
 
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
         path.OnHandshakeConfirmed();
+        path.OnApplicationDataSent();
 
         Assert.Equal(Maximum, path.MaximumDatagramSize);
         Assert.Equal(TlsQuicPathMtuState.SearchComplete, path.State);

@@ -386,28 +386,29 @@ internal sealed class TlsQuicConnectionSpec
     }
 
     /// <summary>Gets whether RFC 8899 path MTU discovery runs, searching upward from
-    /// <see cref="BasePathMtu"/> toward <see cref="MaximumPathMtu"/>. Off by default.</summary>
+    /// <see cref="BasePathMtu"/> toward <see cref="MaximumPathMtu"/>. On by default.</summary>
     /// <remarks>
-    /// <para>OFF BY DEFAULT, AND THE REASON IS FINGERPRINT FIDELITY RATHER THAN DOUBT ABOUT THE
-    /// MECHANISM. RFC 9000 s14.2 makes discovery a SHOULD - "An endpoint SHOULD use DPLPMTUD
-    /// (Section 14.3) or PMTUD (Section 14.2.1)" - and s14.4's probes are ordinary ack-eliciting
-    /// datagrams, so turning this on is conformant and turning it off is conformant too: the
-    /// same sentence's other half, "In the absence of these mechanisms, QUIC endpoints SHOULD
-    /// NOT send datagrams larger than the smallest allowed maximum datagram size", is what
-    /// <see cref="BasePathMtu"/> then enforces.</para>
-    /// <para>WHAT A PROBE COSTS HERE IS OBSERVABILITY. It is an extra PING-and-PADDING datagram
-    /// at a size nothing else in the flight uses, sent at a moment chosen by this
+    /// <para>ON BY DEFAULT, WHICH IS A DELIBERATE CHOICE BETWEEN TWO CONFORMANT ANSWERS. RFC
+    /// 9000 s14.2 makes discovery a SHOULD - "An endpoint SHOULD use DPLPMTUD (Section 14.3) or
+    /// PMTUD (Section 14.2.1)" - so running it follows the SHOULD, and declining it falls back
+    /// on the same sentence's other half: "In the absence of these mechanisms, QUIC endpoints
+    /// SHOULD NOT send datagrams larger than the smallest allowed maximum datagram size", which
+    /// is what <see cref="BasePathMtu"/> enforces. Both are legal; the default decides which
+    /// one a caller gets without asking.</para>
+    /// <para>THE COST IS OBSERVABILITY, AND IT IS REAL. A probe is an extra PING-and-PADDING
+    /// datagram at a size nothing else in the flight uses, sent on a schedule chosen by this
     /// implementation - and no capture in this repository records when the imitated client
-    /// sends one, or at what sizes, or how many. Shipping a schedule invented here would put a
-    /// wire-visible behaviour on the connection that the client being impersonated does not
-    /// demonstrably have, which makes this client MORE distinguishable rather than less. That
-    /// is the same reasoning that keeps RFC 9218's PRIORITY_UPDATE out of this tree.</para>
-    /// <para>SO TURN IT ON WHEN THROUGHPUT MATTERS MORE THAN THE FINGERPRINT - a large upload
-    /// over a path that carries more than 1200 bytes moves in roughly a fifth the datagrams -
-    /// and leave it off when the connection has to look like the capture. A preset may turn it
-    /// on once a capture justifies a schedule; until then the default is the honest one.</para>
+    /// sends one, at what sizes, or how many. A connection that has to match a capture byte for
+    /// byte should set this false; a caller who forgets it exists gets the conformant,
+    /// higher-throughput behaviour rather than a silently capped one.</para>
+    /// <para>TWO THINGS KEEP THAT COST SMALL. The probe waits for RFC 8899 s5.1.1's condition -
+    /// "no application data has been sent since the previous probe packet" - so it never
+    /// appears in the opening flight, which is the part of a connection an observer is most
+    /// likely to be reading; and the search normally ends after ONE probe, because s5.3.2's
+    /// "maximize the gain in PLPMTU from each search step" is taken literally and the first
+    /// probe goes straight to <see cref="MaximumPathMtu"/>.</para>
     /// </remarks>
-    public bool PathMtuDiscovery { get; init; }
+    public bool PathMtuDiscovery { get; init; } = true;
 
     /// <summary>Gets the largest datagram size path MTU discovery will search up to - RFC 8899
     /// s5.1.2's MAX_PLPMTU.</summary>

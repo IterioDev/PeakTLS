@@ -1038,6 +1038,13 @@ public sealed partial class TlsQuicConnectionTests
         {
             PaddingTarget = PacerDatagram,
             SourceConnectionIdLength = SourceConnectionIdLength,
+
+            // Every test built on this spec measures WHICH datagram the pacer released and
+            // when. An RFC 9000 s14.4 PMTU probe is an ordinary ack-eliciting datagram that
+            // takes a pacing slot of its own, so leaving the search on would put a datagram
+            // into the sequence under test that the test is not about. See
+            // SpecWithoutPathMtuSearch.
+            PathMtuDiscovery = false,
             Recovery = new TlsQuicRecoverySpec
             {
                 CongestionController = controller is null ? null : () => controller,

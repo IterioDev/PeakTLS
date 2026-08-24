@@ -944,11 +944,16 @@ public sealed partial class TlsQuicConnectionTests
         // THE WRAPPER'S CLOCK DRIVES THE CONNECTION, which is A3-1's whole reason for owning
         // one: the loss below is declared by s6.1.2's TIME threshold, and on TimeProvider.System
         // that would mean sleeping for a real loss delay in a unit test.
+        // WITHOUT THE PATH MTU SEARCH, because this test drops a specific datagram BY ORDINAL
+        // and then reads the frames of the one that follows. A PMTU probe is an ordinary
+        // ack-eliciting datagram, so leaving the search on inserts an unrelated datagram into
+        // the very sequence the drop is counted against. See SpecWithoutPathMtuSearch.
+        var spec = SpecWithoutPathMtuSearch();
         await using var connection = Connection(
-            impaired, serverTransport, pki, clock: impaired.Clock);
+            impaired, serverTransport, pki, spec, clock: impaired.Clock);
         await using var server = Server(credential, connection.OriginalDestinationConnectionId);
         await using var serverPeer = LoopbackQuicPeer.ForServer(
-            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
         await ConfirmedHandshake(connection, serverPeer, cancellation.Token);
 
         var stream = connection.Streams.OpenBidirectional();

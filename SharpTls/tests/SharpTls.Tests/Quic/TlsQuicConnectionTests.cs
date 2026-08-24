@@ -946,6 +946,25 @@ public sealed partial class TlsQuicConnectionTests
     private static readonly DateTimeOffset SentAt =
         new(2026, 8, 18, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>Spec() with RFC 9000 s14.3's path MTU search turned off.</summary>
+    /// <remarks>FOR TESTS THAT MEASURE THE SEND GATE, not for tests that happen to be noisy.
+    /// The search sends an extra PMTU probe once application data has flowed, and a probe is an
+    /// ordinary ack-eliciting datagram: it takes a pacing slot, spends congestion window and
+    /// occupies a pass. A test measuring exactly which datagram the pacer released, or exactly
+    /// which frame a repair carried, is then measuring the probe as well.
+    /// <para>This is the same principle
+    /// ABodySixteenTimesThePeersInitialStreamCreditCompletesOnRealGrants already states for
+    /// congestion control - "Acknowledging keeps that limit out of the way so the one under
+    /// test is the one being measured" - applied to one more independent limit. The DEFAULT is
+    /// on, and NoProbeIsSentWhenPathMtuDiscoveryIsOff plus
+    /// PathMtuDiscoveryProbesAndRaisesTheDatagramSize are what hold that.</para></remarks>
+    private static TlsQuicConnectionSpec SpecWithoutPathMtuSearch() => new()
+    {
+        PaddingTarget = 1200,
+        SourceConnectionIdLength = SourceConnectionIdLength,
+        PathMtuDiscovery = false,
+    };
+
     private static TlsQuicConnectionSpec Spec() => new()
     {
         // 1200 is RFC 9000 s14.1's floor rather than a fingerprint choice, and nothing here

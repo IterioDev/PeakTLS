@@ -98,6 +98,10 @@ internal sealed class TlsQuicPathMtu
     // size" - counted over ORDINARY packets larger than BASE_PLPMTU. See OnPacketLost.
     private int _consecutiveLargePacketLosses;
 
+    // RFC 8899 s5.1.1's licence to hold a probe back: "DPLPMTUD MAY inhibit sending probe
+    // packets when no application data has been sent since the previous probe packet."
+    private bool _applicationDataSinceLastProbe;
+
     /// <summary>Creates a state machine for one path.</summary>
     /// <param name="basePathMtu">RFC 8899 s5.1.2's BASE_PLPMTU, which RFC 9000 s14.3 makes
     /// "consistent with QUIC's smallest allowed maximum datagram size" and s14.3 also makes
@@ -169,6 +173,22 @@ internal sealed class TlsQuicPathMtu
         State = _ceiling > _confirmed ? TlsQuicPathMtuState.Searching : TlsQuicPathMtuState.SearchComplete;
     }
 
+    /// <summary>Records that application data has gone out, which is what makes a probe worth
+    /// sending.</summary>
+    /// <remarks>
+    /// <para>RFC 8899 s5.1.1: "DPLPMTUD MAY inhibit sending probe packets when no application
+    /// data has been sent since the previous probe packet. A PL preferring to use an up-to-date
+    /// PMTU once user data is sent again can choose to continue PMTU discovery for each path.
+    /// However, this will result in sending additional packets." This client takes the first
+    /// option.</para>
+    /// <para>WHICH MAKES THE PROBE FOLLOW A REASON TO WANT ONE. A connection that opens, sends
+    /// one small request and closes gains nothing from a larger datagram, so probing it spends
+    /// a round trip and an extra datagram to learn a number nothing will use. Waiting also
+    /// keeps the probe out of the opening flight, which is the part of a connection an observer
+    /// is most likely to be looking at.</para>
+    /// </remarks>
+    internal void OnApplicationDataSent() => _applicationDataSinceLastProbe = true;
+
     /// <summary>Reports the size of the next probe datagram to send, if one is due.</summary>
     /// <remarks>
     /// <para>ONE PROBE AT A TIME. RFC 8899 s5.3.1 ties PROBE_COUNT to a single outstanding
@@ -188,6 +208,12 @@ internal sealed class TlsQuicPathMtu
     {
         size = 0;
         if (State != TlsQuicPathMtuState.Searching || _outstandingProbe is not null)
+        {
+            return false;
+        }
+
+        // s5.1.1's inhibition. See OnApplicationDataSent.
+        if (!_applicationDataSinceLastProbe)
         {
             return false;
         }
@@ -218,6 +244,7 @@ internal sealed class TlsQuicPathMtu
     internal void OnProbeSent(ulong packetNumber)
     {
         _outstandingProbe = packetNumber;
+        _applicationDataSinceLastProbe = false;
         ProbesSent++;
     }
 
