@@ -304,6 +304,10 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
     private readonly ITlsQuicDatagramTransport _transport;
     private readonly IPEndPoint _peerEndPoint;
     private readonly TlsQuicPacketReceiver _receiver;
+
+    /// <summary>How many packets this peer's receiver has discarded as RFC 9000 s12.3
+    /// duplicates.</summary>
+    internal int DuplicatesSuppressed => _receiver.DuplicatesSuppressed;
     private readonly TlsQuicKeySet _keys;
     private readonly TlsQuicConnectionSpec _spec;
     private readonly bool _isClient;
@@ -1207,6 +1211,7 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
     private List<CryptoChunk> ReceiveOne(Memory<byte> packet)
     {
         var chunks = new List<CryptoChunk>();
+        var duplicatesBefore = _receiver.DuplicatesSuppressed;
         var outcome = _receiver.Receive(
             packet,
             (in TlsQuicFrame frame, in TlsQuicReceivedPacket received) =>
@@ -1309,6 +1314,20 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
                     chunks.Add(new CryptoChunk(received.Level, frame.Offset, frame.Data.ToArray()));
                 }
             });
+
+        // ONE EXCEPTION, AND IT IS THE ONE THING A LOOPBACK CAN LEGITIMATELY DROP. RFC 9000
+        // s12.3's duplicate suppression discards an authenticated packet whose number this
+        // space has already processed, and a test transport that duplicates a datagram on
+        // purpose - ImpairingDatagramTransport.Duplicate - produces exactly that. It is not a
+        // key problem and not a forgery, so the guard below would misreport it as both.
+        //
+        // MEASURED ON THE RECEIVER'S OWN COUNTER rather than inferred from the shape.
+        // Processed=0, Discarded=1 is also what a stray packet from nowhere looks like, and
+        // this file exists to tell those apart rather than to let one stand for the other.
+        if (_receiver.DuplicatesSuppressed != duplicatesBefore)
+        {
+            return chunks;
+        }
 
         // ANYTHING OTHER THAN ONE CLEANLY PROCESSED PACKET IS A BUG HERE. In a loopback
         // there is no unopenable packet from the only peer that exists, so a discard is

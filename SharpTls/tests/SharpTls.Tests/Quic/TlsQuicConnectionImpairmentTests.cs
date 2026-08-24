@@ -299,26 +299,33 @@ public sealed partial class TlsQuicConnectionTests
             (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ack),
             serverPeer.LastDatagramFrames);
 
-        // AND THE SECOND COPY IS OPENED AND PROCESSED AGAIN - NOTHING DEDUPLICATES IT TODAY.
+        // AND THE SECOND COPY IS SUPPRESSED. THIS ASSERTION USED TO SAY THE OPPOSITE.
         //
-        // MEASURED, NOT PREDICTED, AND IT CORRECTED THIS TEST. The assertion here first said the
-        // duplicate would be dropped before its frames were opened, because RFC 9000 s12.3
-        // forbids reusing a packet number in a space and s13.1 requires a receiver to tolerate
-        // one arriving anyway. Neither this peer nor TlsQuicPacketReceiver keeps a received
-        // packet number set, so the copy opens cleanly and raises its ACK frame a second time.
+        // What it read, and why: "the second copy is opened and processed again - nothing
+        // deduplicates it today", pinned rather than fixed because RFC 9000 s12.3's duplicate
+        // suppression was not task A3-1's to build. The note beside it named the consequence -
+        // "an RTT sample taken from a duplicated ACK is a sample of nothing" - and the audit
+        // filed it as a MISSING MUST. It is implemented now, so the pin turns over rather than
+        // disappearing: a reader looking for when the behaviour changed lands here.
         //
-        // THIS IS PINNED RATHER THAN FIXED BECAUSE IT IS NOT A3-1's TO FIX, AND IT IS WRITTEN
-        // DOWN BECAUSE IT IS A3's TO CARE ABOUT: an RTT sample taken from a duplicated ACK is a
-        // sample of nothing, and RFC 9002 s5.1's "an endpoint generates an RTT sample on
-        // receiving an ACK frame that newly acknowledges" is the clause that has to hold the
-        // line once A3-4 lands. A3 now has an instrument that can produce the duplicate on
-        // demand, which is why the gap is visible at all.
+        // s12.3: "A receiver MUST discard a newly unprotected packet unless it is certain that
+        // it has not processed another packet with the same packet number from the same packet
+        // number space."
+        Assert.Equal(0, serverPeer.DuplicatesSuppressed);
         Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
-        Assert.Contains(
-            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ack),
-            serverPeer.LastDatagramFrames);
-        Assert.Equal(0UL, serverPeer.LargestApplicationPacketNumberReceived);
+        Assert.Equal(1, serverPeer.DuplicatesSuppressed);
+
+        // THE DATAGRAM REALLY WAS DELIVERED TWICE, which is what stops the counter above from
+        // being satisfied by a copy that never arrived.
         Assert.Equal(new[] { 1, 2, 3, 3 }, impaired.Delivered);
+
+        // AND NOTHING FROM IT REACHED THE PEER'S FRAME LAYER. LastDatagramFrames is cleared
+        // per datagram, so an EMPTY list is the direct evidence that this datagram dispatched
+        // no frames at all - which is the assertion that inverted. Before the fix this line
+        // read Assert.Contains(..., Ack) and passed because the duplicate's ACK was dispatched
+        // a second time.
+        Assert.Empty(serverPeer.LastDatagramFrames);
+        Assert.Equal(0UL, serverPeer.LargestApplicationPacketNumberReceived);
     }
 
     [Fact]

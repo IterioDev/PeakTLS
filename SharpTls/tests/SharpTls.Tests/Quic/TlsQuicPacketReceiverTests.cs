@@ -1384,6 +1384,159 @@ public sealed class TlsQuicPacketReceiverTests
     // TlsQuicPacketHeader.WriteLongHeader - the reader under test and the writer would
     // otherwise be checking each other. `token` is null for the types that have no
     // Token field (s17.2.4's Handshake packet).
+    // ------------------------------------------------------------------------
+    // RFC 9000 s12.3: duplicate suppression.
+    // ------------------------------------------------------------------------
+
+    [Fact]
+    public void APacketNumberSeenTwiceInOneDatagramIsProcessedOnce()
+    {
+        // s12.3: "A receiver MUST discard a newly unprotected packet unless it is certain that
+        // it has not processed another packet with the same packet number from the same packet
+        // number space.  Duplicate suppression MUST happen after removing packet protection
+        // for the reasons described in Section 9.5 of [QUIC-TLS]."
+        //
+        // THE TWO PACKETS ARE BYTE-IDENTICAL, which is what a duplicated datagram delivers.
+        // Both authenticate - the AEAD has no memory - so the second is refused by this rule
+        // and by nothing else.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var one = BuildLongPacket(
+            TlsQuicLongPacketType.Initial, Version1, [0xAA, 0xBB], [], [],
+            fullPacketNumber: 1, truncatedPacketNumber: [0x01],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        var frames = 0;
+        var result = receiver.Receive(
+            one.Concat(one).ToArray(),
+            (in TlsQuicFrame _, in TlsQuicReceivedPacket _) => frames++);
+
+        Assert.Equal(1, result.Processed);
+        Assert.Equal(1, result.Discarded);
+        Assert.Equal(1, receiver.DuplicatesSuppressed);
+        Assert.Null(result.CloseError);
+
+        // NOT A DECRYPT FAILURE, which Discarded alone cannot say. The copy opened cleanly;
+        // it was refused afterwards.
+        Assert.Equal(0, result.DiscardedForMissingKeys);
+
+        // AND ITS FRAMES NEVER REACHED THE HANDLER. The plaintext is one PING (0x01) and two
+        // PADDING (0x00), so ONE packet dispatches three frames and six would mean the
+        // duplicate was walked as well. That second walk is the consequence the rule exists to
+        // prevent - a duplicated ACK re-read as a fresh one, s12.3's own reason - and it is
+        // what this count measures rather than the discard itself.
+        Assert.Equal(3, frames);
+    }
+
+    [Theory]
+    [InlineData(73UL, 2, 0)]
+    [InlineData(72UL, 1, 1)]
+    public void AReorderedPacketIsAcceptedInsideTheWindowAndDroppedBelowIt(
+        ulong reordered, int expectedProcessed, int expectedDiscarded)
+    {
+        // THE WINDOW'S EDGE, BOTH SIDES OF IT, AND THE ROWS DIFFER BY ONE. The window is 128
+        // packets below the highest processed, so against a highest of 200: number 73 is 127
+        // back and inside it, number 72 is 128 back and outside. A window written with the
+        // wrong comparison moves exactly one of these rows.
+        //
+        // s12.3 SANCTIONS THE CEILING: "the data required for detecting duplicates can be
+        // limited by maintaining a minimum packet number below which all packets are
+        // immediately dropped". Neither number has been seen before, so the second row is the
+        // rule being conservative rather than correct - it drops a packet it cannot be certain
+        // about, which is the direction s12.3's "unless it is certain" points.
+        //
+        // A FOUR-BYTE PACKET NUMBER IS WHAT MAKES THE REORDERING EXPRESSIBLE. s17.1 decodes a
+        // truncated number to the candidate nearest the largest received, so one byte cannot
+        // name 73 when 200 is already in hand - it would decode to 329.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var datagram = BuildLongPacket(
+                TlsQuicLongPacketType.Initial, Version1, [0xAA, 0xBB], [], [],
+                fullPacketNumber: 200, truncatedPacketNumber: [0x00, 0x00, 0x00, 0xC8],
+                plaintext: [0x01, 0x00, 0x00], keys)
+            .Concat(BuildLongPacket(
+                TlsQuicLongPacketType.Initial, Version1, [0xAA, 0xBB], [], [],
+                fullPacketNumber: reordered,
+                truncatedPacketNumber:
+                [
+                    0x00, 0x00, (byte)(reordered >> 8), (byte)reordered,
+                ],
+                plaintext: [0x01, 0x00, 0x00], keys))
+            .ToArray();
+
+        var result = receiver.Receive(
+            datagram, static (in TlsQuicFrame _, in TlsQuicReceivedPacket _) => { });
+
+        Assert.Equal(expectedProcessed, result.Processed);
+        Assert.Equal(expectedDiscarded, result.Discarded);
+        Assert.Equal(expectedDiscarded, receiver.DuplicatesSuppressed);
+        Assert.Null(result.CloseError);
+
+        // s17.1's largest is unmoved either way - it is defined over "a successfully
+        // authenticated packet" and neither of these is larger than 200.
+        Assert.Equal(200UL, receiver.LargestReceived(TlsQuicEncryptionLevel.Initial));
+    }
+
+    [Fact]
+    public void PacketNumberZeroIsNotMistakenForAnEmptyWindow()
+    {
+        // THE FLAG THE WINDOW CARRIES, AND WHY IT EXISTS. The highest-processed number starts
+        // at zero, and zero is a legal packet number - RFC 9000 s17.1 starts every space at 0 -
+        // so a window that inferred "nothing processed yet" from a zero would discard the very
+        // first packet of every connection as a duplicate of itself.
+        //
+        // MEASURED AS ACCEPTED, NOT AS not-discarded: a first packet counted into Processed is
+        // the whole handshake's first step.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var result = receiver.Receive(
+            BuildLongPacket(
+                TlsQuicLongPacketType.Initial, Version1, [0xAA, 0xBB], [], [],
+                fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+                plaintext: [0x01, 0x00, 0x00], keys),
+            static (in TlsQuicFrame _, in TlsQuicReceivedPacket _) => { });
+
+        Assert.Equal(1, result.Processed);
+        Assert.Equal(0, result.Discarded);
+        Assert.Equal(0, receiver.DuplicatesSuppressed);
+    }
+
+    [Fact]
+    public void TheSamePacketNumberInTwoSpacesIsNotADuplicate()
+    {
+        // s12.3 scopes the rule to "the same packet number space", and s12.2's three spaces
+        // number independently - so an Initial 1 and a Handshake 1 are different packets that
+        // happen to share a number. A single window shared across spaces would discard the
+        // second and stall the handshake, which is why the window is an array.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+        InstallHandshake(receiver, keys);
+
+        var datagram = BuildLongPacket(
+                TlsQuicLongPacketType.Initial, Version1, [0xAA, 0xBB], [], [],
+                fullPacketNumber: 1, truncatedPacketNumber: [0x01],
+                plaintext: [0x01, 0x00, 0x00], keys)
+            .Concat(BuildLongPacket(
+                TlsQuicLongPacketType.Handshake, Version1, [0xAA, 0xBB], [], null,
+                fullPacketNumber: 1, truncatedPacketNumber: [0x01],
+                plaintext: [0x01, 0x00, 0x00], keys))
+            .ToArray();
+
+        var result = receiver.Receive(
+            datagram, static (in TlsQuicFrame _, in TlsQuicReceivedPacket _) => { });
+
+        Assert.Equal(2, result.Processed);
+        Assert.Equal(0, result.Discarded);
+        Assert.Equal(0, receiver.DuplicatesSuppressed);
+    }
+
     private static byte[] BuildLongPacket(
         TlsQuicLongPacketType type,
         uint version,

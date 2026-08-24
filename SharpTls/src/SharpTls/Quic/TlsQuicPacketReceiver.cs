@@ -201,6 +201,20 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     private readonly int _destinationConnectionIdLength;
     private readonly ReadKeys?[] _keys = new ReadKeys?[4];
     private readonly ulong[] _largestReceived = new ulong[PacketNumberSpaceCount];
+
+    // RFC 9000 s12.3's duplicate suppression, one sliding window per packet number space.
+    //
+    // THREE ARRAYS AND NOT ONE, because packet number 0 is legal and a zeroed
+    // <see cref="_duplicateWindowHighest"/> cannot be told from "0 has been processed".
+    // s12.3's test is "certain that it has not processed another packet with the same packet
+    // number", and certainty about the empty case is what the flag carries.
+    //
+    // <see cref="_duplicateWindow"/>'s bit i means "highest - i has been processed", so bit 0
+    // is always set once anything has been. UInt128 rather than ulong doubles the window for
+    // one word of state and no extra branch.
+    private readonly ulong[] _duplicateWindowHighest = new ulong[PacketNumberSpaceCount];
+    private readonly UInt128[] _duplicateWindow = new UInt128[PacketNumberSpaceCount];
+    private readonly bool[] _duplicateWindowStarted = new bool[PacketNumberSpaceCount];
     private byte[] _scratch = [];
     private bool _disposed;
 
@@ -243,6 +257,14 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// Appendix A.3 decoder needs, and what task 8 acknowledges against.
     /// </summary>
     internal ulong LargestReceived(TlsQuicEncryptionLevel level) => _largestReceived[SpaceOf(level)];
+
+    /// <summary>Gets how many authenticated packets this receiver has discarded under RFC 9000
+    /// s12.3 because their packet number had already been processed in that space.</summary>
+    /// <remarks>A RUNNING TOTAL ACROSS THE CONNECTION, not a per-datagram figure, and it counts
+    /// into <see cref="TlsQuicReceiveResult.Discarded"/> as well. Non-zero is not by itself a
+    /// fault: s12.3 exists because networks duplicate datagrams. It rising steadily while
+    /// nothing else does is the shape worth reading.</remarks>
+    internal int DuplicatesSuppressed { get; private set; }
 
     /// <summary>Whether read keys are installed at <paramref name="level"/>.</summary>
     internal bool HasReadKeys(TlsQuicEncryptionLevel level) => _keys[(int)level] is not null;
@@ -717,6 +739,40 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             _largestReceived[space] = packetNumber;
         }
 
+        if (IsDuplicate(space, packetNumber))
+        {
+            // COUNTED AS DISCARDED, WITH ITS OWN RUNNING TOTAL BESIDE IT. Every packet this
+            // method sees has to land in exactly one of `processed` or `discarded` - callers
+            // assert on the sum, and a packet in neither reads as a packet that never arrived.
+            // s12.2 already calls dropping a packet without processing it "discarding", so the
+            // bucket is right; DuplicatesSuppressed exists so that a duplicate is still
+            // distinguishable from a failed decrypt, which is the same argument
+            // DiscardedForMissingKeys carries and it is not carried on the per-datagram result
+            // for the same reason it is: no caller has a decision to make per datagram.
+            discarded++;
+            DuplicatesSuppressed++;
+
+            // s12.3: "A receiver MUST discard a newly unprotected packet unless it is certain
+            // that it has not processed another packet with the same packet number from the
+            // same packet number space.  Duplicate suppression MUST happen after removing
+            // packet protection for the reasons described in Section 9.5 of [QUIC-TLS]."
+            //
+            // AFTER TryOpen AND AFTER THE s17.1 LARGEST UPDATE, WHICH IS BOTH MUSTs AT ONCE.
+            // Suppressing before the AEAD would let an off-path sender who guessed a packet
+            // number silence the real one, which is the attack s12.3's second sentence points
+            // at. The largest received is updated first for the opposite reason: s17.1 defines
+            // it over "a successfully authenticated packet", and a duplicate is authenticated -
+            // holding it back would move the packet-number decoding window on the next packet.
+            //
+            // NOT AN ERROR, AND NOT PROCESSED EITHER. `processed` is not incremented below,
+            // so a duplicate does not restart s10.1's idle timer and does not arm s17.2.5.2's
+            // "after the client has received and processed" Retry rule. It is also not
+            // acknowledged: no frame reaches the handler, so TlsQuicAckTracker never sees the
+            // number - which is right, because the original occurrence already put it in an
+            // ACK range.
+            return null;
+        }
+
         if (plaintext.Length == 0)
         {
             // RFC 9000 s12.4: "The payload of a packet that contains frames MUST contain
@@ -756,6 +812,66 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
 
         processed++;
         return null;
+    }
+
+    /// <summary>Reports whether this packet number has already been processed in this space,
+    /// recording it when it has not.</summary>
+    /// <remarks>
+    /// <para>THE WINDOW HAS A CEILING AND IT IS STATED RATHER THAN HIDDEN: 128 packets below
+    /// the highest processed. A packet further back than that is treated as a duplicate and
+    /// discarded, which is s12.3's own suggested shape - "the data required for detecting
+    /// duplicates can be limited by maintaining a minimum packet number below which all
+    /// packets are immediately dropped" - and it is conservative in the direction s12.3 asks
+    /// for, since its rule is "unless it is CERTAIN that it has not processed" one.</para>
+    /// <para>THE COST OF THAT CEILING IS A RETRANSMIT, NOT DATA LOSS. A genuine packet
+    /// reordered more than 128 behind is dropped and never acknowledged, so the peer's loss
+    /// detection resends its frames in a new packet with a new number. Raising the window is a
+    /// wider integer here and nothing else; 128 is chosen because measured QUIC reordering
+    /// sits far below it and the state is one word per space.</para>
+    /// <para>THE MAXIMUM SHIFT IS GUARDED because C# shift counts are taken modulo the operand
+    /// width: <c>window &lt;&lt; 128</c> would be <c>window &lt;&lt; 0</c> and would keep every
+    /// stale bit rather than clearing them. A jump of 128 or more clears the window
+    /// outright.</para>
+    /// </remarks>
+    private bool IsDuplicate(int space, ulong packetNumber)
+    {
+        const int WindowBits = 128;
+
+        if (!_duplicateWindowStarted[space])
+        {
+            _duplicateWindowStarted[space] = true;
+            _duplicateWindowHighest[space] = packetNumber;
+            _duplicateWindow[space] = UInt128.One;
+            return false;
+        }
+
+        var highest = _duplicateWindowHighest[space];
+
+        if (packetNumber > highest)
+        {
+            var advance = packetNumber - highest;
+            _duplicateWindow[space] = advance >= WindowBits
+                ? UInt128.Zero
+                : _duplicateWindow[space] << (int)advance;
+            _duplicateWindow[space] |= UInt128.One;
+            _duplicateWindowHighest[space] = packetNumber;
+            return false;
+        }
+
+        var back = highest - packetNumber;
+        if (back >= WindowBits)
+        {
+            return true;
+        }
+
+        var bit = UInt128.One << (int)back;
+        if ((_duplicateWindow[space] & bit) != UInt128.Zero)
+        {
+            return true;
+        }
+
+        _duplicateWindow[space] |= bit;
+        return false;
     }
 
     // RFC 9000 s12.2's receiver half: the first packet in the datagram sets the
