@@ -413,3 +413,4 @@ static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byt
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Literal(ulong id, System.ReadOnlySpan<byte> value) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Placed(ulong id) -> TlsClient.TlsQuicTransportParameterEntry!
+static TlsClient.TlsRequestOptions.HeaderNamesOf(System.Net.Http.HttpRequestMessage! request) -> string![]!
