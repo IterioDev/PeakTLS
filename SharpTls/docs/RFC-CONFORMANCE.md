@@ -1,27 +1,51 @@
 # Client-side MUST conformance audit
 
-**Complete.** All 508 client-relevant MUST sentences from the pinned RFC extracts carry a
-verdict. **19 sentences are MISSING**, grouped into **8 code-level findings** listed under
-"Handoff" below — start there.
+**Complete, and the findings are fixed.** All 508 client-relevant MUST sentences from the
+pinned RFC extracts carry a verdict, and **0 are MISSING**. The seven code-level findings the
+audit opened have all been closed; the eighth was a deliberate non-goal and remains one.
 
 | | |
 |---|---|
 | MUST sentences dispositioned | 508 |
-| MISSING | 19 sentences / 8 findings |
+| MISSING | 0 |
 | Individually traced to `file:line` | 102 |
 | Subsystem-verified (weaker — read the caveat) | 403 |
 | Extractor artefacts, not normative | 3 |
-| Defects found and already fixed | 1 (QUIC `legacy_session_id`, commit `7b5c663`) |
+| Defects found and fixed | 8 (see "What the audit changed") |
 | False positives caught before entry | 5 |
 
-**The one finding that can break a live connection is key update (finding 1).** Everything else
-is LATENT or a deliberate non-goal. A conforming peer does not trigger any of them, which is why
-the live HTTP/3 tests against Google, Cloudflare and Spotify all pass.
+**The remaining gap is confidence, not conformance.** 102 sentences were individually located
+in the code; 403 were verified at subsystem level — the code implementing that class of rule was
+read and named, but the individual sentence was not traced. `scripts/must-checklist.json` carries
+the level per sentence. Do not treat a subsystem verdict as a traced one; the work this document
+leaves behind is converting the second number into the first, one rule at a time.
 
-**Confidence is not uniform and the difference matters.** 102 sentences were individually
-located in the code; 403 were verified at subsystem level — the code implementing that class of
-rule was read and named, but the individual sentence was not traced. `scripts/must-checklist.json`
-carries the level per sentence. Do not treat a subsystem verdict as a traced one.
+## What the audit changed
+
+Eight defects, in the order they were fixed. The **Finding** column is the number used in the
+body below, so the two can be read against each other; the `legacy_session_id` defect predates
+the numbering because it was found and fixed before the audit began.
+
+**Three of these were not latent.** The `legacy_session_id` violation broke every handshake
+against a BoringSSL peer before a request could be sent. The datagram rules were live because
+the shipped presets invite datagrams. And a server exercising RFC 9001 §6 — which it may do at
+any point after the handshake is confirmed — was answered with a connection error. The rest
+require a peer to misbehave first.
+
+| Finding | Rule | Was | Commit |
+|---|---|---|---|
+| — | RFC 9001 §8.4 — QUIC forbids TLS compatibility mode, so `legacy_session_id` MUST be empty | 32 random bytes, and every BoringSSL peer answered alert 47 | `7b5c663` |
+| 3 | RFC 9114 §7.2.7 — a client MUST treat a received MAX_PUSH_ID as H3_FRAME_UNEXPECTED | Parsed and accepted: it shares CANCEL_PUSH's payload shape, so one arm handled both and it inherited the wrong rule | `2a4faef` |
+| 7 | RFC 9114 §7.2.5 — a PUSH_PROMISE above the advertised push ID is H3_ID_ERROR | Skipped. No push ID was ever advertised, so every one is above it — the rule binds *because* server push is unimplemented | `2a4faef` |
+| 5 | RFC 9000 §19.4, §19.5, §19.13 — RESET_STREAM, STOP_SENDING and STREAM_DATA_BLOCKED against the stream's direction; §19.16 RETIRE_CONNECTION_ID | All four fell into the frame switch's default arm. Three of the stream rules were marked COMPLIANT at subsystem confidence — true of `TlsQuicStreams.cs`, false of the dispatch | `2a4faef` |
+| 6 | RFC 9221 §3 and RFC 9297 §2.1 — DATAGRAM receive validation at both layers | Parsed, payload dropped, never validated, while the shipped presets advertise `max_datagram_frame_size` = 65536 and SETTINGS_H3_DATAGRAM = 1 | `d6ffad4` |
+| 4 | RFC 9000 §12.3 — duplicate suppression after removing packet protection | Only the largest packet number per space was kept; a duplicated datagram was walked twice, re-delivering its ACK | `2033d59` |
+| 1, 2 | RFC 9001 §6 — key update, and §6.6's AEAD usage counts | Out of scope by declaration: a flipped Key Phase bit was answered with KEY_UPDATE_ERROR, so a conforming server rotating keys had the connection closed on it | `e6cb025` |
+
+**Finding 8 was not fixed and should not be.** RFC 9218 §7.2's PRIORITY_UPDATE is absent. No MUST
+compels a client to send one, and emitting priority signals that no real target sends would make
+this client MORE distinguishable, which is the opposite of the library's purpose. Do not
+"fix" it without a capture showing the impersonation target sends them.
 
 ## What this audits, and what it does not
 
@@ -68,6 +92,13 @@ MISSING verdict in this document therefore requires the failed search patterns t
 a reader should treat any MISSING without them as unverified.
 
 ## Findings
+
+**Every finding below is FIXED.** The diagnosis is kept as written - what the defect was, how it
+was found, and which searches missed it - because that is what a reader needs in order to judge
+the verdicts that were NOT findings. Each carries the commit that closed it and a note of what
+would undo it. The one exception is finding 8, RFC 9218's PRIORITY_UPDATE, which is a deliberate
+non-goal and is still absent on purpose.
+
 
 ### RFC 8446 (TLS 1.3) — ClientHello and extension layer
 
@@ -137,7 +168,7 @@ Packet protection, second pass:
 | 5.4.2 | "sample of ciphertext is taken starting from an offset of 4 bytes", 16 bytes long | `Quic/TlsQuicHeaderProtection.cs:156` | COMPLIANT |
 | 5.2 | Initial secrets derive from the ORIGINAL destination connection ID | `Quic/TlsQuicConnection.cs:2092` | COMPLIANT |
 | 8.x | QUIC forbids the TLS `KeyUpdate` message | `Quic/CustomTlsQuicClient.cs:933` | COMPLIANT |
-| **5.3** | **"An endpoint MUST initiate a key update (Section 6) prior to exceeding any limit set for the AEAD that is in use."** | **NOT-FOUND** | **MISSING** |
+| **5.3** | **"An endpoint MUST initiate a key update (Section 6) prior to exceeding any limit set for the AEAD that is in use."** | `Quic/TlsQuicConnection.cs` `ApplyKeyUpdateIfNeeded` | **FIXED** `e6cb025` |
 
 **The Appendix A test vectors are asserted.** The RFC's A.1 client destination connection ID
 `8394c8f03e515708` appears in `TlsQuicHeaderProtectionTests`, `TlsQuicPacketBuilderTests`,
@@ -150,7 +181,11 @@ The DCID row is another avoided trap. Initial keys are pinned to
 `_destinationConnectionId`, so they do not drift when the server supplies a new connection ID.
 Recomputing them per packet is a bug the pcap analyser in `scripts/` originally had.
 
-#### FINDING 1 — key update is not implemented (MISSING)
+#### FINDING 1 — key update was not implemented (FIXED, `e6cb025`)
+
+**Fixed.** `Quic/TlsQuicPacketReceiver.cs` now holds RFC 9001 §6.5's three generations and
+`Quic/TlsQuicKeySet.cs` derives them with the version-dependent `quic ku` label. What follows
+is the diagnosis as it stood.
 
 Searched: `"ku"` and `+ "ku"` under `src/SharpTls/Quic` (no hits), `KeyPhase` across `src`
 (17 hits, all header bit plumbing), and `Next|Update|Phase|Rotate` in `Quic/TlsQuicKeySet.cs`.
@@ -177,7 +212,10 @@ actually initiates an update. Short request/response connections rarely see one,
 the live HTTP/3 tests against Google, Cloudflare and Spotify all pass — but the client has no
 defence if a peer chooses to.
 
-#### FINDING 2 — AEAD packet counts are not tracked (MISSING)
+#### FINDING 2 — AEAD packet counts were not tracked (FIXED, `e6cb025`)
+
+**Fixed with finding 1**, which is what the diagnosis below predicted: there is no action to
+take on reaching a confidentiality limit without a key update to take it.
 
 Searched: `confidentialityLimit`, `integrityLimit`, `AeadLimit`, `encryptedPacketCount`,
 `2^23`, `8388608`, `aeadConfidentiality` across `src` — no hits.
@@ -227,10 +265,13 @@ mistaken for one.
 | 7.2.8 | Unknown and reserved frame types are ignored | `Quic/TlsQuicHttp3Streams.cs:720` | COMPLIANT |
 | RFC 9297 §2.1.1 | SETTINGS_H3_DATAGRAM with a value other than 0 or 1 is H3_SETTINGS_ERROR | `Quic/TlsQuicHttp3Frames.cs:494` | COMPLIANT |
 | 7.2.7 | MAX_PUSH_ID on a stream other than the control stream is H3_FRAME_UNEXPECTED | `Quic/TlsQuicHttp3Request.cs:1637` | COMPLIANT |
-| **7.2.7** | **"A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."** (control stream) | `Quic/TlsQuicHttp3Streams.cs:716` | **MISSING** |
-| **7.2.5** | **"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push ID than the client has advertised as a connection error of H3_ID_ERROR."** | `Quic/TlsQuicHttp3Request.cs` default arm | **MISSING** |
+| **7.2.7** | **"A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."** (control stream) | `Quic/TlsQuicHttp3Streams.cs` MaxPushId arm | **FIXED** `2a4faef` |
+| **7.2.5** | **"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push ID than the client has advertised as a connection error of H3_ID_ERROR."** | `Quic/TlsQuicHttp3Request.cs` PushPromise arm | **FIXED** `2a4faef` |
 
-#### FINDING 3 — a server's MAX_PUSH_ID is accepted instead of rejected (MISSING)
+#### FINDING 3 — a server's MAX_PUSH_ID was accepted instead of rejected (FIXED, `2a4faef`)
+
+**Fixed.** The arm is split. Do not merge it back: CANCEL_PUSH and MAX_PUSH_ID share a
+payload shape and have opposite rules, which is what produced this in the first place.
 
 RFC 9114 §7.2.7, verbatim from the extract: *"A server MUST NOT send a MAX_PUSH_ID frame. A
 client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type
@@ -266,7 +307,10 @@ laxness-on-inbound class that this audit exists to find: the client is more perm
 specification allows, which is exactly what a peer probing for implementation quirks would
 measure.
 
-#### FINDING 7 — PUSH_PROMISE push IDs are never validated (MISSING)
+#### FINDING 7 — PUSH_PROMISE push IDs were never validated (FIXED, `2a4faef`)
+
+**Fixed.** The push ID is read first so a truncated payload is H3_FRAME_ERROR rather than an
+identifier problem it does not have.
 
 RFC 9114 s7.2.5: *"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger
 push ID than the client has advertised as a connection error of H3_ID_ERROR."*
@@ -368,7 +412,10 @@ naming the test that kills a specific deletion shows the rule is not merely pres
 bearing. Retry handling and Version Negotiation are the best-evidenced areas in the codebase.
 
 
-#### FINDING 4 — received packets are not duplicate-suppressed (MISSING)
+#### FINDING 4 — received packets were not duplicate-suppressed (FIXED, `2033d59`)
+
+**Fixed** with a 128-packet sliding window per space, consulted after the AEAD and after the
+§17.1 largest-received update. Both positions are rules; see the handoff.
 
 RFC 9000 §12.3, from `rfc9000-section12-packets-and-frames.txt`: *"A receiver MUST discard a
 newly unprotected packet unless it is certain that it has not processed another packet with the
@@ -474,7 +521,12 @@ Open question for the code: whether the padding target should be measured agains
 datagram rather than the QUIC payload when a header-adding transport is in use, so that a
 1200-byte target produces 1200 bytes on the wire instead of 1200 + header.
 
-### FINDING 5 — unhandled frame types skip their receive-side MUSTs (a cluster)
+### FINDING 5 — unhandled frame types skipped their receive-side MUSTs (FIXED, `2a4faef`)
+
+**Fixed.** RESET_STREAM, STOP_SENDING and STREAM_DATA_BLOCKED route to
+`TlsQuicStreamSet.TryReceiveStreamStateSignal`; RETIRE_CONNECTION_ID has an arm of its own.
+Three of the four rules below carried a COMPLIANT verdict at subsystem confidence when this
+was written - true of `TlsQuicStreams.cs`, false of the dispatch that reaches it.
 
 `Quic/TlsQuicConnection.cs` dispatches on frame type at `:1680-1782` and handles exactly eight:
 CRYPTO, ACK, HANDSHAKE_DONE, CONNECTION_CLOSE, PATH_CHALLENGE, STREAM, MAX_DATA, MAX_STREAM_DATA.
@@ -487,10 +539,10 @@ validation DOES exist for the handled frames — `Quic/TlsQuicStreams.cs:1410`, 
 
 | § | Rule | Binds? | Verdict |
 |---|---|---|---|
-| 19.16 | "An endpoint that provides a zero-length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION" | **Yes** — this client's source connection ID length is 0 | MISSING |
-| 19.16 | A RETIRE_CONNECTION_ID sequence number above any previously sent is FRAME_ENCODING_ERROR | Yes | MISSING |
-| 19.16 | The sequence number MUST NOT refer to the connection ID of the packet carrying it | Yes | MISSING |
-| 19.13 | "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR" | Yes | MISSING, self-declared in code |
+| 19.16 | "An endpoint that provides a zero-length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION" | **Yes** — at `SourceConnectionIdLength`'s default of 0. The knob permits non-zero, so the fix tests the length rather than assuming it | **FIXED** `2a4faef` |
+| 19.16 | A RETIRE_CONNECTION_ID sequence number above any previously sent is PROTOCOL_VIOLATION (this row said FRAME_ENCODING_ERROR and was wrong; §19.16 says PROTOCOL_VIOLATION) | Yes | **FIXED** `2a4faef` |
+| 19.16 | The sequence number MUST NOT refer to the connection ID of the packet carrying it | The MUST NOT binds a SENDER and this client never sends the frame; §19.16's MAY is the only receive-side action and is taken | **FIXED** `2a4faef` |
+| 19.13 | "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR" | Yes | **FIXED** `2a4faef` |
 | 19.15 | NEW_CONNECTION_ID received while sending a zero-length DESTINATION connection ID is PROTOCOL_VIOLATION | **No** — this client's destination connection ID is 8 bytes | N-A |
 
 **The §19.13 row was already known to the codebase.** The `default:` arm's own comment names it:
@@ -526,11 +578,17 @@ pinned by `TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNever
 the RFC 9221 §3 sentence quoted beside it. Every send-side DATAGRAM MUST is therefore satisfied
 by construction.
 
-The receive side is NOT: RFC 9221 §5 requires terminating with PROTOCOL_VIOLATION on a DATAGRAM
-frame received without having advertised support, and RFC 9297 §2.1 requires H3_DATAGRAM_ERROR
-(0x33) for a payload too short to parse the Quarter Stream ID. Neither was located. Recorded in
-the checklist as MISSING, severity LATENT — the client advertises `max_datagram_frame_size` only
-when configured to, and a server sending unsolicited DATAGRAM frames is misbehaving.
+The receive side was NOT, and is now (**FIXED**, `d6ffad4`). RFC 9221 §3 requires
+PROTOCOL_VIOLATION on a DATAGRAM frame received without having advertised support and on one
+larger than the advertised size; RFC 9297 §2.1 requires H3_DATAGRAM_ERROR (0x33) for a payload
+too short to parse the Quarter Stream ID and for a value above 2^60-1. None was located.
+
+**THE SEVERITY NOTE HERE WAS TOO COMFORTABLE AND IS CORRECTED RATHER THAN DELETED.** It read
+that the client "advertises `max_datagram_frame_size` only when configured to, and a server
+sending unsolicited DATAGRAM frames is misbehaving". The shipped Brave 151 preset advertises
+`max_datagram_frame_size` = 65536 and the capture settings send SETTINGS_H3_DATAGRAM = 1,
+because the client being impersonated does — so a server sending DATAGRAM frames on that
+invitation is conforming, not misbehaving, and these rules were live rather than latent.
 
 ### Subsystem sweep — the remaining buckets
 
@@ -611,10 +669,10 @@ is why it is a note rather than a finding. If legacy profiles ever return, make
 
 | Confidence | Count | Meaning |
 |---|---|---|
-| `verified` | 101 | The sentence was individually located in the code, with `file:line` |
-| `subsystem` | 404 | The subsystem implementing that class of rule was read and named, but this sentence was not individually traced |
+| `verified` | 102 | The sentence was individually located in the code, with `file:line` |
+| `subsystem` | 403 | The subsystem implementing that class of rule was read and named, but this sentence was not individually traced |
 | `extractor` | 3 | Not a normative sentence — a fragment the splitter cut out of a table or figure |
-| **MISSING** | 16 | Recorded as a finding above |
+| **MISSING** | 0 | Every finding is fixed; the 19 sentences that were MISSING now carry the code that implements them |
 
 **Do not read `subsystem` as `verified`.** It is a real reading of real code with the evidence
 named, and it is weaker than a traced sentence. Anyone tightening a specific rule should
@@ -631,11 +689,11 @@ distinction survives this document.
 
 ## Attrition
 
-All **508** client-relevant MUST sentences are dispositioned. **102** were individually traced
-to `file:line`; **403** are subsystem-verified; 3 were extractor artefacts rather than normative
-text. **19** are MISSING, grouped into the 8 findings in the handoff below.
+All **508** client-relevant MUST sentences are dispositioned and **0** are MISSING.
+**102** are individually traced to `file:line`; **403** are subsystem-verified; 3 were
+extractor artefacts rather than normative text.
 
-**Five findings were nearly filed in error and are not in that count**, each because a grep
+**Five findings were nearly filed in error and are not in any count above**, each because a grep
 shaped around the words a rule might use returned nothing while the code implemented it under a
 different spelling:
 
@@ -647,13 +705,14 @@ different spelling:
 - RFC 9000 §12.4's empty-payload check — survived NINE patterns, found only by reading the
   receive path. It lives in a returned tuple rather than a thrown error or a named guard.
 
-That is five near-misses against 102 traced confirmations. Weigh it when trusting any MISSING
-verdict here, and weigh it twice before adding one.
+That is five near-misses against 102 traced confirmations. Weigh it before adding a MISSING
+verdict, and weigh it twice before trusting a subsystem one.
 
-One defect was found and fixed during the audit rather than recorded: the QUIC
-`legacy_session_id` violation, commit `7b5c663`, which had every BoringSSL peer rejecting the
-handshake with alert 47 before any request. It is the only finding so far that was
-BLOCKS-INTEROP rather than latent.
+**One near-miss came from the opposite direction and is the reason the confidence levels are
+kept apart.** Three of the rules fixed under finding 3 — RFC 9000 §19.4's, §19.5's two —
+carried a COMPLIANT verdict at subsystem confidence when the fixing began. They were compliant
+in `TlsQuicStreams.cs`, which the sweep read, and unreachable from the frame dispatch, which it
+did not. A subsystem verdict can be true of the file and false of the path that reaches it.
 
 ---
 
@@ -662,59 +721,61 @@ BLOCKS-INTEROP rather than latent.
 Read this section first. Everything needed to act is here; nothing depends on the session that
 wrote it.
 
-### The open findings, in fix order
+### What is closed, and how each fix is pinned
 
-**1. Key update is not implemented.** `Quic/TlsQuicKeySet.cs:436` states it is out of scope and
-builds every key set with `keyPhase: false`; no `quic ku` secret can be derived. RFC 9001 s6.2
-requires a client to update its send keys when a peer initiates one. The Key Phase bit is
-already parsed and written (`Quic/TlsQuicPacketHeader.cs:89`, `:133`, `:409`, `:463`), so the
-wire half exists and the key-schedule half does not. Fix: derive the next generation with the
-`quic ku` label in `Quic/TlsQuicSecrets.cs` (the prefix machinery at `:109` already composes
-version-dependent labels), retain the previous key set for reordered packets per s6.3, and flip
-the phase on send. Pinned text:
-`docs/superpowers/specs/reference-captures/rfc9001-section6-key-update.txt`.
-**This is the only finding that can break a live connection.**
+Every finding this audit opened is fixed and carries a test that fails without it. The table
+under "What the audit changed" above names the commits; what follows is what a reader needs in
+order to not undo one by accident.
 
-**2. AEAD packet counts are not tracked.** RFC 9001 s6.6 requires counting encrypted packets per
-key set and stopping at the confidentiality limit. Nothing counts. Depends on finding 1 - there
-is no action to take on reaching a limit without key update. Fix both together.
+**RFC 9001 §6 key update** — `Quic/TlsQuicPacketReceiver.cs` holds §6.5's three generations and
+selects between them by §6.5's own rule. Two things there look redundant and are not. The
+FALLBACK ATTEMPT after the first candidate fails exists solely so §6.4's ordering violation can
+be seen at all: a packet that opens with the previous keys above the current phase's lowest
+number is KEY_UPDATE_ERROR, and a receiver that stopped at one attempt could never distinguish
+that from a forgery. The `_awaitingPeerKeyPhaseCatchUp` FLAG covers a state §6.5 does not name —
+after a locally initiated update the peer is still at the old phase, which is byte-for-byte
+identical to the peer initiating one. Deleting either is a silent regression that no obvious
+test covers; both are tested by name.
 
-**3. MAX_PUSH_ID is accepted on the control stream.** `Quic/TlsQuicHttp3Streams.cs:714-717`.
-Two-line fix: split the case so `MaxPushId` sets `error = H3FrameUnexpected; return false;`
-while `CancelPush` keeps the existing varint parse. Do NOT merge them again - they share a
-payload shape and have opposite rules, which is exactly what produced the bug.
+`Quic/TlsQuicKeySet.cs` keeps the 1-RTT traffic secrets because a derived key cannot be walked
+back to the secret that made it, and carries the header protection key across generations
+unchanged — §6.1: "The header protection key is not updated." Deriving a fresh one there would
+leave the peer unable to remove header protection at all, and the symptom would be every
+subsequent packet silently discarded rather than an error.
 
-**4. Received packets are not duplicate-suppressed.** `Quic/TlsQuicPacketReceiver.cs:715` keeps
-only the largest packet number per space and `:754` dispatches frames unconditionally. RFC 9000
-s12.3 requires discarding an already-processed packet number, after removing protection. Fix: a
-per-space sliding window of seen numbers, consulted before the frame loop. The ACK tracker
-already deduplicates ACK RANGES and is mutation-tested - that is a different thing, do not treat
-it as this.
+**RFC 9001 §6.6's limits** are pinned as FIGURES rather than as branches:
+`TheAeadLimitsAreTheFiguresSection66States` asserts 2^23 / 2^62 confidentiality and 2^52 / 2^36
+integrity, with the two ciphers deliberately opposite ways round. Reaching a limit in a test is
+not feasible, and a limit made injectable to fake it would be a knob no shipped path uses; the
+real risk in those four numbers is transcription, which is what is tested.
 
-**5. Unhandled frame types skip their receive-side MUSTs.** `Quic/TlsQuicConnection.cs:1791`
-default arm. Add dispatch for RETIRE_CONNECTION_ID (PROTOCOL_VIOLATION, because this client
-provides a zero-length connection ID), and for the STREAM_DATA_BLOCKED / RESET_STREAM /
-STOP_SENDING stream-state rules. `Quic/TlsQuicStreams.cs` already raises STREAM_STATE_ERROR for
-the handled frames, so the machinery exists — this is wiring, not new concepts. The default
-arm's comment already names the STREAM_DATA_BLOCKED case; start there.
+**RFC 9000 §12.3 duplicate suppression** uses a 128-packet sliding window per space. The ceiling
+is stated rather than hidden: a packet further back is discarded without certainty, which is the
+shape §12.3 itself suggests, and costs a retransmit rather than data.
 
-**6. QUIC/HTTP-3 datagram receive validation.** RFC 9221 §5 and RFC 9297 §2.1. Sending is
-already refused outright and needs no work.
+**RFC 9114 §7.2.7 and §7.2.5** — MAX_PUSH_ID and CANCEL_PUSH share a payload shape and have
+opposite rules, which is exactly what produced the original bug. Do not merge those arms again,
+however identical they look. PUSH_PROMISE binds BECAUSE server push is unimplemented: no push ID
+was ever advertised, so every one is above the maximum. That inversion is easy to get backwards.
 
-**7. PUSH_PROMISE push IDs are not validated.** `Quic/TlsQuicHttp3Request.cs` default arm. The
-client never advertises a limit, so any PUSH_PROMISE is H3_ID_ERROR.
+**RFC 9221 §3 and RFC 9297 §2.1** — `TlsQuicFrames.TryReadDatagram` now carries the payload and
+the frame's whole encoded length out. The length cannot be recomputed downstream: the Length
+field is a varint and RFC 9000 §16 requires the minimal encoding only of frame TYPES, so a peer
+may spend four bytes on a length that fits in one and the frame is still legal.
 
-**8. HTTP/3 PRIORITY_UPDATE (RFC 9218 s7.2) is absent.** Recorded as MISSING against the spec but
-a deliberate non-goal: no MUST compels a client to send one, and emitting priority signals no
-real target sends would make this client MORE distinguishable. Do not "fix" without a capture
-showing the impersonation target sends them.
+### Still open, and neither is a conformance verdict
 
-### Also open, not a conformance verdict
-
-The SOCKS5 WSAEMSGSIZE field report, recorded under the RFC 9000 s14 heading above. Not
+**The SOCKS5 WSAEMSGSIZE field report**, recorded under the RFC 9000 §14 heading above. Not
 reproduced locally; loopback's 65535-byte MTU means a local test cannot settle it. The open code
 question is whether the padding target should be measured against the WIRE datagram rather than
 the QUIC payload when a header-adding transport is in use.
+
+**The live interop tests do not run.** `TlsClient-main/tests/TlsClient.Tests/Http3BoringSslInteropTests.cs`
+gates on `TLSCLIENT_LIVE_TESTS=1` and returns early otherwise — so it PASSES rather than skips,
+and it passed in about a second under three different ways of setting that variable, which is
+too fast for four hosts and a handshake each. Live HTTP/3 was re-verified for this work by a
+throwaway console probe instead (Google 200, Cloudflare 200, `gew1-spclient.spotify.com` 404 on
+`/` with the handshake complete). A test that cannot fail is worth either fixing or deleting.
 
 ### Rules for editing this document
 
@@ -726,26 +787,30 @@ the QUIC payload when a header-adding transport is in use.
   it under a different spelling; one survived nine patterns and was found only by reading the
   path.
 - Recount the tables before changing the attrition line. It has been wrong twice.
+- A test that pinned behaviour this document changed is INVERTED, never deleted, and says at its
+  assertion what it used to claim and why. Eight of them now do. A reader looking for when
+  something changed should land on the assertion rather than on a git log.
 
 ### The checklist artefact
 
-`scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from
-the pinned extracts. Each carries:
+`scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted
+from the pinned extracts. Each carries:
 
 - `src` — the pinned extract it came from
 - `bucket` — subsystem grouping
 - `verdict` — `COMPLIANT`, `MISSING`, `N-A-server`, `N-A-nongoal`, `N-A-nonbinding`,
   `N-A-neversends`, or `N-A-artefact`
 - `confidence` — `verified` (102), `subsystem` (403), or `extractor` (3)
-- `evidence` — for subsystem verdicts, the code that was read
+- `evidence` — the code that was read, and for the 19 rules fixed by this work, the code
+  that now implements them
 
-Filter it rather than re-reading this document. The 19 MISSING sentences are the work; the 8
-findings above group them.
+Filter it rather than re-reading this document.
 
-**To raise confidence on a specific rule**, find its sentence in the checklist, trace it to
+**The remaining work is confidence.** Find a sentence carrying `subsystem`, trace it to
 `file:line`, and change `confidence` to `verified` with the location in `evidence`. That is the
 increment this audit leaves behind: converting subsystem verdicts to traced ones, one rule at a
-time, without re-deriving anything.
+time, without re-deriving anything. Three rules that were subsystem-COMPLIANT turned out to be
+unreachable from the dispatch that should have reached them, so this is not bookkeeping.
 
 ### Two facts that change how the buckets read
 

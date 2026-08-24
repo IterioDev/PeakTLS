@@ -1350,8 +1350,9 @@
   "text": "Duplicate suppression MUST happen after removing packet protection for the reasons described in Section 9.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicPacketReceiver.cs IsDuplicate + the s12.3 branch after TryOpen"
  },
  {
   "src": "rfc9000-section12-packets-and-frames.txt",
@@ -1873,9 +1874,9 @@
   "text": "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR.",
   "bucket": "streams",
   "checked": true,
-  "verdict": "MISSING",
+  "verdict": "COMPLIANT",
   "confidence": "verified",
-  "evidence": "TlsQuicConnection.cs:1791 default arm, self-declared; finding 6"
+  "evidence": "Quic/TlsQuicStreams.cs TryReceiveStreamStateSignal, dispatched from TlsQuicConnection.cs"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
@@ -1953,24 +1954,27 @@
   "text": "Receipt of a RETIRE_CONNECTION_ID frame containing a sequence number greater than any previously sent to the peer MUST be treated as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "migration",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs RetireConnectionId arm (never-issued half)"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "The sequence number specified in a RETIRE_CONNECTION_ID frame MUST NOT refer to the Destination Connection ID field of the packet in which the frame is contained.",
   "bucket": "migration",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs RetireConnectionId arm - s19.16's MAY exercised; the MUST NOT binds a sender and this client never sends the frame"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "An endpoint that provides a zero- length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "migration",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs RetireConnectionId arm (zero-length half)"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
@@ -2461,8 +2465,9 @@
   "text": "Similarly, a packet that appears to trigger a key update but cannot be unprotected successfully MUST be discarded.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicPacketReceiver.cs - both candidate generations fail, discarded and counted"
  },
  {
   "src": "rfc9001-section5-packet-protection.txt",
@@ -2548,8 +2553,9 @@
   "text": "An endpoint MUST NOT initiate a subsequent key update unless it has received an acknowledgment for a packet that was sent protected with keys from the current key phase.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ApplyKeyUpdateIfNeeded gate on _lowestApplicationPacketNumberInWritePhase"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -2581,24 +2587,27 @@
   "text": "Timing of Receive Key Generation Endpoints responding to an apparent key update MUST NOT generate a timing side-channel signal that might indicate that the Key Phase bit was invalid (see Section 9.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicKeySet.cs ArmNextReadKeys - generation n+1 derived at install, never on receipt"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
   "text": "For this reason, endpoints MUST be able to retain two sets of packet protection keys for receiving packets: the current and the next.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicPacketReceiver.cs _nextApplicationKeys and _previousApplicationKeys"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
   "text": "Packets with higher packet numbers MUST be protected with either the same or newer packet protection keys than packets with lower packet numbers.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicPacketReceiver.cs - previous keys opening above the current phase's lowest raises KEY_UPDATE_ERROR"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -2621,8 +2630,9 @@
   "text": "If the total number of encrypted packets with the same key exceeds the confidentiality limit for the selected AEAD, the endpoint MUST stop using those keys.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ApplicationPacketsProtectedWithCurrentKeys + ConfidentialityLimitFor"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -2636,8 +2646,9 @@
   "text": "If a key update is not possible or integrity limits are reached, the endpoint MUST stop using the connection and only send stateless resets in response to receiving packets.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ApplyKeyUpdateIfNeeded - AeadLimitReached when CanUpdateKeys is false"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -2653,8 +2664,9 @@
   "text": "If the total number of received packets that fail authentication within the connection, across all keys, exceeds the integrity limit for the selected AEAD, the endpoint MUST immediately close the connection with a connection error of type AEAD_LIMIT_REACHED and not process any more packets.",
   "bucket": "quic-crypto",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ThrowIfIntegrityLimitReached + TlsQuicPacketReceiver.AuthenticationFailures"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -3727,8 +3739,8 @@
   "bucket": "push",
   "checked": true,
   "confidence": "verified",
-  "verdict": "MISSING",
-  "evidence": "TlsQuicHttp3Request.cs default arm; finding 7"
+  "verdict": "COMPLIANT",
+  "evidence": "Quic/TlsQuicHttp3Request.cs PushPromise arm"
  },
  {
   "src": "rfc9114-section7-framing-layer.txt",
@@ -3793,8 +3805,8 @@
   "bucket": "push",
   "checked": true,
   "confidence": "verified",
-  "verdict": "MISSING",
-  "evidence": "TlsQuicHttp3Streams.cs:716 accepts it on the control stream; finding 3"
+  "verdict": "COMPLIANT",
+  "evidence": "Quic/TlsQuicHttp3Streams.cs MaxPushId arm, split from CancelPush"
  },
  {
   "src": "rfc9114-section7-framing-layer.txt",
@@ -4255,16 +4267,18 @@
   "text": "An endpoint that receives a DATAGRAM frame when it has not indicated support via the transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.",
   "bucket": "datagram-ext",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ReceiveDatagramFrame"
  },
  {
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
   "text": "Similarly, an endpoint that receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.",
   "bucket": "datagram-ext",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicConnection.cs ReceiveDatagramFrame against TlsQuicFrame.EncodedLength"
  },
  {
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
@@ -4306,16 +4320,18 @@
   "text": "Receipt of an HTTP/3 Datagram that includes a larger value MUST be treated as an HTTP/3 connection error of type H3_DATAGRAM_ERROR (0x33).",
   "bucket": "datagram-ext",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicHttp3Connection.cs TryProcess against MaximumQuarterStreamId"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "Receipt of a QUIC DATAGRAM frame whose payload is too short to allow parsing the Quarter Stream ID field MUST be treated as an HTTP/3 connection error of type H3_DATAGRAM_ERROR (0x33).",
   "bucket": "datagram-ext",
   "checked": true,
-  "verdict": "MISSING",
-  "confidence": "verified"
+  "verdict": "COMPLIANT",
+  "confidence": "verified",
+  "evidence": "Quic/TlsQuicHttp3Connection.cs TryProcess - the varint read that precedes it"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
