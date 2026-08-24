@@ -5,7 +5,7 @@ Status: **IN PROGRESS.**
 - Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
 - Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (15 of 153).
 - Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
-- Untouched: RFC 9002, RFC 9297, and the bulk of RFC 9000. Every other
+- Constants only: RFC 9002. Untouched: RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -298,6 +298,59 @@ Everything else in RFC 9000 — frame formats in detail, variable-length integer
 number encoding and duplicate suppression, stream state machines, flow control accounting,
 address validation, ACK generation policy, error-code selection — is unchecked.
 
+### RFC 9002 (loss detection and congestion control) — constants verified
+
+RFC 9002 is overwhelmingly SHOULD-level, so there is little for a MUST audit to bite on. What
+IS checkable is the constant set in Appendix A/B, and a wrong constant is both a correctness
+defect and a fingerprint one: pacing and recovery behaviour are observable, so a stack using
+the wrong initial window or loss threshold looks like a different stack.
+
+All nine match the extract exactly.
+
+| Constant | RFC value | Location |
+|---|---|---|
+| `kInitialRtt` | 333 ms | `Quic/TlsQuicRecoverySpec.cs:428` |
+| `kPacketThreshold` | 3 | `Quic/TlsQuicRecoverySpec.cs:486` |
+| `kTimeThreshold` | 9/8 | `Quic/TlsQuicRecoverySpec.cs:496` |
+| `kGranularity` | 1 ms | `Quic/TlsQuicConnection.cs:950` |
+| `kInitialWindow` datagrams | 10 | `Quic/TlsQuicRecoverySpec.cs:444` |
+| `kInitialWindow` byte cap | 14720 | `Quic/TlsQuicRecoverySpec.cs:454` |
+| `kMinimumWindow` datagrams | 2 | `Quic/TlsQuicRecoverySpec.cs:462` |
+| `kLossReductionFactor` | 0.5 | `Quic/TlsQuicRecoverySpec.cs:473` |
+| `kPersistentCongestionThreshold` | 3 | `Quic/TlsQuicRecoverySpec.cs:503` |
+
+No RFC 9002 MUST was audited — only the constants. The loss-detection and congestion-control
+ALGORITHMS around them are unchecked.
+
+### OPEN — RFC 9000 §14 and the SOCKS5 header, an unresolved field report
+
+Not a verdict. A live bug report is parked here because it is a §14 question and would
+otherwise be lost.
+
+RFC 9000 §14.1 requires a client to expand Initial datagrams to at least 1200 bytes, and §14
+requires the IPv4 Don't Fragment bit be set where the platform supports it —
+`TlsQuicUdpDatagramTransport.SetDontFragment` does set it, including on the SOCKS5 relay socket
+(`Quic/TlsQuicSocks5Transport.cs:85`).
+
+Over a SOCKS5 relay the QUIC datagram is wrapped: the wire datagram is the RFC 1928 §7 header
+PLUS the 1200-byte QUIC payload, so 1210 bytes leave the interface where 1200 would directly.
+On Windows, a send with DF set fails with `SocketError.MessageSize` (WSAEMSGSIZE) when the
+datagram exceeds the local interface MTU. A field report describes exactly that:
+`SocketException` (WSAEMSGSIZE) at `clienttoken` and `login5` over a relay, direct working.
+
+**Reproduced? No.** An in-process round trip through a real SOCKS5 relay implementation
+succeeded at 1200, 1252, 1472, 1500, 8192, 65000 and 65497 bytes in both directions. Loopback
+has a 65535-byte MTU, so the DF interaction cannot appear there, which is why the local result
+does not settle it.
+
+The reporter's diagnosis — that the receive buffer is smaller than the datagram — does not match
+the code: the receive scratch is `_headerSize + 65527`, already above 65535 and already
+including the header.
+
+Open question for the code: whether the padding target should be measured against the wire
+datagram rather than the QUIC payload when a header-adding transport is in use, so that a
+1200-byte target produces 1200 bytes on the wire instead of 1200 + header.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -315,8 +368,8 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
   about the rest. Largest remaining gap.
 - RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
   keys.
-- RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
-  match exactly (a wrong constant is both a correctness and a fingerprint issue).
+- RFC 9002 — the Appendix A/B constants are verified above. The loss-detection and
+  congestion-control algorithms that use them are unchecked.
 - RFC 9114 — 102 of 116 client-relevant MUSTs remain unchecked. The 14 sampled were all
   compliant, which raises confidence but proves nothing about the rest. §6 stream mapping, §7
   per-frame rules and §8 error codes are the largest untouched blocks.
@@ -333,14 +386,15 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 48 — every row in the verdict tables above, counted directly rather than
-estimated (45 + 1 + 2). Confirmed: 45 compliant, 1 defect (already fixed), 2 MISSING (key
+Findings raised: 57 — every row in the verdict tables above, counted directly rather than
+estimated (54 + 1 + 2). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
+report is NOT, because it is an open question rather than a verdict. Confirmed: 54 compliant, 1 defect (already fixed), 2 MISSING (key
 update, AEAD packet counting). No UNRESOLVED remain: the one that existed was settled by
 reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
 Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Five near-misses against 45 confirmations is the
+as absent while the code implemented it. Five near-misses against 54 confirmations is the
 number a reader should weigh when deciding how much to trust a MISSING verdict here.
 
 The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
