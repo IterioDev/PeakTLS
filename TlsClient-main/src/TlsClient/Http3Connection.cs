@@ -824,11 +824,21 @@ internal sealed class Http3Connection : IHttpConnection
         configuration.ClientCertificates.Apply(options);
 
         // RFC 8446 s2.2 resumption, shared with the TCP path so a ticket issued over h2 or
-        // http/1.1 is offered on an h3 dial to the same origin and back. Only when the profile
-        // asked for it: a ClientHello with no psk_key_exchange_modes cannot carry a ticket, and
-        // attaching a cache to one would be a cache that never gets read.
-        if (options.SessionCache is null &&
-            options.ClientHello.Spec.SupportsSessionResumption)
+        // http/1.1 is offered on an h3 dial to the same origin and back.
+        //
+        // BOTH SLOTS, NOT JUST pre_shared_key. CustomTlsQuicClientOptions.Snapshot rejects a
+        // cache attached to a profile missing EITHER psk_key_exchange_modes or pre_shared_key,
+        // and ClientHelloSpec.SupportsSessionResumption tests only the second of the two - so
+        // testing that alone would attach the cache to a pre_shared_key-without-modes profile
+        // and turn "this persona does not resume" into an ArgumentException at connect. The
+        // test here is the validator's, so the outcome is always the quiet one.
+        //
+        // A PERSONA THAT DECLARES NEITHER STILL DOES NOT RESUME, and that is the capture
+        // speaking rather than a gap. The shipped Spotify h3 ClientHello carries
+        // psk_key_exchange_modes and no pre_shared_key slot - which is what a captured FIRST
+        // handshake looks like - so it takes this branch and dials fully. Give a profile both
+        // slots and it resumes from here on.
+        if (options.SessionCache is null && OffersSessionTickets(options.ClientHello.Spec))
         {
             options.SessionCache = tls13SessionCache;
         }
@@ -840,6 +850,15 @@ internal sealed class Http3Connection : IHttpConnection
         ApplyCertificatePins(options.CertificateValidation, configuration.CertificatePins);
         return new CustomTlsQuicClient(options);
     }
+
+    /// <summary>Whether a ClientHello has both slots RFC 8446 section 2.2 resumption needs.</summary>
+    /// <remarks>Mirrors <c>CustomTlsQuicClientOptions.Snapshot</c>'s own check, deliberately:
+    /// the two must agree, and the one that throws is not the one that decides.</remarks>
+    private static bool OffersSessionTickets(ClientHelloSpec spec) =>
+        spec.Extensions.Any(extension =>
+            extension.BuiltInKind == ClientHelloExtensionKind.PreSharedKey)
+        && spec.Extensions.Any(extension =>
+            extension.BuiltInKind == ClientHelloExtensionKind.PskKeyExchangeModes);
 
     /// <summary>
     /// Wires configured certificate pinning into the QUIC handshake.
