@@ -6,8 +6,8 @@ parameter definitions: IDs 0x00-0x10, their bounds, and preferred_address's
 Figure 22 layout).
 Ground truth for TlsQuicTransportParameters.cs, including max_udp_payload_size's
 1200-byte minimum and 65527 default (both stated in 18.2 below), and for wire-
-order preservation: 2026-08-16-brave-151-http3-impersonate-pro.md in this same
-directory publishes both perk_hash (raw wire order) and perk_hash_normalized
+order preservation: a client capture in this same
+directory published both perk_hash (raw wire order) and perk_hash_normalized
 (sorted by ID) for the same transport parameter set, confirming wire order is
 fingerprinted and must be reproduced exactly - the reason
 TlsQuicTransportParameters keeps parameters in insertion/wire order rather than

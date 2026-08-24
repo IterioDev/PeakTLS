@@ -189,7 +189,7 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
     {
         // The partition is recomputed from the preset rather than written beside it, so an
         // entry changed from drawn to literal moves this test's own expectation with it.
-        var preset = TlsQuicTransportParameterSpec.Brave151Parameters;
+        var preset = DrawingFactory().ConnectionSpec.TransportParameters.Parameters;
         var drawn = Enumerable.Range(0, preset.Length).Where(index => preset[index].IsDrawn);
         var expectedVarying = drawn.ToHashSet();
         Assert.Equal(
@@ -198,7 +198,7 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
                 + preset.Count(slot => slot.HasLiteralValue)
                 + preset.Count(slot => !slot.IsDrawn && !slot.HasLiteralValue));
 
-        var runs = Compose(new TlsQuicClientHelloProfileFactory(), Compositions);
+        var runs = Compose(DrawingFactory(), Compositions);
         foreach (var run in runs)
         {
             Assert.Equal(preset.Length, run.Count);
@@ -236,7 +236,7 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
         // TASK B4's PARAMETER, on its own. What varies is the IDENTIFIER; RFC 9000 s18.1 makes
         // the value arbitrary and the capture publishes one, so a client that redrew the value
         // too would be a different client.
-        var entries = Compose(new TlsQuicClientHelloProfileFactory(), Compositions)
+        var entries = Compose(DrawingFactory(), Compositions)
             .Select(run => run.Single(parameter =>
                 TlsQuicTransportParameterSpec.IsReservedIdentifier(parameter.Id)))
             .ToArray();
@@ -251,7 +251,7 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
         // TASK B3's PARAMETER, on its own, read as RFC 9368 s3's Figure 2 rather than as a
         // blob: a chosen version then a list of available ones, all 32-bit big-endian. Only
         // the GREASE slot may move, and the preset lists it first.
-        var values = Compose(new TlsQuicClientHelloProfileFactory(), Compositions)
+        var values = Compose(DrawingFactory(), Compositions)
             .Select(run => run
                 .Single(parameter =>
                     parameter.Id == (ulong)TlsQuicTransportParameterId.VersionInformation)
@@ -286,7 +286,23 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
         var drawn = Compose(
                 new TlsQuicClientHelloProfileFactory
                 {
-                    ConnectionSpec = new TlsQuicConnectionSpec { InitialRttRange = range },
+                    // THE SLOT HAS TO BE LISTED. The library's default list carries no
+                    // initial_rtt entry now, so a connection spec naming a range has nothing to
+                    // be read BY - which is the relation this test is about.
+                    ConnectionSpec = new TlsQuicConnectionSpec
+                    {
+                        InitialRttRange = range,
+                        TransportParameters = new TlsQuicTransportParameterSpec
+                        {
+                            Parameters =
+                            [
+                                TlsQuicTransportParameterSlot.Placed(
+                                    (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                                TlsQuicTransportParameterSpec.DrawnInitialRtt(
+                                    TlsQuicTransportParameterSpec.InitialRttIdentifier, null),
+                            ],
+                        },
+                    },
                 },
                 Compositions)
             .Select(run => run
@@ -298,11 +314,10 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
         Assert.True(drawn.Distinct().Count() > 1);
         Assert.All(drawn, microseconds => Assert.InRange(microseconds, 700000UL, 900000UL));
 
-        // The interval asserted above is disjoint from the preset's fallback, so an
-        // implementation that ignored the connection spec could not land inside it.
-        Assert.True(
-            TlsQuicTransportParameterSpec.Brave151InitialRttRange.Maximum <
-                TimeSpan.FromMicroseconds(700000));
+        // The interval asserted above is far from RFC 9002 s6.2.2's 333 ms, so an
+        // implementation that ignored the connection spec and fell back to a default could
+        // not land inside it.
+        Assert.True(TlsQuicRecoverySpec.KInitialRtt < TimeSpan.FromMicroseconds(700000));
     }
 
     [Fact]
@@ -416,7 +431,7 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
 
         Assert.Equal(new[] { "h3" }, imported.Spec.AlpnProtocols);
         Assert.Equal(
-            TlsQuicTransportParameterSpec.Brave151Parameters.Length,
+            TlsQuicTransportParameterSpec.RfcMinimumParameters.Length,
             imported.Spec.QuicTransportParameters!.Parameters.Count);
     }
 
@@ -612,4 +627,31 @@ public sealed class TlsQuicClientHelloProfileFactoryTests
         Assert.NotNull(directory);
         return directory.FullName;
     }
+
+    // THE FACTORY THESE THREE REDRAW TESTS NEED. `new TlsQuicClientHelloProfileFactory()` used
+    // to compose a captured browser's fourteen parameters, three of which redraw per
+    // connection, so a test about redrawing had something to watch. SharpTls ships no persona
+    // now and the default list is RFC 9000 s7.3's single mandatory entry, which draws nothing.
+    // The three drawn families are listed here; the numbers are neutral fixtures.
+    private static TlsQuicClientHelloProfileFactory DrawingFactory() => new()
+    {
+        ConnectionSpec = new TlsQuicConnectionSpec
+        {
+            InitialRttRange = TestQuicSpecValues.SampleInitialRttRange,
+            TransportParameters = new TlsQuicTransportParameterSpec
+            {
+                Parameters =
+                [
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                    TlsQuicTransportParameterSpec.DrawnReservedParameter(
+                        0, TlsQuicTransportParameterSpec.MaximumReservedIdentifierN, [0xfb]),
+                    TlsQuicTransportParameterSpec.DrawnVersionInformation(1, [null, 1]),
+                    TlsQuicTransportParameterSpec.DrawnInitialRtt(
+                        TlsQuicTransportParameterSpec.InitialRttIdentifier, null),
+                ],
+            },
+        },
+    };
+
 }

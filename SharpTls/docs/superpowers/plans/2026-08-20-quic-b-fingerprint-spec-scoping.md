@@ -4,7 +4,7 @@ Date: 2026-08-20
 Status: scoping plan. Not a spec, not an implementation.
 Parent: `docs/superpowers/specs/2026-08-16-quic-transport-scoping.md`
 Model for structure and rigour: `docs/superpowers/plans/2026-08-19-quic-c-http3-scoping.md`
-Target: `docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md`
+Target: `the preset that measured it`
 
 **Purpose:** answer *"what closes `perk` segment 3"* with a dependency chain rather than a date, and
 cost the work that closes it.
@@ -193,7 +193,7 @@ row from it. Re-run today it returns **4** lines:
 - `TlsQuicHttp3Connection.cs:70` - the comment stating the grep returns nothing
 - `TlsQuicHttp3Connection.cs:71` - the comment's next line
 - `TlsQuicHttp3FingerprintReadout.cs:95` - a comment citing the first comment
-- `TlsQuicHttp3FingerprintReadout.cs:753` - the literal `"h3"` in the readout's **brave** column
+- `TlsQuicHttp3FingerprintReadout.cs:753` - the literal `"h3"` in the readout's **client** column
   (`:750-754`)
 
 **The grep now finds its own citation.** Three of the four hits exist only because someone wrote the
@@ -256,7 +256,7 @@ length.
 
 While recomputing this: `_sourceConnectionIdLength` (`:168`) has no initialiser, so the shipped
 default is **0** - Chromium's value - and `_destinationConnectionIdLength` (`:169`) initialises to
-the §7.2 floor, which the C12 snapshot's brave column gives as 8. **Segment 4 is already correct by
+the §7.2 floor, which the C12 snapshot's client column gives as 8. **Segment 4 is already correct by
 default**, and the readout's row 25 showing `5,8` is its harness choosing a 5-byte source CID
 deliberately, per task 11's reason. See Finding 10.
 
@@ -431,9 +431,9 @@ The reconciliation, which is also the amendment to the standing rule at the end 
   omitted because the capture cannot bound it. A parameter we decline to emit is a fingerprint too -
   an absence Chromium does not have - so refusing is not the safe choice it looks like.
 - **Values live in a cited preset, not in library defaults.** Following
-  `TlsQuicHttp3Spec.CaptureSettings`: a named `Brave151Parameters` preset carrying the capture's 14
+  `TlsQuicHttp3Spec.CaptureSettings`: a named `RfcMinimumParameters` preset carrying the capture's 14
   parameters in the capture's wire order, each citing its capture line. The type is constructible
-  with an arbitrary list and bakes none of Brave's numbers into per-property defaults.
+  with an arbitrary list and bakes none of that client's numbers into per-property defaults.
 - Where the capture cannot bound something - the reserved parameter's identifier, the GREASE version
   inside `version_information`, `initial_rtt`'s range - **the knob exists and is settable**, the
   preset's choice is marked **unverified** in its own doc comment naming the task that would settle
@@ -460,7 +460,7 @@ witness per rejecting branch.
 
 **What B1 actually shipped, and what it takes off B2-B7's plates.** Because the amendment puts the
 capture's fourteen values in one cited preset, B1 landed all fourteen rather than only the seam.
-`src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs` carries `Brave151Parameters` - 7 literal
+`src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs` carries `RfcMinimumParameters` - 7 literal
 entries and 7 `Placed` entries (the six flow-control identifiers plus
 `initial_source_connection_id`), 7 + 7 = 14. So **B2, B3, B4, B5 and B7 no longer have to place
 their values**; what remains of them is their traps, their per-connection draws, and their tests:
@@ -790,7 +790,7 @@ datagrams that must survive. A4 task 13 measured 0/10 attempts lost with a one-d
 (handoff dependency chain); this re-measures with two.
 
 **Done when** the returned `perk`, `perk_hash` and `perk_hash_normalized` are recorded verbatim into a
-new file under `reference-captures/` alongside the Brave capture; segment 3 matches the capture's
+new file under `reference-captures/` alongside a client capture; segment 3 matches the capture's
 character for character; the sorted-order probe changes `perk_hash` and not `perk_hash_normalized`,
 recorded either way; the attempt count and datagram-loss rate are recorded with the Initial datagram
 count stated; and the two segments B does **not** own - h3 SETTINGS and pseudo-header order - are
@@ -809,7 +809,7 @@ invented, and this project has already refused that once.
 
 **Files:** new files under `docs/superpowers/specs/reference-captures/`.
 
-A packet capture of Brave 151 / Chromium 151's opening flight, plus - separately - a reading of
+A packet capture of a captured client / Chromium 151's opening flight, plus - separately - a reading of
 uQUIC's `ChromeRandomInitialRTT()` and `InitialPacketPlan`, both named by the capture as models.
 
 **Done when** each recorded artefact carries a provenance header naming what produced it, when, and
@@ -915,7 +915,7 @@ asserted rather than derived has moved at least once.
 
 | Not B's | Whose | Why it will look like B's |
 | --- | --- | --- |
-| `perk` segment 1, the h3 SETTINGS | **C** | `TlsQuicHttp3Spec.CaptureSettings` (`:142-149`) is already the default and already emits all five of Brave's pairs. It is not *usable live* until C14-C16, and that is a QPACK dependency, not a fingerprint one |
+| `perk` segment 1, the h3 SETTINGS | **C** | `TlsQuicHttp3Spec.CaptureSettings` (`:142-149`) is already the default and already emits all five of that client's pairs. It is not *usable live* until C14-C16, and that is a QPACK dependency, not a fingerprint one |
 | `perk` segment 2, pseudo-header order | **C** | already an exact match, confirmed live against a server we do not control |
 | `perk` segment 4, the CID pair | **already correct** | `_sourceConnectionIdLength` defaults to 0 and `_destinationConnectionIdLength` to the §7.2 floor (Finding 8); the live run returned `0,8`. The readout's `5,8` is its harness - Finding 10 |
 | RFC 9221 DATAGRAM frames | **C17** | B2 advertises `max_datagram_frame_size`; C17 makes the advertisement honest - Finding 11 |

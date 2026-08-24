@@ -28,11 +28,5 @@
     <Compile Include="../../tools/SharpTls.PackageReproducibility/DeterministicNuGetPackage.cs"
              Link="Packaging/DeterministicNuGetPackage.cs" />
     <None Include="Api/PublicApi.Shipped.txt" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Quic/quic-fingerprint-readout.snapshot.txt"
-          CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Quic/quic-http3-fingerprint-readout.snapshot.txt"
-          CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Quic/quic-recovery-readout.snapshot.txt"
-          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -516,7 +516,7 @@ public sealed class TlsQuicQpackBlockedDecodingTests
     // here is the one a real peer would compute, holding `count` entries.
     private static TlsQuicQpackDynamicTable TableWith(int count)
     {
-        var table = new TlsQuicQpackDynamicTable((int)TlsQuicHttp3Spec.CaptureSettings
+        var table = new TlsQuicQpackDynamicTable((int)SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable
             .Single(setting =>
                 setting.Identifier == TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier)
             .Value);

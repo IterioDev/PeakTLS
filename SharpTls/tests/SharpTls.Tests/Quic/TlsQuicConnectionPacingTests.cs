@@ -1039,6 +1039,13 @@ public sealed partial class TlsQuicConnectionTests
             PaddingTarget = PacerDatagram,
             SourceConnectionIdLength = SourceConnectionIdLength,
 
+            // THE LIMITS THE PACER TESTS ARE NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now that SharpTls ships no captured persona, and a
+            // connection that can receive nothing closes on the first STREAM frame instead of
+            // showing which datagram the pacer released.
+            LocalFlowControl = TestQuicSpecValues.HarnessFlowControl,
+            TransportParameters = TestQuicSpecValues.HarnessParameters,
+
             // Every test built on this spec measures WHICH datagram the pacer released and
             // when. An RFC 9000 s14.4 PMTU probe is an ordinary ack-eliciting datagram that
             // takes a pacing slot of its own, so leaving the search on would put a datagram

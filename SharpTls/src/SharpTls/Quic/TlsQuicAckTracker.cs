@@ -361,7 +361,7 @@ namespace SharpTls.Quic;
 //   93. rttvar seeded with the whole initial RTT, not half
 //                                    ONLY BeforeAnySampleTheEstimatorHoldsAppendixA4sInitialisation
 //   94. smoothed_rtt not seeded from the initial RTT                     5 tests
-//   95. the initial RTT read from TlsQuicTransportParameterSpec.Brave151InitialRttRange
+//   95. the initial RTT read from TlsQuicTransportParameterSpec.DeclaredInitialRttRange
 //       instead of TlsQuicRecoverySpec.KInitialRtt                       5 tests
 //   96. the negative-seed rejection removed            ONLY ANegativeInitialRttIsRejected
 //   97. microsecond-to-tick conversion dropped from the ack_delay decode  5 tests
@@ -560,7 +560,7 @@ internal sealed class TlsQuicAckTracker
     // 25 milliseconds is assumed. Values of 2^14 or greater are invalid."
     //
     // THE DEFAULT IS THE OPERATIVE VALUE HERE, NOT A FALLBACK NOBODY REACHES. The
-    // A3 plan's Finding 7 checked Brave 151's fourteen transport parameters and
+    // A3 plan's Finding 7 checked a captured client's fourteen transport parameters and
     // max_ack_delay is not among them, so a Chromium-shaped peer sends none and
     // this default is what s5.3's "the peer's max_ack_delay" resolves to for the
     // whole connection. Both numbers are read off
@@ -770,7 +770,7 @@ internal sealed class TlsQuicAckTracker
     /// initial RTT for the RECOVERY side: it reads
     /// <c>TlsQuicConnectionSpec.InitialRttRange</c> when that names a range and
     /// falls back to <see cref="TlsQuicRecoverySpec.KInitialRtt"/> when it does not.
-    /// The OTHER number - <c>TlsQuicTransportParameterSpec.Brave151InitialRttRange</c>,
+    /// The OTHER number - <c>TlsQuicTransportParameterSpec.DeclaredInitialRttRange</c>,
     /// 100 to 300 ms - is the fallback of the transport-parameter ENTRY that
     /// advertises <c>initial_rtt</c> to the peer, and its 300 ms maximum sits below
     /// <see cref="TlsQuicRecoverySpec.KInitialRtt"/>'s 333 ms, which is precisely

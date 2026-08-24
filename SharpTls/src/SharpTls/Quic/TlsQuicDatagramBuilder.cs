@@ -47,7 +47,7 @@ internal readonly struct TlsQuicPacketToSend
 /// Initial-carrying datagrams to the spec's padding target, and carves the Initial CRYPTO
 /// stream into the frames and datagrams the spec's flight plan declares.</summary>
 /// <remarks>
-/// <para>WHY THE MULTI-DATAGRAM INITIAL IS THE NORMAL CASE AND NOT A CORNER. The Brave 151
+/// <para>WHY THE MULTI-DATAGRAM INITIAL IS THE NORMAL CASE AND NOT A CORNER. The a captured client
 /// capture's X25519MLKEM768 key share is 1216 bytes on its own, so a Chromium-shaped
 /// ClientHello cannot fit the 1200-byte datagram s14.1 pins the floor at. A design in which
 /// one Initial is one datagram cannot express the target at all, which is why
@@ -347,7 +347,7 @@ internal static class TlsQuicDatagramBuilder
         // THE BUFFER IS THE PHYSICAL CEILING, NOT THE TARGET. Sizing it from
         // spec.PaddingTarget made every legal overshoot throw - and throw from
         // TlsQuicPacketBuilder.Build, naming a `destination` no caller of this method can
-        // pass, which is a diagnostic pointing at a knob that does not exist. The Brave 151
+        // pass, which is a diagnostic pointing at a knob that does not exist. The a captured client
         // capture's 1216-byte X25519MLKEM768 key share in one CRYPTO frame against the
         // 1200-byte default target is exactly that input, and it is the case this file's
         // header comment says the method exists for.
@@ -420,12 +420,12 @@ internal static class TlsQuicDatagramBuilder
         return GroupIntoDatagrams(spec.InitialCryptoFramesPerDatagram, frames);
     }
 
-    /// <summary>How many bytes of CRYPTO stream one datagram of a Brave 151-shaped Initial
+    /// <summary>How many bytes of CRYPTO stream one datagram of a capture-shaped Initial
     /// flight carries. Hand it to <see cref="PlanInitialFlightSplit"/> to get the two
     /// <see cref="TlsQuicConnectionSpec"/> arrays for a stream of a given length.</summary>
     /// <remarks>
     /// <para>THE EXACT SPLIT POINT IS UNVERIFIED, AND TASK B12 IS WHAT WOULD SETTLE IT. The
-    /// Brave 151 capture, lines 30-33, lists <i>"per-datagram Initial flight plans, CRYPTO
+    /// client capture, lines 30-33, lists <i>"per-datagram Initial flight plans, CRYPTO
     /// frame splitting"</i> among the things neither verification endpoint inspects, so no
     /// live run can confirm or refute this number - a wrong split ships silently and passes
     /// every gate. B12 acquires uQUIC's <c>InitialPackets []InitialPacketPlan</c>, which is
@@ -440,7 +440,7 @@ internal static class TlsQuicDatagramBuilder
     /// <c>max_udp_payload_size</c> is 1472 - the capture's own line 101 derives that as
     /// 1500 - 20 (IPv4) - 8 (UDP) - so a datagram this client sends and expects a path to
     /// carry stops there, while RFC 9000 s14.1 puts a 1200-byte floor under every one of
-    /// them. A Brave-shaped Initial packet spends 43 bytes before its CRYPTO data: 20 of
+    /// them. A capture-shaped Initial packet spends 43 bytes before its CRYPTO data: 20 of
     /// s17.2 header (1 first byte, 4 Version, 1 + 8 Destination Connection ID, 1 + 0 Source
     /// Connection ID, 1 zero Token Length, 4 Packet Number), a 2-byte Length varint, 5 of
     /// s19.6 CRYPTO frame (1 Type, up to 2 Offset, up to 2 Length) and a 16-byte AEAD tag.
@@ -464,7 +464,7 @@ internal static class TlsQuicDatagramBuilder
     /// which pins what happens without this: one datagram, 90 bytes over the ceiling, and
     /// not one exception between them.</para>
     /// </remarks>
-    internal const int Brave151InitialCryptoStreamBytesPerDatagram = 1400;
+    internal const int CryptoStreamBytesPerInitialDatagram = 1400;
 
     /// <summary>Carves a CRYPTO stream of <paramref name="cryptoStreamLength"/> bytes into
     /// frames of at most <paramref name="cryptoStreamBytesPerDatagram"/> bytes, one frame per
@@ -482,7 +482,7 @@ internal static class TlsQuicDatagramBuilder
     /// <see cref="TlsQuicConnectionSpec.InitialCryptoFramesPerDatagram"/> is a separate
     /// array; this method takes the simplest reading of the capture's two-datagram Initial
     /// and carries the same B12 caveat as
-    /// <see cref="Brave151InitialCryptoStreamBytesPerDatagram"/>.</para>
+    /// <see cref="CryptoStreamBytesPerInitialDatagram"/>.</para>
     /// <para>The last frame is short whenever the stream does not divide evenly, which is
     /// exactly what <see cref="TlsQuicConnectionSpec.InitialCryptoFrameByteCounts"/> permits
     /// of its final element and of no other - so every plan this method returns is one both

@@ -304,9 +304,9 @@ internal enum TlsQuicHttp3RequestError
 // and the regular fields and says nothing whatever about the sequence WITHIN either group.
 // s4.3.1 then defines the four request pseudo-headers in the order :method, :scheme,
 // :authority, :path - a definition order, in prose, with no MUST attached to it - and the
-// Brave 151 capture observes :method, :authority, :scheme, :path, which is a DIFFERENT
+// client capture observes :method, :authority, :scheme, :path, which is a DIFFERENT
 // order. Both conform. The difference is exactly what is fingerprinted:
-// 2026-08-16-brave-151-http3-impersonate-pro.md line 70 renders the capture's order `m,a,s,p`
+// the preset that measured it line 70 renders the capture's order `m,a,s,p`
 // as the second segment of the `perk` string.
 //
 // So the order comes from TlsQuicHttp3Spec.PseudoHeaderOrder and from nowhere else. There is

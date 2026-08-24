@@ -10,7 +10,7 @@ namespace SharpTls.Tests.Quic;
 // AnArbitraryListIsEmittedAsGivenDownToTheByte and its siblings are the acceptance
 // criterion for this seam: the library's goal is to reproduce a fingerprint it has never
 // seen, so a caller handing over an unknown identifier, arbitrary bytes and an arbitrary
-// order must get exactly those bytes back. Everything about the Brave preset is a default a
+// order must get exactly those bytes back. Everything about a preset is a default a
 // caller replaces; nothing about it may narrow what a caller can express.
 //
 // WHERE THE EXPECTATIONS COME FROM. The capture's own table is PARSED, not retyped - a test
@@ -27,7 +27,7 @@ public sealed class TlsQuicTransportParameterSpecTests
 
     private const string CapturePath =
         "docs/superpowers/specs/reference-captures/" +
-        "2026-08-16-brave-151-http3-impersonate-pro.md";
+        "the preset that measured it";
 
     private const string SourcePath = "src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs";
 
@@ -35,88 +35,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     // The composed list is the capture's, read back from the encodable set.
     // ------------------------------------------------------------------------------
 
-    [Fact]
-    public void TheDefaultSpecComposesTheCapturesIdentifiersInTheCapturesWireOrder()
-    {
-        var rows = CaptureWireOrder();
 
-        // The capture's table is fixed evidence: 14 rows, which is also what the B plan's
-        // `grep -cE '^\| [0-9]+ \|'` over its lines 78-93 returns. Asserted so that a parse
-        // which silently matched nothing cannot make every comparison below vacuous.
-        Assert.Equal(14, rows.Count);
-
-        var composed = new TlsQuicTransportParameterSpec()
-            .Compose(new TlsQuicConnectionSpec(), []);
-
-        // Read back from TlsQuicTransportParameters, not from the spec object: the claim
-        // under test is about what gets encoded, and the spec's own list is the input.
-        var emitted = composed.Parameters;
-        Assert.Equal(rows.Count, emitted.Count);
-        for (var index = 0; index < rows.Count; index++)
-        {
-            var (ordinal, identifier, _) = rows[index];
-            Assert.Equal(index + 1, ordinal);
-            if (identifier == "GREASE")
-            {
-                // Capture line 80 prints no number for this row and line 107 gives only
-                // "id ~ 3.7457e18", so the only checkable claim is the form.
-                Assert.True(
-                    TlsQuicTransportParameterSpec.IsReservedIdentifier(emitted[index].Id),
-                    $"Row {ordinal} is the capture's GREASE parameter but "
-                    + $"0x{emitted[index].Id:X} is not of RFC 9000 s18.1's form.");
-                continue;
-            }
-            Assert.Equal(
-                ulong.Parse(identifier, CultureInfo.InvariantCulture),
-                emitted[index].Id);
-        }
-    }
-
-    [Fact]
-    public void TheDefaultSpecsEntriesSplitIntoThreeKindsAndReconcileWithTheCapture()
-    {
-        var placedIdentifiers = PlacedIdentifiers();
-        var slots = TlsQuicTransportParameterSpec.Brave151Parameters;
-
-        var drawn = slots.Count(slot => slot.IsDrawn);
-        var placed = slots.Count(slot => !slot.IsDrawn && !slot.HasLiteralValue);
-        var literal = slots.Count(slot => slot.HasLiteralValue);
-
-        // Every entry is exactly one of the three, and the three add up to the capture's
-        // rows: 7 placed + 3 drawn + 4 literal = 14. Tasks B3, B4 and B5 moved three entries
-        // out of the literal half - rows 2, 9 and 13 - which is the whole of what those three
-        // tasks changed about this list, so the arithmetic is where that claim is checked.
-        Assert.Equal(slots.Length, placed + literal + drawn);
-        Assert.Equal(CaptureWireOrder().Count, slots.Length);
-        Assert.Equal(3, drawn);
-        Assert.Equal(4, literal);
-        Assert.Equal(7, placed);
-        Assert.Equal(14, slots.Length);
-
-        // The three drawn ones are the capture's rows 2, 9 and 13 - the three Finding 3
-        // measured as tokenised rather than hashed - read out of the list by position rather
-        // than asserted from a name, because position is the part the service hashes.
-        Assert.Equal(
-            [1, 8, 12],
-            slots.Select((slot, index) => (slot, index))
-                .Where(entry => entry.slot.IsDrawn)
-                .Select(entry => entry.index)
-                .ToArray());
-
-        // A drawn entry carries no literal bytes and is not one of the placed identifiers,
-        // so the three kinds do not overlap.
-        Assert.All(
-            slots.Where(slot => slot.IsDrawn),
-            slot => Assert.False(slot.HasLiteralValue));
-
-        // The placed kind is exactly the set nothing may type: the six the flow-control spec
-        // emits plus initial_source_connection_id. Derived from that spec's own output, so a
-        // seventh flow-control parameter appearing there needs no edit here.
-        Assert.Equal(placedIdentifiers.Count, placed);
-        Assert.All(
-            slots.Where(slot => !slot.IsDrawn && !slot.HasLiteralValue),
-            slot => Assert.Contains(slot.Id, placedIdentifiers));
-    }
 
     // THE CAPTURE'S OWN NUMBERS, READ OUT OF THE CAPTURE. Ten of the fourteen rows publish
     // their value as a plain integer; the other four publish hex, prose or a structure, and
@@ -125,71 +44,21 @@ public sealed class TlsQuicTransportParameterSpecTests
     // preset entry drifting off the capture fails here without any test being edited -
     // including the six the flow-control spec places, whose defaults are rows of this same
     // table and which therefore have to keep agreeing with it.
-    [Fact]
-    public void EveryCaptureRowPublishingAPlainIntegerDecodesToThatInteger()
-    {
-        var rows = CaptureWireOrder();
-        var composed = new TlsQuicTransportParameterSpec()
-            .Compose(new TlsQuicConnectionSpec(), []);
-        var emitted = composed.Parameters;
-        Assert.Equal(rows.Count, emitted.Count);
+    // A TEST WHOSE SUBJECT WAS DELETED. It asserted the CONTENT of the library's default
+    // transport-parameter list - a captured browser's fourteen entries, their wire order,
+    // their values, and the bookkeeping that kept them all inside one preset block.
+    // SharpTls ships no captured persona now: the default is RfcMinimumParameters, RFC
+    // 9000 s7.3's single mandatory initial_source_connection_id. A persona's list, its
+    // order and its values are asserted where the persona lives - see TlsPresetTests.
 
-        var checkedRows = 0;
-        var skippedDraws = 0;
-        for (var index = 0; index < rows.Count; index++)
-        {
-            if (!ulong.TryParse(
-                rows[index].Value,
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out var expected))
-            {
-                continue;
-            }
-            // THE ONE ROW WHOSE PUBLISHED INTEGER MUST NOT BE COPIED. Capture line 95 says of
-            // initial_rtt's 192859 that it "is not a constant to copy - uQUIC models this as
-            // ChromeRandomInitialRTT(). A fixed value here would itself be a fingerprint", so
-            // task B5 emits a draw and this row deliberately fails the comparison every other
-            // row passes. Identified by its identifier rather than by its ordinal, so moving
-            // it in the wire order does not silently exempt a different row.
-            if (emitted[index].Id == TlsQuicTransportParameterSpec.InitialRttIdentifier)
-            {
-                skippedDraws++;
-                continue;
-            }
-            Assert.Equal(expected, emitted[index].GetVariableInteger());
-            checkedRows++;
-        }
 
-        // The arithmetic, so a parse that silently matched fewer rows cannot pass: 14 rows,
-        // of which 4 publish something other than a plain integer - row 1's hex, row 2's
-        // hex, row 8's prose and row 9's structure - and 1 more, row 13, publishes an integer
-        // the capture forbids copying. 14 - 4 - 1 = 9.
-        Assert.Equal(1, skippedDraws);
-        Assert.Equal(9, checkedRows);
-        Assert.Equal(4, rows.Count - checkedRows - skippedDraws);
-    }
+    // THE CAPTURE-CONTAINMENT TEST IS GONE WITH THE CAPTURE. It asserted that the
+    // library's declared initial_rtt range contained one draw a captured browser was observed
+    // to make - the only checkable constraint on a range nobody measured. The library declares
+    // no such range now: its default transport-parameter list is RFC 9000 s7.3's single
+    // mandatory entry and advertises no initial_rtt at all, so a preset that emits one
+    // declares its own range beside the capture that bounds it.
 
-    [Fact]
-    public void TheDeclaredInitialRttRangeContainsTheCapturesObservedDraw()
-    {
-        // THE ONLY CHECKABLE CONSTRAINT ON A RANGE NOBODY MEASURED. The capture's 192859
-        // microseconds is one draw that actually happened, so whatever distribution produced
-        // it, that value is inside its support. The declared range's WIDTH is arbitrary and
-        // its doc comment says so; containing this observation is the one property that is
-        // not, and it is what a later task replacing the range must go on satisfying.
-        var range = TlsQuicTransportParameterSpec.Brave151InitialRttRange;
-
-        Assert.InRange(
-            TlsQuicTransportParameterSpec.Brave151InitialRtt,
-            (ulong)(range.Minimum.Ticks / TimeSpan.TicksPerMicrosecond),
-            (ulong)(range.Maximum.Ticks / TimeSpan.TicksPerMicrosecond));
-
-        // And the range is a real interval rather than a point, so the draw below has
-        // somewhere to move: a degenerate default would pass the containment check above
-        // while pinning the parameter, which is the exact defect capture line 95 names.
-        Assert.True(range.Maximum > range.Minimum);
-    }
 
     // ------------------------------------------------------------------------------
     // The six flow-control values are PLACED, so they cannot diverge.
@@ -198,7 +67,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     [Fact]
     public void TheComposedFlowControlValuesAreTheOnesTheFlowControlSpecEmits()
     {
-        // Deliberately NOT the capture's six. A composition that restated Brave's numbers
+        // Deliberately NOT the capture's six. A composition that restated that client's numbers
         // instead of placing the spec's would pass a test run against the defaults and fail
         // this one, which is the whole reason RFC 9000 s4.1 forbids typing them twice.
         var flowControl = new TlsQuicLocalFlowControlSpec
@@ -212,7 +81,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         };
         var connectionSpec = new TlsQuicConnectionSpec { LocalFlowControl = flowControl };
 
-        var composed = new TlsQuicTransportParameterSpec().Compose(connectionSpec, []);
+        var composed = SampleSpec().Compose(connectionSpec, []);
 
         var expected = flowControl.ToTransportParameters();
         Assert.NotEmpty(expected);
@@ -230,7 +99,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         var connectionSpec = new TlsQuicConnectionSpec { SourceConnectionIdLength = 4 };
         byte[] connectionId = [0x11, 0x22, 0x33, 0x44];
 
-        var composed = new TlsQuicTransportParameterSpec()
+        var composed = SampleSpec()
             .Compose(connectionSpec, connectionId);
 
         var emitted = composed.Get(
@@ -244,7 +113,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     {
         // Capture line 86: "empty, consistent with a zero-length source CID", which is
         // TlsQuicConnectionSpec.SourceConnectionIdLength's default of 0.
-        var composed = new TlsQuicTransportParameterSpec()
+        var composed = SampleSpec()
             .Compose(new TlsQuicConnectionSpec(), []);
 
         var emitted = composed.Get(
@@ -450,7 +319,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         var supplied = new byte[suppliedLength];
 
         var error = Assert.Throws<ArgumentException>(
-            () => new TlsQuicTransportParameterSpec().Compose(connectionSpec, supplied));
+            () => SampleSpec().Compose(connectionSpec, supplied));
         Assert.Equal("sourceConnectionId", error.ParamName);
     }
 
@@ -465,7 +334,7 @@ public sealed class TlsQuicTransportParameterSpecTests
             {
                 SourceConnectionIdLength = length,
             };
-            var composed = new TlsQuicTransportParameterSpec()
+            var composed = SampleSpec()
                 .Compose(connectionSpec, new byte[length]);
             var emitted = composed.Get(
                 (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId);
@@ -477,7 +346,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     [Fact]
     public void ComposeRejectsANullConnectionSpec()
     {
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
 
         Assert.Throws<ArgumentNullException>(() => spec.Compose(null!, []));
     }
@@ -523,12 +392,12 @@ public sealed class TlsQuicTransportParameterSpecTests
     [Fact]
     public void TheReservedIdentifierIsOfSection18Point1sFormAndInsideTheCapturesInterval()
     {
-        var identifier = TlsQuicTransportParameterSpec.Brave151ReservedIdentifier;
+        var identifier = TestQuicSpecValues.SampleReservedIdentifier;
 
         // RFC 9000 s18.1's "31 * N + 27", recomputed from N rather than compared to itself.
         Assert.Equal(
             (TlsQuicTransportParameterSpec.ReservedIdentifierStep *
-                TlsQuicTransportParameterSpec.Brave151ReservedIdentifierN) +
+                TestQuicSpecValues.SampleReservedIdentifierN) +
                 TlsQuicTransportParameterSpec.ReservedIdentifierBase,
             identifier);
         Assert.True(TlsQuicTransportParameterSpec.IsReservedIdentifier(identifier));
@@ -547,7 +416,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         // nobody took.
         Assert.InRange(
             TlsQuicTransportParameterSpec.ReservedIdentifier(
-                TlsQuicTransportParameterSpec.Brave151ReservedIdentifierN - 1),
+                TestQuicSpecValues.SampleReservedIdentifierN - 1),
             Low,
             High - 1);
 
@@ -693,7 +562,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     [Fact]
     public void TheVersionInformationEntryCarriesTheChosenVersionInsideItsAvailableList()
     {
-        var composed = new TlsQuicTransportParameterSpec()
+        var composed = SampleSpec()
             .Compose(new TlsQuicConnectionSpec(), []);
 
         var emitted = composed.Get((ulong)TlsQuicTransportParameterId.VersionInformation);
@@ -717,22 +586,6 @@ public sealed class TlsQuicTransportParameterSpecTests
         Assert.Equal(versions[0], versions[2]);
     }
 
-    [Fact]
-    public void TheGoogleConnectionOptionsValueDecodesToTheCapturesFourAsciiCharacters()
-    {
-        var composed = new TlsQuicTransportParameterSpec()
-            .Compose(new TlsQuicConnectionSpec(), []);
-
-        var emitted = composed.Get(
-            TlsQuicTransportParameterSpec.GoogleConnectionOptionsIdentifier);
-        Assert.NotNull(emitted);
-
-        // Capture line 79 gives 0x4f524947 and glosses it "ASCII ORIG". Decoded, so the
-        // check is that the bytes MEAN that, not that two copies of the same hex agree.
-        Assert.Equal("ORIG", Encoding.ASCII.GetString(emitted.Value));
-        Assert.Equal(0x4f524947u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(
-            emitted.Value));
-    }
 
     [Fact]
     public void TheDefaultSetSurvivesEncodingParsingAndClientSideValidation()
@@ -744,7 +597,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         // claim "our composed set validates" rather than "one composition of it did".
         for (var draw = 0; draw < Draws; draw++)
         {
-            var composed = new TlsQuicTransportParameterSpec()
+            var composed = SampleSpec()
                 .Compose(new TlsQuicConnectionSpec(), []);
 
             var reparsed = TlsQuicTransportParameters.Parse(composed.Encode());
@@ -948,7 +801,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         // A4's instruction, quoted by the B plan: "pin it: two consecutive connections must
         // produce two different initial_rtt values." ONE spec, many compositions, which is
         // the arrangement a real caller has - the spec is built once and used per connection.
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
         var connectionSpec = new TlsQuicConnectionSpec();
 
         var drawn = Enumerable.Range(0, Draws)
@@ -977,7 +830,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         // not what a range change needs.
         var range = (Minimum: TimeSpan.FromMicroseconds(1234), Maximum: TimeSpan.FromMicroseconds(5678));
         var connectionSpec = new TlsQuicConnectionSpec { InitialRttRange = range };
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
 
         var drawn = new HashSet<ulong>();
         for (var draw = 0; draw < Draws; draw++)
@@ -998,9 +851,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         // ends at 5678 - so an implementation ignoring this knob fails the bound above rather
         // than passing by overlap. That disjointness is what makes this the wiring test the
         // standing rule "a knob that exists is not a knob that is wired" asks for.
-        Assert.True(
-            range.Maximum <
-                TlsQuicTransportParameterSpec.Brave151InitialRttRange.Minimum);
+        Assert.True(range.Maximum < TestQuicSpecValues.SampleInitialRttRange.Minimum);
         Assert.True(drawn.Count > 1);
     }
 
@@ -1015,7 +866,7 @@ public sealed class TlsQuicTransportParameterSpecTests
             InitialRttRange = (pinned, pinned),
         };
 
-        var parameter = new TlsQuicTransportParameterSpec()
+        var parameter = SampleSpec()
             .Compose(connectionSpec, [])
             .Get(TlsQuicTransportParameterSpec.InitialRttIdentifier);
 
@@ -1032,7 +883,7 @@ public sealed class TlsQuicTransportParameterSpecTests
         {
             InitialRttRange = (TimeSpan.FromMicroseconds(4242), TimeSpan.FromMicroseconds(4243)),
         };
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
         var seen = new HashSet<ulong>();
         for (var draw = 0; draw < Draws; draw++)
         {
@@ -1085,7 +936,7 @@ public sealed class TlsQuicTransportParameterSpecTests
 
         // And the default preset does emit it, so "absent" is a configuration and not what
         // this library does when nobody looks.
-        Assert.NotNull(new TlsQuicTransportParameterSpec()
+        Assert.NotNull(SampleSpec()
             .Compose(new TlsQuicConnectionSpec(), [])
             .Get(TlsQuicTransportParameterSpec.InitialRttIdentifier));
     }
@@ -1159,76 +1010,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     // in the source must carry one, and every number must name a task the B plan actually
     // has - which is what stops an unbounded choice from shipping as though it were
     // measured, and stops the citation from rotting into a reference to nothing.
-    [Fact]
-    public void EveryUnverifiedPresetChoiceNamesATaskThatExistsInTheBPlan()
-    {
-        var source = File.ReadAllText(Path.Combine(RepositoryRoot(), SourcePath));
-        var plan = File.ReadAllText(Path.Combine(RepositoryRoot(), PlanPath));
 
-        var markers = Regex.Matches(source, @"\bUNVERIFIED\b").Count;
-        var cited = Regex.Matches(source, @"\bUNVERIFIED, settled by task B(\d+)\b");
-
-        Assert.NotEqual(0, markers);
-        Assert.Equal(markers, cited.Count);
-
-        // The resolution mechanism proves itself in both directions before it is trusted:
-        // the task this file implements resolves, and a task number nobody has does not.
-        Assert.Contains("## Task B1", plan, StringComparison.Ordinal);
-        Assert.DoesNotContain("## Task B99", plan, StringComparison.Ordinal);
-
-        // AND THE DEFERRED ARM RESOLVES AT ITS OWN HEADING DEPTH, which is worth stating
-        // because it is not obvious. The plan writes tasks B0-B11 as "## Task Bn" and the
-        // packet-capture arm as "### Task B12", so the substring the loop below searches for
-        // is found inside the deeper heading rather than as a heading of its own. Both
-        // markers in the source cite B12 - the range for initial_rtt and the reserved
-        // identifier the capture could not pin - so if that heading were ever renamed or
-        // flattened, this assertion says which of the two facts broke.
-        Assert.Contains("### Task B12", plan, StringComparison.Ordinal);
-        Assert.Contains("## Task B12", plan, StringComparison.Ordinal);
-
-        foreach (Match match in cited)
-        {
-            Assert.Contains(
-                $"## Task B{match.Groups[1].Value}",
-                plan,
-                StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
-    public void NoNumericParameterValueLivesOutsideThePresetBlock()
-    {
-        var lines = File.ReadAllLines(Path.Combine(RepositoryRoot(), SourcePath));
-        var start = Array.FindIndex(
-            lines, line => line.Contains("THE PRESET BLOCK.", StringComparison.Ordinal));
-        var end = Array.FindIndex(
-            lines,
-            line => line.Contains("END OF THE PRESET BLOCK.", StringComparison.Ordinal));
-        Assert.InRange(start, 0, end - 1);
-
-        // CODE ONLY, NOT COMMENTS. Prose outside the block names RFC numbers, capture dates
-        // and the two Google-private identifiers, and must go on being able to: the rule is
-        // that no value this library EMITS is written outside the block, and a value is
-        // emitted by code. So comment lines are dropped and the remainder is searched for a
-        // decimal literal of four digits or more, which is the shape every parameter value
-        // in the preset has.
-        var outside = lines
-            .Where((_, index) => index < start || index > end)
-            .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal));
-        var escaped = outside
-            .SelectMany(line => Regex.Matches(line, @"(?<![\w.])\d{4,}(?![\w])"))
-            .Select(match => match.Value)
-            .ToArray();
-        Assert.Empty(escaped);
-
-        // The search would find one if there were one: the preset block itself, searched the
-        // same way, is full of them.
-        var inside = lines[start..(end + 1)]
-            .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal))
-            .SelectMany(line => Regex.Matches(line, @"(?<![\w.])\d{4,}(?![\w])"))
-            .ToArray();
-        Assert.NotEmpty(inside);
-    }
 
     // ------------------------------------------------------------------------------
     // Helpers.
@@ -1248,8 +1030,8 @@ public sealed class TlsQuicTransportParameterSpecTests
     // the list still has fourteen entries in the capture's order.
     private static ImmutableArray<TlsQuicTransportParameterSlot> PinnedPreset()
     {
-        var slots = TlsQuicTransportParameterSpec.Brave151Parameters;
-        var drawn = new TlsQuicTransportParameterSpec()
+        var slots = SampleSpec().Parameters;
+        var drawn = SampleSpec()
             .Compose(new TlsQuicConnectionSpec(), []).Parameters;
         Assert.Equal(slots.Length, drawn.Count);
         return
@@ -1266,7 +1048,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     // hide it.
     private static IEnumerable<ulong> DrawnReservedIdentifiers(int count)
     {
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
         var connectionSpec = new TlsQuicConnectionSpec();
         for (var draw = 0; draw < count; draw++)
         {
@@ -1284,7 +1066,7 @@ public sealed class TlsQuicTransportParameterSpecTests
     // so the words are read out of the bytes rather than compared to what built them.
     private static IEnumerable<List<uint>> DecodedVersionInformation(int count)
     {
-        var spec = new TlsQuicTransportParameterSpec();
+        var spec = SampleSpec();
         var connectionSpec = new TlsQuicConnectionSpec();
         for (var draw = 0; draw < count; draw++)
         {
@@ -1381,4 +1163,63 @@ public sealed class TlsQuicTransportParameterSpecTests
         Assert.NotNull(directory);
         return directory.FullName;
     }
+
+    // ------------------------------------------------------------------------------
+    // THE FIXTURE THESE TESTS USED TO GET FOR FREE.
+    //
+    // `new TlsQuicTransportParameterSpec()` used to be a captured browser's fourteen
+    // parameters, so a test about the COMPOSER - drawn entries redrawing, placed entries taking
+    // the connection spec's value, list order surviving - could use the default and have all
+    // three slot kinds present. SharpTls ships no persona now and that default is RFC 9000
+    // s7.3's single mandatory entry, which exercises one kind.
+    //
+    // SO THE FIXTURE IS WRITTEN OUT HERE, and it is a fixture rather than a persona: neutral
+    // round numbers, chosen to put every slot kind and every drawn family in one list. Nothing
+    // in it is evidence about any client and nothing may be cited as such.
+    // ------------------------------------------------------------------------------
+
+    private const uint SampleChosenVersion = 1;
+
+    private static readonly (TimeSpan Minimum, TimeSpan Maximum) SampleRttRange =
+        TestQuicSpecValues.SampleInitialRttRange;
+
+    private static TlsQuicTransportParameterSpec SampleSpec() => new()
+    {
+        Parameters =
+        [
+            TlsQuicTransportParameterSlot.Literal(
+                TlsQuicTransportParameterSpec.GoogleConnectionOptionsIdentifier,
+                System.Text.Encoding.ASCII.GetBytes("TEST")),
+            TlsQuicTransportParameterSpec.DrawnReservedParameter(
+                0, TlsQuicTransportParameterSpec.MaximumReservedIdentifierN, [0xfb]),
+            TlsQuicTransportParameterSlot.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
+                QuicVariableLengthInteger.Encode(65536)),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+            TlsQuicTransportParameterSpec.DrawnVersionInformation(
+                SampleChosenVersion, [null, SampleChosenVersion]),
+            TlsQuicTransportParameterSlot.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxIdleTimeout,
+                QuicVariableLengthInteger.Encode(30000)),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+            TlsQuicTransportParameterSlot.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxData),
+            TlsQuicTransportParameterSpec.DrawnInitialRtt(
+                TlsQuicTransportParameterSpec.InitialRttIdentifier, SampleRttRange),
+            TlsQuicTransportParameterSlot.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxUdpPayloadSize,
+                QuicVariableLengthInteger.Encode(1472)),
+        ],
+    };
+
 }

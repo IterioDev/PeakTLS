@@ -4,7 +4,7 @@ Covers 3 Transport Parameter in full: the max_datagram_frame_size parameter
 (name and value=0x20 = 32), its variable-length-integer encoding, the meaning
 of the default 0 and of a non-zero value, the two PROTOCOL_VIOLATION rules, the
 RECOMMENDED value of 65535, its unidirectional nature, and its 0-RTT handling.
-Captured for subsystem B task B0 - transport parameter 32 in the Brave capture
+Captured for subsystem B task B0 - transport parameter 32 in a client capture
 is the *advertisement*, and this section is all of what defines it.
 Deliberately NOT captured here: Section 4 Datagram Frame Types and Section 5
 Behavior and Usage, which define the DATAGRAM frames themselves. Those belong

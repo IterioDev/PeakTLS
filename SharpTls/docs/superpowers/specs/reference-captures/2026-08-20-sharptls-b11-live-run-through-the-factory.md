@@ -14,7 +14,7 @@ recorded a run whose transport parameters were a list typed into the test file.
 `2026-08-20-sharptls-b11-perk-order-probe.md` recorded an experiment over deliberate edits to that
 same typed list. **This run is the first where the bytes on the wire came from `src/` rather than
 from `tests/`:** the ClientHello is built by `TlsQuicClientHelloProfileFactory` (task B8) driving
-`TlsQuicTransportParameterSpec.Brave151Parameters` (tasks B1–B7), with the test supplying only
+`TlsQuicTransportParameterSpec.RfcMinimumParameters` (tasks B1–B7), with the test supplying only
 subsystem E's half — two cipher suites, two groups, one key share.
 
 ---
@@ -75,7 +75,7 @@ C13's 0/20, the order probe's 0/12, and this run's 0/12.
 
 ---
 
-## Arm 1 — `PRESET`, the Brave 151 preset as shipped
+## Arm 1 — `PRESET`, a preset as shipped
 
 `perk_text`, verbatim:
 
@@ -127,13 +127,13 @@ normalized form. The two strings differ in exactly one substring:
 
 **The normalization does not only sort the outer parameter list — it also sorts the
 available-versions list *inside* parameter 17's value.** No document in this repo states that: the
-Brave capture's line 53 says only "the normalized form sorts transport parameters by ID". Because
+client capture's line 53 says only "the normalized form sorts transport parameters by ID". Because
 that inner sort is not something a client can produce by reordering its parameter list, no wire
 order at all can make `perk_text` equal `perk_text_normalized` while a GREASE version is present,
 and so the two hashes necessarily differ (`8a1b68ab…` vs `058578261c…`).
 
 **This does not weaken P2 and does not affect B7.** The raw form is what B7 must match, and it
-preserves the available-versions order we sent — `17:1@GREASE,1`, which is exactly Brave's. The
+preserves the available-versions order we sent — `17:1@GREASE,1`, which is exactly that client's. The
 failed prediction was about the *normalized* form, which nothing in subsystem B targets.
 
 ## Arm 3 — `PRESET_REPEAT`, the same configuration on fresh connections
@@ -152,19 +152,19 @@ parameters at once, and it is what makes B8's per-connection redraw free of fing
 
 ---
 
-## Diffed field by field against the Brave 151 capture
+## Diffed field by field against a client capture
 
-`docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md`, its
+`the preset that measured it`, its
 line 47.
 
-| # | segment | owner | ours (`PRESET`) | Brave 151 | verdict |
+| # | segment | owner | ours (`PRESET`) | a captured client | verdict |
 | --- | --- | --- | --- | --- | --- |
 | 1 | h3 SETTINGS | **C** | `1:0;6:262144;7:0` | `1:65536;6:262144;7:100;51:1;GREASE` | DIFFER — the narrowed QPACK arm, C's, see below |
 | 2 | pseudo-header order | **C** | `m,a,s,p` | `m,a,s,p` | **MATCH** |
 | 3 | transport parameters, wire order | **B** | `12584:0x4f524947;GREASE;32:65536;9:103;8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;4:15728640;12583:AUTO;3:1472` | *identical* | **MATCH, character for character** |
 | 4 | connection ID length pair | **B** | `0,8` | `0,8` | **MATCH** |
 
-**Both segments subsystem B owns now match Brave 151 exactly.** Segment 3 is the fourteen
+**Both segments subsystem B owns now match a captured client exactly.** Segment 3 is the fourteen
 parameters, their values, their rendering and their wire order; segment 4 is the CID length pair,
 which already matched at C13 and still does. Neither is re-filed from another subsystem's ledger:
 B is what composes them now, and this is B reporting its own result.
@@ -178,7 +178,7 @@ C13 recorded that `TlsQuicHttp3Spec`'s default arm already emits an exact segmen
 cannot yet do is *survive* a peer encoder taking up the offer — C14–C16's work.
 
 **So the whole-perk consequence, stated plainly and not measured here:** with segments 2, 3 and 4
-matching, the only thing between this client and Brave 151's `perk_hash`
+matching, the only thing between this client and a captured client's `perk_hash`
 (`7d726b1554d23ae0ffb3e8c533f20a2f`) is segment 1, and segment 1 is one QPACK arm away. Whether the
 default arm survives a live run end to end is C's measurement to take, not this one.
 
@@ -188,9 +188,9 @@ default arm survives a live run end to end is C's measurement to take, not this 
 | --- | --- | --- |
 | C13, the typed list | `6d94f63e5db7fe12fa493e5b23c2443f` | `ff76216a19258be0123a5ee76da4fa7a` |
 | **B11, through the factory** | **`04736da3818104056c4fda492c21bd05`** | **`058578261cc56e6f6a02cbd3349dd51a`** |
-| Brave 151 | `7d726b1554d23ae0ffb3e8c533f20a2f` | `733abf232de1c065c494640332f04555` |
+| a captured client | `7d726b1554d23ae0ffb3e8c533f20a2f` | `733abf232de1c065c494640332f04555` |
 
-The B11 hashes still differ from Brave's because segment 1 differs; they differ from C13's because
+The B11 hashes still differ from that client's because segment 1 differs; they differ from C13's because
 segment 3 does. Both differences are accounted for, and neither is unexplained.
 
 ## Diffed against C13's earlier run — the delta wiring the factory in made
@@ -202,14 +202,14 @@ C13   15:AUTO;14:2;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103
 B11   12584:0x4f524947;GREASE;32:65536;9:103;8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;4:15728640;12583:AUTO;3:1472
 ```
 
-C13's own list of what was missing relative to Brave was: `google_connection_options` (12584), the
+C13's own list of what was missing relative to that client was: `google_connection_options` (12584), the
 GREASE transport parameter, `max_datagram_frame_size` (32), `version_information` (17),
 `max_idle_timeout` (1), `initial_rtt` (12583), `max_udp_payload_size` (3) — and one parameter sent
-that Brave does not send, `active_connection_id_limit` (14) — and the wire order itself.
+that that client does not send, `active_connection_id_limit` (14) — and the wire order itself.
 
 **All nine of those are settled by this run.** Seven parameters arrived, `14` is gone, and the order
-is the capture's. The six values C13 already shared with Brave (4, 5, 6, 7, 8, 9) are unchanged and
-still match, and `15` is still empty. Every identifier is emitted by `Brave151Parameters` and
+is the capture's. The six values C13 already shared with that client (4, 5, 6, 7, 8, 9) are unchanged and
+still match, and `15` is still empty. Every identifier is emitted by `RfcMinimumParameters` and
 `TlsQuicClientHelloProfileFactory`; nothing on the wire came from the test file.
 
 ---
@@ -237,13 +237,13 @@ first is loud:
 
 ## What this settles, and what it does not
 
-**Settles.** Subsystem B's composed transport parameters and CID lengths reproduce Brave 151's perk
+**Settles.** Subsystem B's composed transport parameters and CID lengths reproduce a captured client's perk
 segments 3 and 4 exactly, live. A change to the parameter list moves `perk_hash` in the predicted
 direction and leaves `perk_hash_normalized` alone. The per-connection redraws cost nothing in
 fingerprint terms. The task-B11 done-when's sorted-order probe is answered here as well as at
 `4ed90bf`, this time over the shipped fourteen rather than over a typed eight.
 
-**Does not settle.** Everything the Brave capture's lines 30–33 already name as not inspected by
+**Does not settle.** Everything a client capture's lines 30–33 already name as not inspected by
 this service — the Initial packet number and its encoded length, the token, frame order inside the
 Initial, the padding target, CRYPTO frame splitting, the per-datagram flight plan. Those still need
 task B12's packet capture, and no number in this file bears on them. **Nor does it settle the
@@ -253,9 +253,9 @@ untested against a live peer and this run's 0/12 says nothing about it.
 ## What in the surrounding documents was wrong
 
 - **`perk` is still not a field.** The wire calls it `perk_text`, and the normalized string
-  `perk_text_normalized`; only the two hashes carry the names the plan and the Brave capture use.
+  `perk_text_normalized`; only the two hashes carry the names the plan and a client capture use.
   C13 filed this, the order probe re-filed it, and it is still true.
-- **"The normalized form sorts transport parameters by ID"** (Brave capture, line 53) is
+- **"The normalized form sorts transport parameters by ID"** (client capture, line 53) is
   incomplete. It also sorts the available-versions list inside `version_information`'s value:
   `17:1@GREASE,1` raw becomes `17:1@1,GREASE` normalized. Measured here on twelve attempts.
 - **B11's "expect loss … B9 doubles the Initial datagrams that must survive"** did not apply to this

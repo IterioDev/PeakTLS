@@ -7,7 +7,7 @@ namespace SharpTls.Quic;
 /// <remarks>The members exist so <see cref="TlsQuicHttp3Spec.PseudoHeaderOrder"/> can be an
 /// ordered list of them. The capture's order is <c>:method, :authority, :scheme, :path</c>,
 /// rendered <c>m,a,s,p</c> in the fingerprint string - see
-/// 2026-08-16-brave-151-http3-impersonate-pro.md line 70. Declaration order here is that
+/// the preset that measured it line 70. Declaration order here is that
 /// order, but nothing reads declaration order; the list does.</remarks>
 internal enum TlsQuicHttp3PseudoHeader
 {
@@ -144,7 +144,7 @@ internal readonly record struct TlsQuicHttp3Setting(ulong Identifier, ulong Valu
 /// Subsystem B populates one of these to imitate a particular browser; nothing in subsystem C
 /// may read a layout literal instead. No behaviour lives here.</summary>
 /// <remarks>
-/// <para>THE DEFAULTS SPLIT IN TWO, and the split is the point. Where the Brave 151 capture
+/// <para>THE DEFAULTS SPLIT IN TWO, and the split is the point. Where a client capture
 /// bounds a default it is taken and the capture line is cited. Where the capture CANNOT see
 /// the choice - because the fingerprint string records the settings sorted-or-not
 /// indistinguishably, records nothing about stream-open order, and records nothing about
@@ -161,54 +161,28 @@ internal sealed class TlsQuicHttp3Spec
     // and above the end of this region; the properties themselves carry none.
     // ------------------------------------------------------------------------------
 
-    /// <summary>The capture's HTTP/3 SETTINGS, in the capture's printed order.</summary>
+    /// <summary>The default SETTINGS: none.</summary>
     /// <remarks>
-    /// 2026-08-16-brave-151-http3-impersonate-pro.md lines 64-68 and the fingerprint string on
-    /// line 47, <c>1:65536;6:262144;7:100;51:1;GREASE</c>. The reserved pair's two numbers are
-    /// line 68's, 126585778853 and 2585972839; that identifier satisfies s7.2.4.1's
-    /// 0x1f * N + 0x21 form at N = 4083412220, which
-    /// TlsQuicHttp3SpecTests.TheCapturesGreaseSettingIdentifierIsAReservedOne recomputes
-    /// rather than asserting.
+    /// <para>EMPTY IS A LEGAL SETTINGS FRAME. RFC 9114 s7.2.4: "The payload of a SETTINGS frame
+    /// consists of zero or more parameters." So a client that has not been told who to imitate
+    /// sends the frame s6.2.1 requires and claims nothing in it.</para>
+    /// <para>THIS USED TO BE A CAPTURED BROWSER'S FIVE PAIRS, and that made them the default
+    /// for every connection whose caller did not replace <see cref="Settings"/> - including the
+    /// GREASE pair, which is the one entry that must never be a constant. Every reader of this
+    /// list degrades correctly to nothing: s7.2.4.1 makes an absent
+    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY zero, which is what the encoder already assumes;
+    /// an absent SETTINGS_H3_DATAGRAM is RFC 9297 s2.1.1's "not supported"; and an absent
+    /// MAX_FIELD_SECTION_SIZE is RFC 9114 s7.2.4.1's "unlimited".</para>
+    /// <para>A persona's SETTINGS are its preset's, entire.</para>
     /// </remarks>
-    internal static readonly ImmutableArray<TlsQuicHttp3Setting> CaptureSettings =
-    [
-        new(QpackMaxTableCapacityIdentifier, 65536),
-        new(MaxFieldSectionSizeIdentifier, 262144),
-        new(QpackBlockedStreamsIdentifier, 100),
-        new(H3DatagramIdentifier, 1),
-        TlsQuicHttp3Setting.Drawn(DrawReservedSetting),
-    ];
-
-    /// <summary>Draws one RFC 9114 s7.2.4.1 reserved SETTINGS pair.</summary>
-    /// <remarks>
-    /// <para>THE CAPTURE'S SHAPE, NOT THE CAPTURE'S NUMBERS. This entry used to be the literal
-    /// pair the remarks above record - 126585778853 and 2585972839 - which made it the DEFAULT
-    /// for every connection that does not replace <see cref="Settings"/>. A reserved setting
-    /// exists to be ignorable noise, and noise that is byte-identical on every connection from
-    /// every caller is not noise: it is a constant that identifies this library. The numbers
-    /// stay in the remarks as the measurement they are, and the shipped behaviour draws from
-    /// the family they belong to.</para>
-    /// <para>N SPANS 32 BITS because the capture's own N is 4083412220, which needs them all.
-    /// See <see cref="DrawWide32"/> for why the low bit costs a second call.</para>
-    /// </remarks>
-    internal static TlsQuicHttp3Setting DrawReservedSetting() =>
-        new((0x1FUL * DrawWide32()) + 0x21UL, DrawWide32());
-
-    /// <summary>Draws a value spanning the full 32 bits the capture's numbers needed.</summary>
-    /// <remarks>TWO CALLS, NOT ONE DOUBLED. <see cref="RandomNumberGenerator.GetInt32(int)"/>
-    /// stops one short of <see cref="int.MaxValue"/>, so one call reaches 31 bits and the
-    /// doubling widens it to 32 - but the doubling also clears the low bit, and the second call
-    /// is what puts it back. Without it the draw is uniform over the EVEN values only.</remarks>
-    private static ulong DrawWide32() =>
-        ((ulong)RandomNumberGenerator.GetInt32(int.MaxValue) * 2)
-            + (ulong)RandomNumberGenerator.GetInt32(2);
+    internal static readonly ImmutableArray<TlsQuicHttp3Setting> DefaultSettings = [];
 
     /// <summary>RFC 9114 s11.2.2 Table 3's <c>MAX_FIELD_SECTION_SIZE</c>, 0x06.</summary>
     internal const ulong MaxFieldSectionSizeIdentifier = 0x06;
 
     /// <summary><c>SETTINGS_QPACK_MAX_TABLE_CAPACITY</c>, identifier 1.</summary>
     /// <remarks>rfc9204-section5-6-configuration-and-error-handling.txt:
-    /// "SETTINGS_QPACK_MAX_TABLE_CAPACITY (0x01): The default value is zero." The Brave
+    /// "SETTINGS_QPACK_MAX_TABLE_CAPACITY (0x01): The default value is zero." The that client
     /// capture's line 64 names the same identifier and sends 65536, so the browser is
     /// departing from the RFC's default rather than restating it - which is why the number
     /// belongs in the defaults block and not in a constant named after the RFC. RFC 9114
@@ -240,7 +214,7 @@ internal sealed class TlsQuicHttp3Spec
     ];
 
     /// <summary>The capture's pseudo-header order, <c>m,a,s,p</c>.</summary>
-    /// <remarks>2026-08-16-brave-151-http3-impersonate-pro.md line 70.</remarks>
+    /// <remarks>the preset that measured it line 70.</remarks>
     internal static readonly ImmutableArray<TlsQuicHttp3PseudoHeader> CapturePseudoHeaderOrder =
     [
         TlsQuicHttp3PseudoHeader.Method,
@@ -253,7 +227,7 @@ internal sealed class TlsQuicHttp3Spec
     // End of the defaults block.
     // ------------------------------------------------------------------------------
 
-    private readonly ImmutableArray<TlsQuicHttp3Setting> _settings = CaptureSettings;
+    private readonly ImmutableArray<TlsQuicHttp3Setting> _settings = DefaultSettings;
     private readonly ImmutableArray<TlsQuicHttp3StreamType> _unidirectionalStreamOpenOrder =
         DefaultStreamOpenOrder;
     private readonly ImmutableArray<TlsQuicHttp3PseudoHeader> _pseudoHeaderOrder =
@@ -447,7 +421,7 @@ internal sealed class TlsQuicHttp3Spec
     /// is for - and the cost is a peer that may or may not close the connection. The default is
     /// <see langword="false"/> because the failure is remote, silent and several layers away
     /// from the line that caused it, and because no shipped preset needs the exemption: the
-    /// Brave 151 capture advertises BOTH halves, <c>51:1</c> in its SETTINGS and
+    /// client capture advertises BOTH halves, <c>51:1</c> in its SETTINGS and
     /// <c>32 max_datagram_frame_size = 65536</c> in its transport parameters.</para>
     /// <para>NOTE WHAT THIS IS NOT. It does not force, insert or alter a transport parameter -
     /// only <see cref="TlsQuicTransportParameterSpec"/> and the ClientHello may do that, and a

@@ -6,7 +6,7 @@ Captured for subsystem C task C0. Ground truth for the request/response
 lifecycle C implements: 4.1 gives the HEADERS-then-DATA-then-trailers shape and
 the frame sequences that are a connection error of type H3_FRAME_UNEXPECTED;
 4.1.2 gives the malformed-message rules; 4.2.2 gives the meaning of
-SETTINGS_MAX_FIELD_SECTION_SIZE (the Brave capture sets it to 262144); 4.3 is
+SETTINGS_MAX_FIELD_SECTION_SIZE (a client capture sets it to 262144); 4.3 is
 the section that proves pseudo-header field ORDER among pseudo-headers is
 unconstrained - the only ordering MUST is that all pseudo-header fields appear
 before regular fields - which is why the order a client emits them in is a

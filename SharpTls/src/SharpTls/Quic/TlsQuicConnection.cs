@@ -2131,7 +2131,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 // RFC 9221 s3's two receive-side rules, and the frame reached
                                 // this switch's default arm and was dropped before this.
                                 //
-                                // NOT AN ACADEMIC CASE FOR THIS LIBRARY. The Brave 151 preset
+                                // NOT AN ACADEMIC CASE FOR THIS LIBRARY. A preset
                                 // in TlsQuicTransportParameterSpec sends
                                 // max_datagram_frame_size = 65536 and TlsQuicHttp3Spec's
                                 // capture settings send SETTINGS_H3_DATAGRAM = 1, because the

@@ -136,7 +136,7 @@ fixture. The B11 live run
 test at `2247128`, factory seam at `f83331f`) is the first run where they did: three arms, with
 `perk_hash` / `perk_hash_normalized` predictions written into the test's own header comment above
 the code that ran them, read back by `fp.impersonate.pro`. Three of four `perk` segments match
-Brave 151.
+a captured client.
 
 This matters because it was previously false in a way nobody noticed: the SharpTls handoff records
 that **nothing in `src/` composed a client transport-parameter list at all** before subsystem B —
@@ -189,10 +189,10 @@ Not landed — **do not read the above as "recovery is done"**:
   It belongs to subsystem A4, which is complete only in the "A4-minimal" sense — its landed pieces
   are the MsQuic loopback gate (`776bc07`) and the 1-RTT close fix (`9410755`).
 - `initial_rtt` remains a **narrowed but open** divergence: `TlsQuicConnectionSpec.InitialRttRange`
-  still defaults to `null`, so an unconfigured client advertises `Brave151InitialRttRange`'s
+  still defaults to `null`, so an unconfigured client advertises `DeclaredInitialRttRange`'s
   100-300 ms as transport parameter 12583 while its own estimator starts from RFC 9002's
   `kInitialRtt` of 333 ms. A3-7 gave the knob a caller under `src/` but deliberately did not close
-  the default. `Brave151InitialRttRange`'s maximum sits below 333 ms, which is what makes the
+  the default. `DeclaredInitialRttRange`'s maximum sits below 333 ms, which is what makes the
   divergence observable on the wire.
 
 ### 3. Fuzz and interop under impairment — **partially met**

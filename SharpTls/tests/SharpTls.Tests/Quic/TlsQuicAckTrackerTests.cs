@@ -1302,14 +1302,15 @@ public sealed class TlsQuicAckTrackerTests
     // A.4: "smoothed_rtt = kInitialRtt", "rttvar = kInitialRtt / 2", and min_rtt
     // and latest_rtt at zero.
     //
-    // WHICH kInitialRtt, ASSERTED RATHER THAN ASSUMED. There are two initial-RTT
-    // numbers in this codebase and they disagree: TlsQuicRecoverySpec.KInitialRtt
-    // is 333 ms, and TlsQuicTransportParameterSpec.Brave151InitialRttRange - the
-    // fallback of the transport-parameter entry that ADVERTISES an initial RTT to
-    // the peer - tops out at 300 ms. The tracker's default reads the recovery side,
-    // and this pins that, so a later edit that quietly switches the source fails
-    // here instead of shipping. Resolving the disagreement is task A3-7's; this
-    // test only refuses to let it be resolved by accident.
+    // WHICH kInitialRtt, ASSERTED RATHER THAN ASSUMED. The tracker's default reads
+    // TlsQuicRecoverySpec.KInitialRtt - RFC 9002 s6.2.2's 333 ms - and this pins that,
+    // so a later edit that quietly switches the source fails here instead of shipping.
+    //
+    // THERE USED TO BE A SECOND NUMBER TO DISAGREE WITH. The library's default
+    // transport-parameter list advertised an initial_rtt drawn from a captured browser's
+    // range, which topped out below this one, and this test named the two together so the
+    // divergence could not be resolved by accident. The default list is now RFC 9000 s7.3's
+    // single mandatory entry and advertises no initial_rtt at all, so there is one number.
     [Fact]
     public void BeforeAnySampleTheEstimatorHoldsAppendixA4sInitialisation()
     {
@@ -1321,11 +1322,6 @@ public sealed class TlsQuicAckTrackerTests
         Assert.Equal(TimeSpan.Zero, tracker.MinimumRtt);
         Assert.Equal(TimeSpan.Zero, tracker.LatestRtt);
         Assert.Null(tracker.FirstRttSampleAt);
-
-        // The divergence itself, named so the two numbers are visible together.
-        Assert.True(
-            TlsQuicRecoverySpec.KInitialRtt
-                > TlsQuicTransportParameterSpec.Brave151InitialRttRange.Maximum);
     }
 
     // A.7's first branch: "if (first_rtt_sample == 0): min_rtt = latest_rtt;

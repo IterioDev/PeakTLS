@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Complete one QUIC handshake against a real server, and produce a packet-layer fingerprint readout comparable against `reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md`.
+**Goal:** Complete one QUIC handshake against a real server, and produce a packet-layer fingerprint readout comparable against `reference-captures/the preset that measured it`.
 
 That sentence is the whole scope test. If a feature is not needed to complete one handshake, or is not one of the layout fields the readout reports, it is out — see **Not in this phase**, which names where each cut lands.
 
@@ -39,7 +39,7 @@ Do not retype values from these. Copy them.
 | `rfc9000-section16-variable-length-integers.txt` | §16 — **including the rule that non-minimal varint encodings are permitted everywhere except the Frame Type field.** See *Finding 5* |
 | `rfc9000-section18-transport-parameters.txt` | §18/§18.2 — the bounds the peer's parameters are validated against |
 | `rfc9000-section20-transport-error-codes.txt` | §20.1 — the code to put in CONNECTION_CLOSE |
-| `2026-08-16-brave-151-http3-impersonate-pro.md` | The readout target: client CID length 0, server CID length 8, `max_udp_payload_size` 1472, transport parameter wire order |
+| `the preset that measured it` | The readout target: client CID length 0, server CID length 8, `max_udp_payload_size` 1472, transport parameter wire order |
 
 **Every constant carries its RFC section. Reviewers verify against the RFC text, never against the code's comments.** That produced zero wire-format defects across A1's ten tasks and A2's seven, and is not optional here.
 
@@ -59,7 +59,7 @@ Do not retype values from these. Copy them.
 
 **Four requirements these extracts surfaced that no earlier draft of this plan stated.** Three independently confirm a review finding from the RFC text rather than from code reading:
 
-1. **§7.2: the client's self-chosen DCID on its first Initial MUST be at least 8 bytes.** This is a hard validation rule on `TlsQuicConnectionSpec`, not a Chromium-shaped default, and **it bounds one of subsystem B's knobs**. Brave's DCID length of 8 sits exactly at the floor, so the constraint is invisible until someone tries to go below it. → task 1.
+1. **§7.2: the client's self-chosen DCID on its first Initial MUST be at least 8 bytes.** This is a hard validation rule on `TlsQuicConnectionSpec`, not a Chromium-shaped default, and **it bounds one of subsystem B's knobs**. that client's DCID length of 8 sits exactly at the floor, so the constraint is invisible until someone tries to go below it. → task 1.
 2. **§7.3: both endpoints MUST validate** the peer's `original_destination_connection_id` and `retry_source_connection_id` against the CIDs observed on the wire, treating a mismatch as `TRANSPORT_PARAMETER_ERROR` or `PROTOCOL_VIOLATION`. → task 9b, and it confirms this was a gap in the task list, not merely a missing citation.
 3. **§4.1.2, verbatim: *"At the client, the handshake is considered confirmed when a HANDSHAKE_DONE frame is received."*** A client *MAY* also confirm on an acknowledgment for a 1-RTT packet. → task 9a-ii, and it is Finding 8 confirmed from the RFC.
 4. **§13.2.1: ACKs for Initial and Handshake packets MUST be sent immediately**, with no `max_ack_delay`, unlike 1-RTT. → task 8, as a simplification.
@@ -373,9 +373,9 @@ RFC 9369 is extraction only. QUIC v2 is not implemented in this phase; the extra
 
 No behaviour. Two declarations, bundled because neither has behaviour to attribute a failure to — a mistake in either is a compile error or a defaulting error, not a protocol failure.
 
-`TlsQuicConnectionSpec` carries, at minimum: `SourceConnectionIdLength`, `DestinationConnectionIdLength`, `InitialPacketNumber`, `PacketNumberEncodedLength`, `Token`, the per-datagram Initial flight plan, the CRYPTO split plan, frame order within each packet, `PaddingTarget`, and (Finding 5) the varint width overrides for the header `Length` field and CRYPTO `Offset`/`Length`. Defaults are Chromium-shaped where the Brave capture states them: source CID length **0**, destination CID length **8**.
+`TlsQuicConnectionSpec` carries, at minimum: `SourceConnectionIdLength`, `DestinationConnectionIdLength`, `InitialPacketNumber`, `PacketNumberEncodedLength`, `Token`, the per-datagram Initial flight plan, the CRYPTO split plan, frame order within each packet, `PaddingTarget`, and (Finding 5) the varint width overrides for the header `Length` field and CRYPTO `Offset`/`Length`. Defaults are Chromium-shaped where a client capture states them: source CID length **0**, destination CID length **8**.
 
-**One field has a normative floor, and it is the one that looks most like a free choice.** RFC 9000 §7.2, verbatim: *"the client populates the Destination Connection ID field with an unpredictable value. This Destination Connection ID MUST be at least 8 bytes in length."* So `DestinationConnectionIdLength` is a subsystem B knob **bounded below at 8** — and Brave's value of 8 sits exactly on the floor, which is why the constraint is invisible until someone tries 4. Validate it here, document the floor as normative with the citation, and give it a witness. Note the asymmetry: `SourceConnectionIdLength` has no such floor and 0 is legal, which is what Chromium uses.
+**One field has a normative floor, and it is the one that looks most like a free choice.** RFC 9000 §7.2, verbatim: *"the client populates the Destination Connection ID field with an unpredictable value. This Destination Connection ID MUST be at least 8 bytes in length."* So `DestinationConnectionIdLength` is a subsystem B knob **bounded below at 8** — and that client's value of 8 sits exactly on the floor, which is why the constraint is invisible until someone tries 4. Validate it here, document the floor as normative with the citation, and give it a witness. Note the asymmetry: `SourceConnectionIdLength` has no such floor and 0 is legal, which is what Chromium uses.
 
 Two capture facts must also be written into this file as comments, because both are traps that look like ordinary configuration:
 
@@ -592,13 +592,13 @@ Extract, from the datagrams **we emitted**, the fields subsystem B needs: source
 
 **This is the phase's payoff, and it needs no network at all.** Every one of those fields is something *we* emit, so all of them are observable from a recording transport. Only "does a real server accept it" needs the network. That is why this task sits before the live run and not after it.
 
-Emit it as a diffable text block matching the shape of `2026-08-16-brave-151-http3-impersonate-pro.md`'s QUIC section, and check in the readout produced against the task 10 loopback as a snapshot — **labelled a snapshot**, per A2's rule about numbers with no external source.
+Emit it as a diffable text block matching the shape of `the preset that measured it`'s QUIC section, and check in the readout produced against the task 10 loopback as a snapshot — **labelled a snapshot**, per A2's rule about numbers with no external source.
 
-**Done when** the readout is produced from recorded datagrams alone; it reports every field above; the snapshot is checked in and asserted; and the report contains a **hand-written comparison against the Brave capture**, naming for each field: match, mismatch, or not-yet-known-from-the-capture. The last category is the useful output — it tells subsystem B what still needs a packet capture.
+**Done when** the readout is produced from recorded datagrams alone; it reports every field above; the snapshot is checked in and asserted; and the report contains a **hand-written comparison against a client capture**, naming for each field: match, mismatch, or not-yet-known-from-the-capture. The last category is the useful output — it tells subsystem B what still needs a packet capture.
 
 
 **Carried in from task 1 — report the missing `initial_rtt` as a known deviation.** The spec's
-`InitialRttRange` is `null`, because the Brave capture contains exactly one draw and nothing in the
+`InitialRttRange` is `null`, because a client capture contains exactly one draw and nothing in the
 repo bounds Chromium's range. So this connection sends **no** `initial_rtt` transport parameter at
 all. That is a real difference from the target and **must appear in the readout as a named deviation**
 — not omitted, and not silently passed. If it is ever bounded (by capturing enough connections, or
@@ -615,7 +615,7 @@ by reading uQUIC's `ChromeRandomInitialRTT()`), this line changes.
    (`TlsQuicConnectionSpec.CoalesceAscendingByLevel`) and the **ACK's position** inside a packet
    (`AckLeadsInPacket`). Both are readable from recorded datagrams only by decrypting them, so the
    readout takes them from the spec the connection was built with, and **says that is where they
-   came from**. Neither has ground truth in the Brave capture: both belong in the
+   came from**. Neither has ground truth in a client capture: both belong in the
    not-yet-known-from-the-capture column.
 3. **`AckDelayExponent` is still not observable**, for the reason the amendment gives — the loop
    reads the clock once per pump, so every `ack_delay` is structurally zero. Report it as *wired
@@ -664,7 +664,7 @@ Complete a handshake against a live server and produce the task 11 readout from 
    the knowingly violated MUST, measured rather than predicted, and it is what tells task 14 how
    urgent it is.
 
-**Done when** a handshake completes against at least one live endpoint, the readout is captured and compared against the Brave capture, and the report records how many attempts it took.
+**Done when** a handshake completes against at least one live endpoint, the readout is captured and compared against a client capture, and the report records how many attempts it took.
 
 ## Task 14: Minimal streams for subsystem C
 
@@ -704,7 +704,7 @@ That order is not arbitrary. Task 0 unblocks 5, 9a-i and 9a-ii. Task 1's spec is
 - No parser or receive-loop path throws for any input, and the rejecting path allocates 0 bytes.
 - The handshake reaches **confirmed** — HANDSHAKE_DONE received over a 1-RTT short-header packet — not merely complete.
 - A handshake completes against `System.Net.Quic.QuicListener` on loopback, in the gate.
-- A handshake completes against a live server, and a fingerprint readout is produced and compared against the Brave 151 capture field by field.
+- A handshake completes against a live server, and a fingerprint readout is produced and compared against a client capture field by field.
 - Every layout field is read from `TlsQuicConnectionSpec`; no numeric layout literal exists outside its defaults block.
 - `dotnet test --filter "FullyQualifiedName~Quic"` green, plus `PublicApiBaselineTests.ExportedApiMatchesTheReviewedBaseline` by name.
 
@@ -728,7 +728,7 @@ Each cut names where it lands. Silently omitting any of these is the failure mod
 | Graceful close and full draining semantics (§10.2.2) | **A4-complete** | 9b sends CONNECTION_CLOSE and stops. No draining timer |
 | 0-RTT | **A4-complete** | The TLS side already supports it; this is deferral, not deletion |
 | ECN | **A4-complete** | The ACK codec already handles ECN counts; nothing sets or reads them |
-| QUIC v2 (RFC 9369) | **A4-complete or B** | Extracted in task 0 for citation coverage only. Brave's `version_information` lists GREASE and v1, not v2, so B may never need it |
+| QUIC v2 (RFC 9369) | **A4-complete or B** | Extracted in task 0 for citation coverage only. that client's `version_information` lists GREASE and v1, not v2, so B may never need it |
 | A shipped QUIC server | **never** | Task 7's peer is a test fixture. `CustomTlsQuicServer` remains the TLS half only |
 | Pooled receive buffers, span-based frame writing | **A3 or later** | Finding 3: pooling is the change that would silently break the aliasing contract. Do not do it while the contract is only documented |
 | **The `IPEndPoint`-per-datagram allocation** (Finding 7): reshaping `ITlsQuicDatagramTransport.ReceiveAsync` around a reusable `SocketAddress`, per `Socket.ReceiveFromAsync(Memory<byte>, SocketFlags, SocketAddress, CancellationToken)` | **A3** | The scoping assigns this decision to subsystem A and says to take it "when there is a packet loop to measure". Task 6 is that loop, so this is a **decision, deferred** — not an omission. A handshake is ten datagrams; the change would land on four implementations of the interface before there is anything to measure. A3 is the phase that runs the loop at rate. Recorded at the receive site in task 6 |
@@ -743,7 +743,7 @@ Each cut names where it lands. Silently omitting any of these is the failure mod
 
 **The `initial_rtt` requirement cannot be met with what is in the repo, and task 9a-ii's pin is
 unsatisfiable as written.** The plan asks the spec to hold "the policy — randomise, and within what
-range". **No ground truth for Chromium's range exists here**: the Brave capture contains a single
+range". **No ground truth for Chromium's range exists here**: a client capture contains a single
 draw (parameter 12583, observed value 192859), which fixes neither bounds nor distribution. Task 1
 refused to invent bounds and defaulted the field to `null`, which was correct — a fabricated range is
 a fingerprint that is confidently wrong, and the standing rule is that a constant nobody can check is
@@ -767,7 +767,7 @@ the consumers actually take, and the "three consumers" framing was wrong by one:
 consumer** — it builds one packet from a header spec and an ordered frame list, and the flight plan
 never reaches it. Task 5 is the only consumer needing grouping, and that is a five-line walk taking
 `counts[i]` chunks per datagram. **Task 11 wants them flat**: it reports the per-datagram flight plan
-and the CRYPTO splits as *separate* lines, diffed against the Brave capture's own two separate
+and the CRYPTO splits as *separate* lines, diffed against a client capture's own two separate
 fields, so a nested form would have to be flattened back out.
 
 Nesting's real advantage — the sum invariant becomes structurally true — costs the affordance both
@@ -1006,7 +1006,7 @@ one pass reads as satisfied by an implementation the other pass reads as present
 finds it is neither pass's: *for each half of a compound requirement, which line enforces that half,
 and on which path?*
 
-**`AckRangeLimit`'s default of 32 is a placeholder and task 11 must report it as one.** The Brave
+**`AckRangeLimit`'s default of 32 is a placeholder and task 11 must report it as one.** The that client
 capture says nothing about ACK ranges and there is no published vector, so it sits in the same
 not-yet-known-from-the-capture category as `InitialPacketNumber` and the `initial_rtt` range task 1
 refused to invent. It is honestly labelled in the source XML doc, which task 11 will not read — hence

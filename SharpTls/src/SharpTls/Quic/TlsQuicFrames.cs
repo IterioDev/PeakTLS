@@ -678,7 +678,7 @@ internal static class TlsQuicFrames
     /// <para>THIS CLOSES AN ADVERTISEMENT, NOT A FEATURE. SharpTls accepts and
     /// discards DATAGRAM frames; it does not implement QUIC or HTTP/3
     /// datagrams. The reason it exists at all is that this client's *defaults*
-    /// claim it does: <see cref="TlsQuicTransportParameterSpec"/>'s Brave 151
+    /// claim it does: <see cref="TlsQuicTransportParameterSpec"/>'s a captured client
     /// preset emits <c>max_datagram_frame_size</c> = 65536 and
     /// <see cref="TlsQuicHttp3Spec"/>'s <c>CaptureSettings</c> emits
     /// <c>SETTINGS_H3_DATAGRAM</c> = 1, and RFC 9221 s3 makes the first of

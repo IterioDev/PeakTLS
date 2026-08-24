@@ -121,7 +121,7 @@ internal sealed class TlsQuicClientHelloProfileFactory
     /// wants the split passes a spec carrying it, and
     /// <c>TlsQuicDatagramBuilder.PlanInitialFlightSplit</c> derives the two arrays from the
     /// encoded ClientHello's length and a per-datagram byte budget - the capture's being
-    /// <c>TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram</c>, whose exact
+    /// <c>TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram</c>, whose exact
     /// value task B12 settles. THE SPLIT IS NOT THIS TYPE'S DEFAULT because those arrays are
     /// absolute byte counts and nothing here knows, at the moment a spec is constructed, how
     /// long the ClientHello it is about to build will turn out to be.</para>

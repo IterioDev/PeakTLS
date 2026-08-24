@@ -149,7 +149,7 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
     // is read only by TlsQuicClientHelloProfileFactory, so a caller that hands
     // TlsQuicConnection a hand-built ClientHelloProfile leaves the spec's copy describing a
     // list that was never sent. Task C17 measured what reading the spec instead would have
-    // cost: the arm that failed live carried Brave151Parameters on its spec (which HAS 0x20)
+    // cost: the arm that failed live carried RfcMinimumParameters on its spec (which HAS 0x20)
     // and a hand-typed list on the wire (which had not), so a check reading the spec would
     // have passed on precisely the configuration that was broken.
     //

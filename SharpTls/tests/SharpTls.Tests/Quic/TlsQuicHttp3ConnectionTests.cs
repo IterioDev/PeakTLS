@@ -37,7 +37,7 @@ namespace SharpTls.Tests.Quic;
 //
 //   AND ITS SPEC IS NOT THE DEFAULT ONE. The settings asserted are a list no other test in the
 //   tree uses, in an order that is not ascending, so an implementation that ignored the spec
-//   and wrote TlsQuicHttp3Spec.CaptureSettings - or sorted - fails here and passes a test that
+//   and wrote SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable - or sorted - fails here and passes a test that
 //   used the default.
 //
 // ============================================================================
@@ -1025,7 +1025,13 @@ public sealed partial class TlsQuicConnectionTests
         using var cancellation = new CancellationTokenSource(TestTimeout);
         var exception = await Assert.ThrowsAsync<ArgumentException>(
             async () => await Harness.CreateAsync(
-                cancellation.Token, maxDatagramFrameSize: null));
+                cancellation.Token,
+                // THE CLAIM HAS TO BE MADE FOR THE REFUSAL TO EXIST. The harness's default
+                // SETTINGS no longer carry SETTINGS_H3_DATAGRAM - SharpTls ships no persona, so
+                // the library default is empty and the harness asks only for a QPACK table -
+                // and a spec that claims nothing cannot be refused for claiming half of it.
+                spec: new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable },
+                maxDatagramFrameSize: null));
 
         // BOTH HALVES NAMED, because 0x109 names neither and that is the whole reason this
         // moved local. A caller who reads only the message must be able to find both lines.
@@ -1042,7 +1048,10 @@ public sealed partial class TlsQuicConnectionTests
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await Harness.CreateAsync(cancellation.Token, maxDatagramFrameSize: 0));
+            async () => await Harness.CreateAsync(
+                cancellation.Token,
+                spec: new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable },
+                maxDatagramFrameSize: 0));
     }
 
     [Theory]
@@ -1053,11 +1062,11 @@ public sealed partial class TlsQuicConnectionTests
         using var cancellation = new CancellationTokenSource(TestTimeout);
         System.Collections.Immutable.ImmutableArray<TlsQuicHttp3Setting> settings =
             datagramSetting is { } value
-            ? [.. TlsQuicHttp3Spec.CaptureSettings
+            ? [.. TestHttp3Settings.DatagramCapable
                 .Select(s => s.Identifier == TlsQuicHttp3Spec.H3DatagramIdentifier
                     ? new TlsQuicHttp3Setting(s.Identifier, value)
                     : s)]
-            : [.. TlsQuicHttp3Spec.CaptureSettings
+            : [.. TestHttp3Settings.DatagramCapable
                 .Where(s => s.Identifier != TlsQuicHttp3Spec.H3DatagramIdentifier)];
 
         using var harness = await Harness.CreateAsync(
@@ -1072,7 +1081,14 @@ public sealed partial class TlsQuicConnectionTests
     public async Task TheExemptionLetsACallerComposeTheInconsistentPairOnPurpose()
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
-        var spec = new TlsQuicHttp3Spec { AllowDatagramSettingWithoutTransportParameter = true };
+        // THE SETTINGS ARE NAMED, because the exemption is about a spec that DOES claim
+        // SETTINGS_H3_DATAGRAM without the transport parameter. The library default claims
+        // nothing now, so a spec that only flips the exemption has nothing to be exempted from.
+        var spec = new TlsQuicHttp3Spec
+        {
+            Settings = TestHttp3Settings.DatagramCapable,
+            AllowDatagramSettingWithoutTransportParameter = true,
+        };
         using var harness = await Harness.CreateAsync(
             cancellation.Token, spec, maxDatagramFrameSize: null);
 
@@ -1631,8 +1647,8 @@ public sealed partial class TlsQuicConnectionTests
     // ------------------------------------------------------------------------
     //
     // THE INVITATION IS REAL, WHICH IS WHY THESE ARE NOT HYPOTHETICAL.
-    // TlsQuicTransportParameterSpec's Brave 151 preset sends max_datagram_frame_size = 65536
-    // and TlsQuicHttp3Spec.CaptureSettings sends SETTINGS_H3_DATAGRAM = 1, because the client
+    // TlsQuicTransportParameterSpec's preset sends max_datagram_frame_size = 65536
+    // and SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable sends SETTINGS_H3_DATAGRAM = 1, because the client
     // being impersonated does. A server is entitled to take both at their word.
     //
     // THE FRAMES ARE HAND-ENCODED against RFC 9221 s4's two fields - Type 0x30 or 0x31, then
@@ -1833,9 +1849,9 @@ public sealed partial class TlsQuicConnectionTests
             var pki = TestPki.Create();
             var credential = Credential(pki);
             var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
-            // 65536 IS THE CAPTURE'S NUMBER - TlsQuicTransportParameterSpec.Brave151Parameters
+            // 65536 IS THE CAPTURE'S NUMBER - TlsQuicTransportParameterSpec.RfcMinimumParameters
             // row 3, "32 max_datagram_frame_size = 65536" - and it is here because this harness
-            // sends TlsQuicHttp3Spec.CaptureSettings, whose 51:1 is the HTTP/3 half of the same
+            // sends SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable, whose 51:1 is the HTTP/3 half of the same
             // claim. Advertising only one half is what TlsQuicHttp3Connection's constructor now
             // refuses, so this line is the harness saying what it means rather than the harness
             // opting out of the check.
@@ -1848,7 +1864,12 @@ public sealed partial class TlsQuicConnectionTests
                 serverTransport, clientTransport.LocalEndPoint, server, Spec());
             await ConfirmedHandshake(connection, peer, cancellationToken);
 
-            var http3 = new TlsQuicHttp3Connection(connection, spec ?? new TlsQuicHttp3Spec());
+            var http3 = new TlsQuicHttp3Connection(
+                connection,
+                // NOT `new TlsQuicHttp3Spec()`: SharpTls ships no persona, so the
+                // default SETTINGS are empty and QPACK's table capacity is zero. The
+                // harness needs a table; it does not need a datagram claim.
+                spec ?? new TlsQuicHttp3Spec { Settings = TestHttp3Settings.QpackCapable });
             if (openLocalStreams)
             {
                 http3.OpenLocalStreams();
@@ -3051,9 +3072,9 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
                     TlsQuicTransportParameter.VariableInteger(
                         TlsQuicTransportParameterId.ActiveConnectionIdLimit, 2),
 
-                    // RFC 9221 s3's 0x20, at the Brave capture's 65536, for the reason the
+                    // RFC 9221 s3's 0x20, at a client capture's 65536, for the reason the
                     // offline Harness passes the same number: this client sends
-                    // TlsQuicHttp3Spec.CaptureSettings, whose 51:1 says it will receive HTTP/3
+                    // SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable, whose 51:1 says it will receive HTTP/3
                     // datagrams, and TlsQuicHttp3Connection's constructor refuses that claim
                     // when the ClientHello carries no transport half of it. MsQuic tolerates
                     // the inconsistent pair and fp.impersonate.pro does not - which is exactly
@@ -3061,12 +3082,14 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
                     TlsQuicTransportParameter.VariableInteger(
                         TlsQuicTransportParameterId.MaxDatagramFrameSize, 65536),
 
-                    // THE SIX FLOW-CONTROL LIMITS COME FROM THE SPEC NOW, not from the round
-                    // numbers the spike hard-coded. TlsQuicConnectionSpec.LocalFlowControl
-                    // advertises them and TlsQuicStreamSet enforces the same values it
-                    // advertised, which is the half the spike's second finding said was
-                    // missing - it promised a window nothing ever raised.
-                    .. new TlsQuicConnectionSpec().LocalFlowControl.ToTransportParameters(),
+                    // THE SIX FLOW-CONTROL LIMITS COME FROM THE HARNESS'S SPEC, and they have
+                    // to come from a populated one: a bare TlsQuicConnectionSpec advertises RFC
+                    // 9000 s18.2's zero for all six now that SharpTls ships no captured
+                    // persona, and a server granting zero is a server this client can open
+                    // nothing against. Spec() is the same object the client side uses, so the
+                    // two halves of the loopback still agree by construction - which is the
+                    // property the spike's second finding was about.
+                    .. TestQuicSpecValues.HarnessFlowControl.ToTransportParameters(),
                 ]))),
             CertificateValidation = new CustomTlsCertificateValidationOptions
             {

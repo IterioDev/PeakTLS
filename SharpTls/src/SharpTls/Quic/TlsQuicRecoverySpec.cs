@@ -1040,16 +1040,12 @@ internal sealed class TlsQuicRecoverySpec
     /// is a range precisely so that two connections from one spec do not start with the same
     /// number - a pinned per-connection field is itself a fingerprint. The draw is uniform
     /// over ticks and inclusive of both bounds.</para>
-    /// <para>AND A DIVERGENCE THE SHIPPED DEFAULTS CURRENTLY HAVE, recorded here rather than
-    /// left to be rediscovered. <see cref="TlsQuicConnectionSpec.InitialRttRange"/> defaults
-    /// to <see langword="null"/>, while the transport-parameter preset advertises
-    /// <c>initial_rtt</c> drawn from
-    /// <see cref="TlsQuicTransportParameterSpec.Brave151InitialRttRange"/> - 100 to 300 ms -
-    /// because that entry declares its own fallback range for exactly the case where this
-    /// property names none. So an unconfigured client ADVERTISES a number between 100 and
-    /// 300 ms and, by the fallback arm below, would START from 333 ms. Both are legal and
-    /// nothing observes the second yet, but they are two answers to one question, which is
-    /// the shape of defect this project has already paid for once. A caller who cares sets
+    /// <para>THE DIVERGENCE THIS PARAGRAPH USED TO RECORD IS GONE, and it went when the
+    /// library stopped shipping a captured persona. The default transport-parameter list is
+    /// now RFC 9000 s7.3's single mandatory entry, so an unconfigured client advertises no
+    /// <c>initial_rtt</c> at all and there is no advertised number for the value below to
+    /// disagree with. A preset that emits <c>initial_rtt</c> declares its own range beside it,
+    /// which is one answer to one question. A caller who cares sets
     /// <see cref="TlsQuicConnectionSpec.InitialRttRange"/>, which makes the two agree. The
     /// task that has to decide whether the default should agree by construction is A3-7,
     /// with A3-14's capture in hand.</para>

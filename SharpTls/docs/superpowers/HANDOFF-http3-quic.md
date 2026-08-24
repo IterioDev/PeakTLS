@@ -19,7 +19,7 @@ a shared tree inflates it. HEAD moved mid-task under three of them. The number a
 compile while another agent is mid-edit.
 
 **The field is `perk_text`, not `perk`.** Only the hashes carry the documented names; querying `perk`
-returns nothing. The Brave capture is half-wrong about its own subject — its heading says `perk`,
+returns nothing. A client capture is half-wrong about its own subject — its heading says `perk`,
 its line 98 says `perk_text`. Every use of the bare word `perk` below means `perk_text`.
 
 ## Subsystem C is complete through C12. The instrument now exists.
@@ -36,10 +36,10 @@ A real GET through `TlsQuicHttp3Connection` against `fp.impersonate.pro/api/http
 returned HTTP/200 and this fingerprint:
 
     ours   1:0;6:262144;7:0 | m,a,s,p | 15:AUTO;14:2;4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103 | 0,8
-    brave  1:65536;6:262144;7:100;51:1;GREASE | m,a,s,p | 12584:0x4f524947;GREASE;32:65536;9:103;8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;4:15728640;12583:AUTO;3:1472 | 0,8
+    client  1:65536;6:262144;7:100;51:1;GREASE | m,a,s,p | 12584:0x4f524947;GREASE;32:65536;9:103;8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;4:15728640;12583:AUTO;3:1472 | 0,8
 
 **Segment 1 read as 1-of-5 and that was a misreading.** `TlsQuicHttp3Spec._settings` defaults to
-`CaptureSettings` — all five of Brave's pairs, `51:1` and the GREASE identifier included — so the
+`CaptureSettings` — all five of that client's pairs, `51:1` and the GREASE identifier included — so the
 DEFAULT spec emits an exact segment 1. The live run deliberately narrowed it to QPACK `0`/`0`,
 because capacity 0 is what makes the static-only C5–C8 decoder correct rather than lucky. **A test's
 chosen spec is not the library's capability.** Reading one as the other is the trap here, and the
@@ -53,12 +53,12 @@ readout exists so nobody has to infer it from a live run again.
 - **Segment 3 is subsystem B's.** Every shared value already matches (4, 5, 6, 7, 8, 9, 15). What is
   missing is seven parameters — `google_connection_options`, a GREASE parameter,
   `max_datagram_frame_size`, `version_information`, `max_idle_timeout`, `initial_rtt`,
-  `max_udp_payload_size` — plus one we send that Brave does not, `active_connection_id_limit`, and
+  `max_udp_payload_size` — plus one we send that that client does not, `active_connection_id_limit`, and
   the wire order itself. `initial_rtt` **must be randomised per connection**; a pinned value is
   itself a fingerprint.
 
 C13 did record it: `reference-captures/2026-08-20-sharptls-c13-live-http3.md`, and the live wire
-settled segment 4 as `0,8` — matching Brave exactly, confirming the readout row was a harness
+settled segment 4 as `0,8` — matching that client exactly, confirming the readout row was a harness
 artifact.
 
 ## What landed this session
@@ -87,8 +87,8 @@ Gate 1510 → 1954.
 left every peer limit at 0. `TlsQuicStreamSet`'s independent 1 MiB / 64-stream constants are now
 **deleted**, the enforced bound is the advertised bound, a connection-level bound against
 `initial_max_data` exists at all, and MAX_DATA / MAX_STREAM_DATA ride the 1-RTT packet 14c builds.
-The Brave capture bounds all six values; the spike's hard-coded `initial_max_streams_bidi = 0` was
-wrong — Brave sends 100.
+A client capture bounds all six values; the spike's hard-coded `initial_max_streams_bidi = 0` was
+wrong — that client sends 100.
 
 **No CONNECTION_CLOSE of either form could leave after handshake confirmation.** `BuildCloseDatagram`
 walked `[Handshake, Initial]`, both discarded by RFC 9001 §4.9 by then, so it wrote nothing.
@@ -183,10 +183,10 @@ persistent-congestion duration have no pseudocode at all.**
 
 ### STILL OPEN: two answers to one question about `initial_rtt`
 
-`TlsQuicConnectionSpec.InitialRttRange` **defaults to `null`**. `Brave151InitialRttRange` (100-300 ms)
+`TlsQuicConnectionSpec.InitialRttRange` **defaults to `null`**. `DeclaredInitialRttRange` (100-300 ms)
 lives on `TlsQuicTransportParameterSpec` as the *transport parameter entry's* fallback. So an
 unconfigured client **advertises 100-300 ms** and would **start from `kInitialRtt`'s 333 ms**.
-`Brave151InitialRttRange`'s maximum sits *below* 333 ms, which is what makes the divergence
+`DeclaredInitialRttRange`'s maximum sits *below* 333 ms, which is what makes the divergence
 observable. **Task A3-7 owns resolving it**; A3-4 deliberately refused to deepen it by drawing a
 third value.
 
@@ -239,7 +239,7 @@ Run with `SHARPTLS_RUN_INTEROP=1` at `bea2654`:
 
 **The discriminating difference between the two tests is their QUIC TRANSPORT PARAMETERS**, not
 their SETTINGS. The passing one drives `TlsQuicClientHelloProfileFactory`, defaulting to
-`Brave151Parameters`, which **includes `max_datagram_frame_size` (32)**. The failing one uses a
+`RfcMinimumParameters`, which **includes `max_datagram_frame_size` (32)**. The failing one uses a
 hand-typed `BaselineParameters` (`QuicPublicEndpointInteropTests.cs` ~`:895-905`) carrying only
 `initial_source_connection_id`, `active_connection_id_limit` and the six flow-control values -
 **no `max_datagram_frame_size`**. So the failing arm advertises `SETTINGS_H3_DATAGRAM = 1` while
@@ -272,7 +272,7 @@ a deliberately inconsistent fingerprint if a real client sends one.
 ## The QPACK arm - C14, C15 and C16, all landed
 
 Segment 1 is the only `perk` segment that does not match, and **it already emits an exact match** -
-`TlsQuicHttp3Spec.CaptureSettings` carries all five of Brave's pairs by default. It is not *usable*
+`TlsQuicHttp3Spec.CaptureSettings` carries all five of that client's pairs by default. It is not *usable*
 live because the capture's `SETTINGS_QPACK_MAX_TABLE_CAPACITY = 65536` lets the peer's encoder use
 the dynamic table, and the C5-C8 decoder is static-only. Every live run so far narrowed SETTINGS to
 QPACK `0`/`0` for exactly that reason.
@@ -301,13 +301,13 @@ accepting one. Accepting must allocate; an entry has to be stored.
 `ChromeRandomInitialRTT()` would settle `initial_rtt` without a capture. **Tried at `5c0039c`; it does
 not.**
 
-uQUIC draws uniformly over **[1000, 20000) microseconds**; the Brave capture's **192859 is outside
+uQUIC draws uniformly over **[1000, 20000) microseconds**; a client capture's **192859 is outside
 that by 9.6x**. Three independent readings: 192859 > 20000 outright; the function emits a **2-byte
-varint** whose maximum is 16383, so **Brave's wire encoding is not this encoding** whatever the
+varint** whose maximum is 16383, so **that client's wire encoding is not this encoding** whatever the
 values; and uQUIC's own `maxRTT` exceeds 2-byte varint capacity, so its draws above 16383 silently
 lose their overflow bits - it is not an authority even on its own terms.
 
-**Two real draws now exist, 25x apart** - uQUIC's doc records 7740 us, the Brave capture 192859 us,
+**Two real draws now exist, 25x apart** - uQUIC's doc records 7740 us, a client capture 192859 us,
 both plausible *measured* RTTs. The simplest reading consistent with both is that **Chromium reports
 a path-derived estimate rather than a random draw**, in which case a range is the wrong model and the
 knob's shape changes. Inference from two points, flagged as such.
@@ -349,7 +349,7 @@ uncheckable.
 
 | arm | `perk_hash` | `perk_hash_normalized` |
 | --- | --- | --- |
-| Brave151 preset as shipped | `04736da3818104056c4fda492c21bd05` | `058578261cc56e6f6a02cbd3349dd51a` |
+| that client151 preset as shipped | `04736da3818104056c4fda492c21bd05` | `058578261cc56e6f6a02cbd3349dd51a` |
 | same 14, sorted ascending | `8a1b68ab063c11af9a015c4553661f52` | `058578261cc56e6f6a02cbd3349dd51a` |
 | preset again | `04736da3818104056c4fda492c21bd05` | `058578261cc56e6f6a02cbd3349dd51a` |
 
@@ -368,8 +368,8 @@ uncheckable.
 **A prediction failed, and it is the most useful thing the run produced.** The sorted arm's RAW hash
 is not the preset's NORMALIZED hash: normalization **also sorts the available-versions list inside
 `version_information`**, raw `17:1@GREASE,1` becoming normalized `17:1@1,GREASE`. Nothing in the repo
-said so and the Brave capture claims only "sorts transport parameters by ID". It does not affect B7,
-which targets the raw form, and the raw form is Brave's.
+said so and a client capture claims only "sorts transport parameters by ID". It does not affect B7,
+which targets the raw form, and the raw form is that client's.
 
 **Per-connection draws are inert to the hash, confirmed under the real composition path:** 8
 connections drew 8 fresh `initial_rtt` values, 8 fresh reserved identifiers and 8 fresh GREASE
@@ -409,7 +409,7 @@ emit, or silently picking a number with no comment, are both out.
 identifier/value slots** taking arbitrary identifiers — unknown, GREASE, Google-private 12583/12584 —
 arbitrary bytes, arbitrary order, duplicates, omission. `Literal(id, bytes)`, `Placed(id)` for values
 the connection derives, and `Drawn(Func<spec, parameter?>)` for anything redrawn per connection, where
-returning `null` omits it. Brave 151 is a preset of 7 literal + 7 placed slots, each citing a capture
+returning `null` omits it. a captured client is a preset of 7 literal + 7 placed slots, each citing a capture
 line. Its acceptance test writes the expected bytes **by hand** rather than round-tripping the
 encoder, so it checks against an independent computation instead of a tautology.
 
@@ -454,7 +454,7 @@ read against §6.4.1's escaping set rather than strictly.
 **Still open in subsystem B's territory, and now the largest single unknown:** `SplitIntoFrames` and
 `GroupIntoDatagrams` default to one frame in one datagram. Overshoot past the padding target is
 deliberate and §14.1-justified (`TlsQuicDatagramBuilder.cs:355`, witnessed by
-`AFlightDatagramMayExceedThePaddingTarget`), and it names the Brave capture's 1216-byte
+`AFlightDatagramMayExceedThePaddingTarget`), and it names a client capture's 1216-byte
 X25519MLKEM768 key share as the motivating case. But the capture's own opening flight is **two**
 datagrams, and swapping the key share in without splitting ships **one oversized Initial**. A wrong
 split throws nothing, fails no test, and `fp.impersonate.pro` cannot see it — only a packet capture
@@ -578,7 +578,7 @@ Plan, with eighteen standing rules: `docs/superpowers/plans/2026-08-17-quic-a2-f
 | `rfc9000-section16-variable-length-integers.txt` | §16 complete, Table 4, the non-minimal-encoding rule |
 | `rfc9000-section18-transport-parameters.txt` | §18, §18.1, §18.2 complete, Figures 20–22 |
 | `rfc9000-section20-transport-error-codes.txt` | §20.1, the transport error code space |
-| `2026-08-16-brave-151-http3-impersonate-pro.md` | a real Brave 151 HTTP/3 fingerprint, subsystem B's target |
+| `the preset that measured it` | a real a captured client HTTP/3 fingerprint, subsystem B's target |
 
 A4's task 0 added eight more, same practice, all verified byte-verbatim by independent re-fetch and
 line diff: RFC 9000 §7.2–7.3 (connection ID negotiation), §8.1 (address validation and the
@@ -881,7 +881,7 @@ satisfied by a silent fallback.
 
 Usable **after A4 + minimal C**: reaching them over `h3` is subsystem B's acceptance gate.
 
-The Brave 151 capture in `reference-captures/` is the target readout. Key facts from it:
+A client capture in `reference-captures/` is the target readout. Key facts from it:
 
 - client connection ID length **0**, server connection ID length **8**
 - QUIC transport parameter **wire order is fingerprinted** — the `perk` format publishes both
@@ -923,7 +923,7 @@ What is genuinely missing is the **packet layer only** — six fields, and A4's 
 6. datagram padding target
 **One of these is bounded by an RFC MUST, which was invisible until §7.2 was extracted:** the
 client's self-chosen Destination Connection ID on its **very first Initial packet must be at least 8
-bytes** (§7.2). Brave's DCID length of 8 sits exactly at that floor, so the constraint is invisible
+bytes** (§7.2). that client's DCID length of 8 sits exactly at that floor, so the constraint is invisible
 in the capture and only appears if someone tries to go lower. Field 1 below is therefore a knob with
 a normative minimum, not a free parameter.
 

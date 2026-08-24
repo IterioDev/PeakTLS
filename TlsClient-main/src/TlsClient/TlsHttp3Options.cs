@@ -53,7 +53,7 @@ public enum TlsQpackNameMatchPolicy
 
 /// <summary>
 /// One HTTP/3 SETTINGS entry. The identifier is a bare <see cref="ulong"/> rather than an enum
-/// because a real client sends identifiers no registry lists — the Brave 151 capture's fifth
+/// because a real client sends identifiers no registry lists — a client capture's fifth
 /// entry, 126585778853, is a GREASE identifier of exactly that kind.
 /// </summary>
 /// <param name="Identifier">The setting identifier, any QUIC variable-length integer.</param>
@@ -106,7 +106,7 @@ public sealed class TlsHttp3Options
     private static readonly TlsQuicHttp3Spec SpecDefaults = new();
 
     /// <summary>
-    /// Gets or sets the SETTINGS entries, in exact wire order. The default is the Brave 151
+    /// Gets or sets the SETTINGS entries, in exact wire order. The default is the a captured client
     /// capture's five pairs, read from <c>TlsQuicHttp3Spec</c>'s own preset.
     /// </summary>
     public IList<TlsHttp3Setting> Settings { get; set; } =

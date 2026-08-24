@@ -25,7 +25,7 @@ RFC text. Read it accordingly:
     uQUIC is the witness.
 
 Captured for task B12, which asked whether this function settles the range behind
-Brave151InitialRttRange in src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs.
+DeclaredInitialRttRange in src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs.
 
 WHAT IT SAYS - bounds, units, distribution
   bounds:       const minRTT, maxRTT = 1000, 20000
@@ -42,10 +42,10 @@ WHAT IT SAYS - bounds, units, distribution
                 reused spec - see the QUICID2Spec doc comment quoted below.
 
 *** THE OBSERVED 192859 IS OUTSIDE THIS RANGE. THIS FUNCTION DOES NOT SETTLE  ***
-*** Brave151InitialRttRange. DO NOT ADOPT 1000-20000 AS THE BRAVE 151 RANGE.  ***
+*** DeclaredInitialRttRange. DO NOT ADOPT 1000-20000 AS THE BRAVE 151 RANGE.  ***
 
-  The Brave 151 capture
-  (2026-08-16-brave-151-http3-impersonate-pro.md, line 91) records
+  A client capture
+  (the preset that measured it, line 91) records
   initial_rtt = 192859. That is 192859 us = 192.9 ms, roughly 9.6x this
   function's maximum and 193x its minimum. It cannot be a draw from
   [1000, 20000).
@@ -56,7 +56,7 @@ WHAT IT SAYS - bounds, units, distribution
   1. Range. 192859 > 20000. Directly.
   2. Encoding. The function emits a TWO-byte QUIC varint - val is literally two
      bytes, prefix 0b01 - whose maximum representable value is 16383. 192859
-     needs a four-byte varint (max 1073741823). Whatever Brave put on the wire
+     needs a four-byte varint (max 1073741823). Whatever that client put on the wire
      was not encoded the way this function encodes.
   3. The function's own numbers do not close. maxRTT is 20000 but the two-byte
      varint holds 16383, so every draw in [16384, 19999] silently loses its
@@ -68,7 +68,7 @@ WHAT IT SAYS - bounds, units, distribution
   The doc comment also records uQUIC's own single observation: "The observed
   value in the reference pcap was 7740 us". So there are now two single draws
   from the real world - 7740 us (uQUIC's Chrome 146 pcap) and 192859 us (this
-  repo's Brave 151 capture) - a factor of 25 apart, and BOTH inside the range of
+  repo's client capture) - a factor of 25 apart, and BOTH inside the range of
   a plausible measured network RTT. The simplest reading consistent with both is
   that Chromium reports a path-derived RTT estimate rather than drawing a random
   number, in which case there is no fixed distribution to copy and 1000-20000 is
@@ -84,7 +84,7 @@ WHAT THIS CAPTURE SETTLES
 WHAT IT DOES NOT SETTLE
   - The reserved (GREASE) parameter's N in 31*N+27. Untouched here.
   - The Initial flight split point. Untouched here.
-  - Brave 151's actual initial_rtt range. Still UNVERIFIED, now with a cited
+  - a captured client's actual initial_rtt range. Still UNVERIFIED, now with a cited
     reason why the obvious shortcut fails rather than an unexplained marker.
 
 Copy these values; do not retype them.

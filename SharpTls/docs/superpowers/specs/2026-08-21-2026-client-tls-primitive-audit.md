@@ -29,14 +29,14 @@ Every codepoint in this document was read from one of these. Nothing is recalled
 | S9 | Chromium `net/socket/ssl_client_socket_impl.cc` @ `main` (gitiles, `?format=TEXT`) | 2026-08-21 |
 | S10 | Chromium `net/base/features.cc` @ `main` | 2026-08-21 |
 | S11 | Chromium commit history for `net/socket/ssl_client_socket_impl.cc` via GitHub API | 2026-08-21 |
-| S12 | In-repo live capture: `docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md` | in tree |
+| S12 | In-repo live capture: `the preset that measured it` | in tree |
 
 SharpTls evidence is cited as `file:line` from greps I ran myself; the exact greps are
 listed in [Greps run](#greps-run).
 
 ### Column key
 
-`Sent by` — **C** = Chrome/Chromium (incl. Brave/Edge), **F** = Firefox, **S** = Safari/iOS.
+`Sent by` — **C** = Chrome/Chromium (incl. that client/Edge), **F** = Firefox, **S** = Safari/iOS.
 
 `Verdict` — exactly three values, as used elsewhere in this project:
 
@@ -54,7 +54,7 @@ ceiling and is called out per row.
 ## 1. Cipher suites
 
 Chrome from S2 `HelloChrome_133`; Firefox from S2 `HelloFirefox_148`; Safari from S2
-`HelloSafari_26_3`. Brave 151 over QUIC (S12) offers only the three TLS 1.3 suites,
+`HelloSafari_26_3`. a captured client over QUIC (S12) offers only the three TLS 1.3 suites,
 which is expected — QUIC forbids TLS 1.2 suites.
 
 SharpTls enum: `src/SharpTls/Protocol/TlsEnums.cs:4-82` (36 members).
@@ -132,7 +132,7 @@ by RFC 10024**, not drafts:
 
 Only `4588` carries the "Recommended = Y" mark. `4587` and `4589` are `N`.
 
-BoringSSL — the TLS stack in Chrome, Edge, Brave and every Chromium derivative — implements
+BoringSSL — the TLS stack in Chrome, Edge, that client and every Chromium derivative — implements
 a **closed set of six groups** (S8, `ssl/ssl_key_share.cc`):
 
 ```c
@@ -151,7 +151,7 @@ Chrome cannot offer them. `MLKEM1024` (`0x0202` = 514, S7) exists but is not in
 `DefaultSupportedGroupIds()`, which begins `SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519, …`
 (S8) — it is present for CNSA-2.0 / server deployments, not the browser default.
 
-The live Brave 151 capture (S12) independently confirms this: supported_groups is
+The live client capture (S12) independently confirms this: supported_groups is
 `4588-29-23-24`, key shares are X25519MLKEM768 (1216 bytes) and X25519 (32 bytes).
 
 Firefox 148 (S2) offers `X25519MLKEM768, X25519, P-256, P-384, P-521, 0x0100, 0x0101` —
@@ -291,7 +291,7 @@ CertCompressionZstd   CertCompressionAlgo = 0x0003
 | Codepoint | Name | Sent by | Source | Verdict | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `1` | zlib | F, S | S1, S2 (`HelloSafari_26_3` sends **zlib only**) | `supported-and-profiled` | `ZLibStream` — `CompressedCertificateParser.cs:52` |
-| `2` | brotli | C, F | S1, S2, S12 (Brave 151: "27 `compress_certificate` (brotli)") | `supported-and-profiled` | `BrotliStream` — `:53` |
+| `2` | brotli | C, F | S1, S2, S12 (a captured client: "27 `compress_certificate` (brotli)") | `supported-and-profiled` | `BrotliStream` — `:53` |
 | `3` | **zstd** | F | S1, S2 (`HelloFirefox_148`: `CertCompressionZlib, CertCompressionBrotli, CertCompressionZstd`) | **`not-supported`** | **advertised but undecodable — see below** |
 
 **Certificate compression: 3 rows — 2 `supported-and-profiled`, 1 `not-supported`.**
@@ -427,12 +427,12 @@ Recorded honestly rather than guessed.
 1. **Which *stable* Chrome milestone ships ML-DSA sigalgs and sigalg GREASE.** I read
    Chromium `main` (S9, S10) and dated the commits (S11: 2026-06-30 and 2026-07-30), and
    confirmed both features are `FEATURE_ENABLED_BY_DEFAULT` / flag-removed. I did **not**
-   establish the milestone branch cut, so I cannot say whether Chrome/Brave **151** — the
+   establish the milestone branch cut, so I cannot say whether Chrome/that client **151** — the
    version in the in-tree capture — sends them. A feature landing on main in late June/July
    2026 typically reaches stable one to three milestones later, but that is inference, not a
    source, and I am not stating it as fact.
    **What would settle it:** a `signature_algorithms` readout from a real Chrome 151+
-   ClientHello. The existing Brave 151 capture (S12) cannot settle it — its JA3
+   ClientHello. The existing client capture (S12) cannot settle it — its JA3
    (`771,4865-4866-4867,27-43-45-17613-65037-16-51-10-57-13-0,4588-29-23-24,`) records that
    extension `13` was *present* but not its contents. `https://tls.peet.ws/api/all` returns
    the full parsed sigalg list, as does `https://fp.impersonate.pro/api/http3` used for S12.
@@ -464,13 +464,13 @@ Recorded honestly rather than guessed.
 
 6. **Chrome 141-151 ClientHello specs.** uTLS's newest Chrome parrot is **133** (S1:
    `HelloChrome_Auto = HelloChrome_133`). No public parrot exists for Chrome 134+. The
-   in-tree Brave 151 capture (S12) is the only 2026-era Chromium evidence available and it is
+   in-tree client capture (S12) is the only 2026-era Chromium evidence available and it is
    QUIC-only, so it says nothing about the TCP-only extensions (`23`, `35`, `11`, `5`, `18`,
    `65281`, `21`).
-   **What would settle it:** a TCP capture from Chrome/Brave 151 via `tls.peet.ws/api/all`.
+   **What would settle it:** a TCP capture from Chrome/a captured client via `tls.peet.ws/api/all`.
 
 **One capture settles items 1, 2, 3 and 6 at once.** If the user can run a current
-Chrome/Brave against `https://tls.peet.ws/api/all` over TCP (not HTTP/3) and drop the JSON
+Chrome/that client against `https://tls.peet.ws/api/all` over TCP (not HTTP/3) and drop the JSON
 into `docs/superpowers/specs/reference-captures/`, this audit's four largest uncertainties
 close together.
 
@@ -489,8 +489,8 @@ uTLS itself is what lags reality.
 
 | Target | Worth shipping? | Closest existing profile | Why |
 | --- | --- | --- | --- |
-| **Brave / Chrome 151, HTTP/3** | **Yes — highest value** | `UTlsChrome133` | The capture already exists (S12) and its JA3 elements are *all* supported: suites `4865-4866-4867`, extensions `27-43-45-17613-65037-16-51-10-57-13-0`, groups `4588-29-23-24`. Nothing needs implementing — this is pure profile authoring. |
-| **Brave / Chrome 151, TCP** | Yes, after a capture | `UTlsChrome133` | The TCP extension set is unverified (§8 item 6). Do not extrapolate from the h3 capture. |
+| **that client / Chrome 151, HTTP/3** | **Yes — highest value** | `UTlsChrome133` | The capture already exists (S12) and its JA3 elements are *all* supported: suites `4865-4866-4867`, extensions `27-43-45-17613-65037-16-51-10-57-13-0`, groups `4588-29-23-24`. Nothing needs implementing — this is pure profile authoring. |
+| **that client / Chrome 151, TCP** | Yes, after a capture | `UTlsChrome133` | The TCP extension set is unverified (§8 item 6). Do not extrapolate from the h3 capture. |
 | Chrome 140-150 intermediates | No | — | No public spec exists; each would be invented. |
 | **Firefox 148** | Already shipped | `UTlsFirefox148` | Ships. Fix the zstd advertise-vs-decode defect (G3) rather than adding a profile. |
 | Firefox 149+ | Not yet | `UTlsFirefox148` | uTLS has no newer parrot; needs a live capture first. |
@@ -499,7 +499,7 @@ uTLS itself is what lags reality.
 | iOS 18/26 Safari | Not without a capture | `UTlsIOS14`, `UTlsSafari263` | The shipped iOS profiles stop at 14. `docs/superpowers/specs/2026-08-17-ios-http3-capture-methodology.md` exists in-tree and is the right route. |
 | Android Chrome 151 | Low priority | `UTlsAndroid11OkHttp` | Android Chrome's TLS is desktop Chrome's; the shipped Android profile is OkHttp, a different thing. |
 
-**Recommendation:** author exactly one new profile — Brave/Chrome 151 over HTTP/3, from
+**Recommendation:** author exactly one new profile — that client/Chrome 151 over HTTP/3, from
 S12 — since every primitive it needs already exists and works. Hold everything else for
 captures.
 

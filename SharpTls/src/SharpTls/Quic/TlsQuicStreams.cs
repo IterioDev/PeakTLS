@@ -1104,7 +1104,7 @@ internal sealed class TlsQuicStreamSet
     /// <param name="local">OUR advertised s18.2 limits, which bound what the peer may send and
     /// are the same object the ClientHello's transport parameters are emitted from. Defaulted
     /// so a test that cares only about the send side need not state it; the default is the
-    /// Brave capture's, exactly as it is on the spec.</param>
+    /// client capture's, exactly as it is on the spec.</param>
     /// <exception cref="ArgumentNullException"><paramref name="budget"/> is
     /// <see langword="null"/>.</exception>
     internal TlsQuicStreamSet(

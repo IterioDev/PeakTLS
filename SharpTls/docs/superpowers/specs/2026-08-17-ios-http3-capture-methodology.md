@@ -161,9 +161,9 @@ shape to the in-repo verification server subsystem B will eventually want anyway
 ## Output format
 
 Record each host's readout in the same shape as
-`reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md`, one file per host, noting
+`reference-captures/the preset that measured it`, one file per host, noting
 the networking stack. Those files become subsystem B's acceptance targets directly.
 
-Redact credentials before committing. The Brave capture had a live `cf_clearance` cookie in
+Redact credentials before committing. A client capture had a live `cf_clearance` cookie in
 it; an app capture will contain auth tokens, device identifiers and session cookies. Strip
 them.

@@ -41,7 +41,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void TheThreeStreamsAreOpenedInTheSpecsOrder()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         http3.OpenLocalStreams();
         var frames = set.TakePendingFrames();
@@ -86,7 +86,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // connection and send its SETTINGS frame as the first frame on this stream." Read
         // back off the wire: type varint, then a whole s7.1 frame whose type is 0x04.
         var set = Set();
-        var spec = new TlsQuicHttp3Spec();
+        var spec = HarnessSpec();
         var http3 = new TlsQuicHttp3Streams(spec, set);
 
         http3.OpenLocalStreams();
@@ -103,23 +103,23 @@ public sealed class TlsQuicHttp3StreamsTests
         Assert.Equal(0x04UL, frameType);
         Assert.True(TlsQuicHttp3Settings.TryDecodePayload(payload, out var settings, out _));
 
-        // THE FIRST FOUR ARE LITERAL AND COMPARED AS SUCH; THE FIFTH IS DRAWN. Comparing
-        // against spec.Settings would compare the wire against the (0, 0) placeholder, and
-        // comparing against a second spec.ComposeSettings() would compare this connection's
-        // draw against a different one - the redraw is the feature, not a flake.
+        // EVERY PAIR, COMPARED AS ITSELF. The harness's list is literal throughout - a drawn
+        // entry would have to be compared by family instead, because comparing against
+        // spec.Settings would read its (0, 0) placeholder and a second ComposeSettings() would
+        // draw a different pair. Nothing here is drawn, so nothing here needs that.
         Assert.Equal(spec.Settings.Length, settings.Length);
-        for (var i = 0; i < spec.Settings.Length - 1; i++)
+        for (var i = 0; i < spec.Settings.Length; i++)
         {
+            Assert.False(spec.Settings[i].IsDrawn);
             Assert.Equal(spec.Settings[i], settings[i]);
         }
-        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(settings[^1].Identifier));
         Assert.Equal(control.Length, offset);
     }
 
     [Fact]
     public void TheOpeningFlightIsSentOnce()
     {
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), Set());
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), Set());
         http3.OpenLocalStreams();
 
         Assert.Throws<InvalidOperationException>(http3.OpenLocalStreams);
@@ -133,7 +133,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void APeerControlStreamStartingWithSettingsIsAcceptedInThePeersOrder()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         // Stream type 0x00, then SETTINGS (0x04) with a five-byte payload holding
         // (51, 1) and (7, 100) - deliberately not ascending.
@@ -157,7 +157,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // s6.2.1: "If the first frame of the control stream is any other frame type, this
         // MUST be treated as a connection error of type H3_MISSING_SETTINGS."
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, frameType, 0x01, 0x00]);
 
@@ -174,7 +174,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // frame at all is H3_MISSING_SETTINGS. An implementation that keyed "settings
         // received" off the pair count would conflate them.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00]);
 
@@ -191,7 +191,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // claiming to be a control stream MUST be treated as a connection error of type
         // H3_STREAM_CREATION_ERROR."
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00]);
         Deliver(set, PeerUni1, [0x00, 0x04, 0x00]);
@@ -207,7 +207,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // s6.2.1: "If either control stream is closed at any point, this MUST be treated as
         // a connection error of type H3_CLOSED_CRITICAL_STREAM."
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00], fin: true);
 
@@ -225,7 +225,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // s7.2.4: "If an endpoint receives a second SETTINGS frame on the control stream,
         // the endpoint MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x04, 0x00]);
 
@@ -240,7 +240,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void ARequestStreamFrameAfterSettingsIsRejectedWithH3FrameUnexpected(byte frameType)
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, frameType, 0x01, 0x00]);
 
@@ -259,7 +259,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // was parsed and accepted under CANCEL_PUSH's rule. A malformed payload here would
         // pass even with the arms merged again, because the varint read would fail on its own.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x0d, 0x01, 0x00]);
 
@@ -274,7 +274,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // legitimately, so rejecting MAX_PUSH_ID must not have been done by rejecting the
         // shape they share. Same encoding, same length, opposite verdict.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x03, 0x01, 0x00]);
 
@@ -291,7 +291,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // kill the connection. (s9 carries the general ignore-unknown-frames requirement and
         // is uncaptured in this repo; s7.2.8's captured text names it but does not quote it.)
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x21, 0x03, 0xaa, 0xbb, 0xcc]);
 
@@ -309,7 +309,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // TlsQuicHttp3Frames.TryReadSingleVarintPayload's check live rather than a helper
         // nothing calls.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x07, 0x03, 0x00, 0xff, 0xff]);
 
@@ -321,7 +321,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void AGoawayWhosePayloadIsExactlyItsVarintIsAccepted()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x07, 0x01, 0x00]);
 
@@ -351,7 +351,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // The witness that the connection SURVIVES is the second stream: a legal control
         // stream opened afterwards is still read.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         // The four bytes after the type are DATA-frame-shaped on purpose: an implementation
         // that consumed the stream type and then fell into the control-stream frame parser
@@ -371,7 +371,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // s6.2: "A receiver MUST tolerate unidirectional streams being closed or reset prior
         // to the reception of the unidirectional stream header."
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [], fin: true);
 
@@ -386,7 +386,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // The other truncation: a multi-byte stream-type varint whose remaining bytes have
         // not arrived. Nothing is concluded and nothing fails; a later call finishes it.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0xc0, 0x00]);
         Assert.True(http3.TryProcessPeerStreams(out var error));
@@ -401,7 +401,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // connection error of type H3_STREAM_CREATION_ERROR unless such an extension has
         // been negotiated." None is.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerBidi0, [0x00]);
 
@@ -417,7 +417,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // TlsQuicHttp3StreamsTests.APeerControlStreamStartingWithSettingsIsAcceptedInThe
         // PeersOrder, split into eight deliveries with a process pass between each.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         byte[] bytes = [0x00, 0x04, 0x05, 0x33, 0x01, 0x07, 0x40, 0x64];
 
         for (var i = 0; i < bytes.Length; i++)
@@ -453,7 +453,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // the type and then fell through would parse. Both halves of the ignore path - the
         // flag being set and the flag being honoured on the next pass - fail this test.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x21, 0x00, 0x01, 0xff]);
         Deliver(set, PeerUni1, [0x03, 0x00, 0x01, 0xff]);
@@ -484,7 +484,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // s2.1.1: "QUIC DATAGRAM frames MUST NOT be sent until the SETTINGS_H3_DATAGRAM
         // setting has been both sent and received with a value of 1." This is the half the
         // capture's 51:1 supplies; on its own it licenses nothing.
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), Set());
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), Set());
 
         Assert.False(http3.Http3DatagramsPermittedToSend);
     }
@@ -506,7 +506,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void BothHalvesTogetherPermitDatagrams()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x02, 0x33, 0x01]);
         Assert.True(http3.TryProcessPeerStreams(out _));
@@ -520,7 +520,7 @@ public sealed class TlsQuicHttp3StreamsTests
         // ZERO VERSUS ABSENT on the peer's side: 51:0 is a received pair that says "not
         // willing", and it must not be read as the same thing as a value of 1.
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x00, 0x04, 0x02, 0x33, 0x00]);
         Assert.True(http3.TryProcessPeerStreams(out _));
@@ -541,7 +541,7 @@ public sealed class TlsQuicHttp3StreamsTests
         for (var first = 0; first < 256; first++)
         {
             var set = Set();
-            var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+            var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
             byte[] bytes =
             [
                 (byte)first,
@@ -586,7 +586,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void TheThreeDecoderInstructionsGoOutOnTheDecoderStream()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
 
         // The opening flight, discarded: what follows is what C15 adds to it.
@@ -621,7 +621,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void ASuppressedInstructionPutsNoFrameOnTheDecoderStream()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
         set.TakePendingFrames();
 
@@ -756,7 +756,20 @@ public sealed class TlsQuicHttp3StreamsTests
                 TlsQuicTransportParameterId.InitialMaxStreamsBidi, 108),
             TlsQuicTransportParameter.VariableInteger(
                 TlsQuicTransportParameterId.InitialMaxStreamsUni, 109),
-        ])));
+        ])),
+        // THE LOCAL LIMITS ARE THE HARNESS'S NOW. SharpTls ships no captured persona, so
+        // TlsQuicLocalFlowControlSpec's six limits are RFC 9000 s18.2's absent-parameter zero
+        // and a set built on them refuses every peer frame these tests send. The numbers here
+        // are "generous enough not to be the subject" and assert nothing about any client.
+        new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxData = 1_000_000,
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+            InitialMaxStreamDataUni = 100_000,
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+        });
 
     // ========================================================================
     // C16 - the peer's QPACK encoder stream, RFC 9204 s4.3 and s2.2.2.3
@@ -770,7 +783,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void ThePeersEncoderStreamDrivesTheDynamicTable()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
         set.TakePendingFrames();
 
@@ -832,7 +845,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void APartialInstructionSendsNoInsertCountIncrement()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
         set.TakePendingFrames();
 
@@ -861,7 +874,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void AFaultOnTheEncoderStreamIsReportedAsQpackEncoderStreamError()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
         set.TakePendingFrames();
 
@@ -943,7 +956,7 @@ public sealed class TlsQuicHttp3StreamsTests
         Assert.Equal(
             65536ul,
             TlsQuicHttp3Settings.Value(
-                new TlsQuicHttp3Spec().Settings,
+                HarnessSpec().Settings,
                 TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier));
         Assert.Null(http3.LocalDecoderStream);
         Assert.Null(http3.Table);
@@ -967,7 +980,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void AnEncoderStreamThatArrivesBeforeOurOwnStreamsAreOpenIsDeferredRatherThanDropped()
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Assert.Null(http3.LocalDecoderStream);
         Deliver(set, PeerUni0, [0x02, .. SetCapacity(4096), .. Insert("a", "1"), .. Insert("b", "2")]);
@@ -1012,17 +1025,17 @@ public sealed class TlsQuicHttp3StreamsTests
     [Fact]
     public void TheShippedDefaultsGiveATableAndTheCapturesBlockedStreamBound()
     {
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), Set());
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), Set());
 
         Assert.NotNull(http3.Table);
         Assert.Equal(
             (int)TlsQuicHttp3Settings.Value(
-                TlsQuicHttp3Spec.CaptureSettings,
+                SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable,
                 TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier)!.Value,
             http3.Table.MaximumCapacity);
         Assert.Equal(
             TlsQuicHttp3Settings.Value(
-                TlsQuicHttp3Spec.CaptureSettings,
+                SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable,
                 TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier),
             http3.BlockedStreams.MaximumBlockedStreams);
     }
@@ -1038,7 +1051,7 @@ public sealed class TlsQuicHttp3StreamsTests
     public void EveryOtherPeerStreamTypeIsStillDiscarded(byte streamType)
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
         set.TakePendingFrames();
 
@@ -1061,7 +1074,7 @@ public sealed class TlsQuicHttp3StreamsTests
     private static TlsQuicQpackDynamicTable Fed(byte[][] deliveries)
     {
         var set = Set();
-        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
         http3.OpenLocalStreams();
 
         var offset = 0ul;
@@ -1103,4 +1116,13 @@ public sealed class TlsQuicHttp3StreamsTests
             instruction.AsSpan(nameLength), out var valueLength));
         return instruction[..(nameLength + valueLength)];
     }
+
+    // THE SPEC THESE TESTS USED TO GET FOR FREE. `new TlsQuicHttp3Spec()` used to arrive
+    // carrying a captured browser's five SETTINGS, so a test about the QPACK dynamic table had
+    // a non-zero SETTINGS_QPACK_MAX_TABLE_CAPACITY without asking for one. SharpTls ships no
+    // persona now and the default is empty - RFC 9114 s7.2.4's "zero or more parameters" -
+    // which is the right default and a useless fixture for a table test.
+    private static TlsQuicHttp3Spec HarnessSpec() =>
+        new() { Settings = TestHttp3Settings.DatagramCapable };
+
 }

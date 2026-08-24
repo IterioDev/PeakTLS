@@ -301,7 +301,7 @@ forbids. `Http3Only` means h3 or an error, in three independent layers: the fact
 
 ## 3a. Tuning the HTTP/3 layer — `options.Http3`
 
-Defaults reproduce **Brave 151** exactly: `perk_hash` = `7d726b1554d23ae0ffb3e8c533f20a2f`,
+Defaults reproduce **a captured client** exactly: `perk_hash` = `7d726b1554d23ae0ffb3e8c533f20a2f`,
 verified live. Every property below is settable.
 
 ```csharp
@@ -313,7 +313,7 @@ o.Http3.Settings.Add(new TlsHttp3Setting(0x1234, 1));      // any identifier, in
 o.Http3.Settings = [.. o.Http3.Settings.Reverse()];        // reordering changes the fingerprint
 
 // Pseudo-header order. RFC 9114 s4.3 fixes NO order among them - which is exactly why it
-// fingerprints. Brave sends :method, :authority, :scheme, :path.
+// fingerprints. that client sends :method, :authority, :scheme, :path.
 o.Http3.PseudoHeaderOrder =
     [TlsHttp3PseudoHeader.Path, TlsHttp3PseudoHeader.Scheme,
      TlsHttp3PseudoHeader.Authority, TlsHttp3PseudoHeader.Method];
@@ -367,7 +367,7 @@ o.Quic.TransportParameters.Entries = [.. o.Quic.TransportParameters.Entries.Reve
 ### Packet and datagram shape
 
 ```csharp
-o.Quic.SourceConnectionIdLength = 0;         // Brave sends 0; the pair (0,8) is fingerprinted
+o.Quic.SourceConnectionIdLength = 0;         // that client sends 0; the pair (0,8) is fingerprinted
 o.Quic.DestinationConnectionIdLength = 8;
 o.Quic.InitialPacketNumber = 0;
 o.Quic.PacketNumberEncodedLength = 1;
@@ -448,7 +448,7 @@ o.Quic.AlpnProtocols = ["h3", "h3-29"];
 
 o.Quic.ConfigureClientHello = b =>
 {
-    TlsQuicOptions.ApplyDefaultClientHello(b);   // extend the Brave-shaped default...
+    TlsQuicOptions.ApplyDefaultClientHello(b);   // extend the capture-shaped default...
     b.WithKeyShares(NamedGroup.X25519, NamedGroup.Secp256r1);
     b.WithCipherSuites(/* ... */);
     b.WithExtensionLayout(/* exact wire order */);
@@ -763,7 +763,7 @@ Over h3 the shape comes from `options.Quic` and `options.Http3`, and `options.Pr
 drive the ClientHello at all (§3b). Two clients are reproduced exactly and verified live against
 `fp.impersonate.pro`:
 
-- **Brave 151** — `perk_hash` `7d726b1554d23ae0ffb3e8c533f20a2f`, all four `perk` segments
+- **a captured client** — `perk_hash` `7d726b1554d23ae0ffb3e8c533f20a2f`, all four `perk` segments
   matching: HTTP/3 SETTINGS, pseudo-header order, QUIC transport parameters **in wire order**,
   and the connection-ID length pair.
 - **Spotify 9.1.76.2050 on iOS 27.0** (`TlsPresets.Spotify`, §3c) — JA3

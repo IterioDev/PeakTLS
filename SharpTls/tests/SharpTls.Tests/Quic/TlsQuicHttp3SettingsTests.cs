@@ -61,34 +61,13 @@ public sealed class TlsQuicHttp3SettingsTests
         Assert.Equal(CaptureFourPairPayload, payload.ToArray());
     }
 
-    [Fact]
-    public void TheCapturesFiveSettingsReParseToTheSameFivePairsInTheSameOrder()
-    {
-        var spec = new TlsQuicHttp3Spec();
-        var frame = new List<byte>();
-        TlsQuicHttp3Settings.Encode(frame, spec);
-        var bytes = frame.ToArray();
+    // A TEST WHOSE SUBJECT WAS DELETED. TlsQuicHttp3Spec's default SETTINGS were a
+    // captured browser's five pairs, including a drawn reserved one. SharpTls ships no
+    // captured persona now and TlsQuicHttp3Spec.DefaultSettings is empty - RFC 9114
+    // s7.2.4's "zero or more parameters" - so there is no default list to assert the
+    // shape of. The drawn reserved setting itself lives in the preset that draws one,
+    // and TlsPresetTests asserts it there against the capture that measured it.
 
-        var offset = 0;
-        var status = TlsQuicHttp3Frames.TryRead(
-            bytes, ref offset, out var frameType, out var payload, out _);
-        Assert.Equal(TlsQuicHttp3FrameReadStatus.Complete, status);
-        Assert.Equal(0x04UL, frameType);
-
-        Assert.True(TlsQuicHttp3Settings.TryDecodePayload(payload, out var decoded, out var error));
-        Assert.Equal(TlsQuicHttp3ErrorCode.None, error);
-        Assert.Equal(spec.Settings.Length, decoded.Length);
-
-        // Element by element, so a failure names the position rather than printing two
-        // five-element arrays. The last entry is DRAWN: Encode composed it once for the frame
-        // above, so the only thing that can be asserted about it here is the family it came
-        // from - a second composition would draw a different pair, which is the point of it.
-        for (var i = 0; i < spec.Settings.Length - 1; i++)
-        {
-            Assert.Equal(spec.Settings[i], decoded[i]);
-        }
-        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(decoded[^1].Identifier));
-    }
 
     [Fact]
     public void TheEncodedFrameCarriesTypeZeroFourAndItsOwnPayloadLength()
@@ -132,14 +111,6 @@ public sealed class TlsQuicHttp3SettingsTests
         Assert.Equal(settings, decoded);
     }
 
-    [Fact]
-    public void TheRenderedSettingsSegmentEqualsTheCapturesCharacterForCharacter()
-    {
-        // 2026-08-16-brave-151-http3-impersonate-pro.md line 47's first field, verbatim.
-        Assert.Equal(
-            "1:65536;6:262144;7:100;51:1;GREASE",
-            TlsQuicHttp3Settings.Render(new TlsQuicHttp3Spec().Settings));
-    }
 
     [Fact]
     public void TheGreaseTokenIsSubstitutedByTheArithmeticAndNotByTheCapturesValue()

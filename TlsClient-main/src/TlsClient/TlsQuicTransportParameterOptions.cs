@@ -9,7 +9,7 @@ namespace TlsClient;
 /// </summary>
 /// <remarks>
 /// <para>THE IDENTIFIER IS A BARE <see cref="ulong"/> AND THE VALUE IS BARE BYTES. That is the
-/// point of this type. A real capture carries identifiers no registry lists — the Brave 151
+/// point of this type. A real capture carries identifiers no registry lists — the a captured client
 /// capture has the two Google-private ones (12583, 12584) and a reserved GREASE identifier
 /// redrawn per connection — so nothing here narrows what a caller may list. Any identifier,
 /// any bytes, any order, any subset, duplicates included (SharpTls rejects duplicate
@@ -115,7 +115,7 @@ public sealed class TlsQuicTransportParameterEntry
 /// identifier) for the same parameter set, which makes any reordering — including a helpful
 /// sort — independently detectable. A named-property design could express neither order nor an
 /// unknown identifier, so there is deliberately no such design here.</para>
-/// <para><see cref="Entries"/> starts as the Brave 151 capture's fourteen slots, read from
+/// <para><see cref="Entries"/> starts as a client capture's fourteen slots, read from
 /// SharpTls's preset rather than re-typed, and is mutable in place: reorder it, delete from it,
 /// insert a <see cref="TlsQuicTransportParameterEntry.Literal"/> of an identifier this library
 /// has never heard of, and those exact bytes go out in that exact position.</para>
@@ -143,11 +143,11 @@ public sealed class TlsQuicTransportParameterOptions
     public int CyclicRotationLength { get; set; }
 
     /// <summary>
-    /// Gets or sets the transport parameters, in exact wire order. The default is the Brave 151
+    /// Gets or sets the transport parameters, in exact wire order. The default is the a captured client
     /// capture's fourteen entries — seven placed, four literal and three drawn.
     /// </summary>
     public IList<TlsQuicTransportParameterEntry> Entries { get; set; } =
-        [.. TlsQuicTransportParameterSpec.Brave151Parameters
+        [.. TlsQuicTransportParameterSpec.RfcMinimumParameters
             .Select(TlsQuicTransportParameterEntry.FromSlot)];
 
     /// <summary>Builds the SharpTls spec, rejecting a null list or a null element by name.</summary>

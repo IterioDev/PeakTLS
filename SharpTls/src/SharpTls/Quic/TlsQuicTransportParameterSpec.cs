@@ -9,9 +9,9 @@ namespace SharpTls.Quic;
 /// bytes to emit under it or a declaration that the value is placed here from elsewhere.
 /// </summary>
 /// <remarks>
-/// <para>AN IDENTIFIER/VALUE PAIR AND NOT A NAMED PROPERTY, because the Brave 151 capture's
-/// table is headed "in wire order" and says "This ordering is the fingerprint. It is not
-/// sorted, and it is not the RFC's presentation order." A set of named properties has no
+/// <para>AN IDENTIFIER/VALUE PAIR AND NOT A NAMED PROPERTY, because the wire order IS the
+/// fingerprint: a client's transport-parameter list is neither sorted nor in the RFC's
+/// presentation order, and which order it is in identifies it. A set of named properties has no
 /// order to express, and an enum of known identifiers cannot carry the two Google-private
 /// identifiers (12583, 12584) or a reserved one. Both are in the capture; neither is in
 /// <see cref="TlsQuicTransportParameterId"/>. So the identifier here is a bare
@@ -148,21 +148,21 @@ internal readonly struct TlsQuicTransportParameterSlot : IEquatable<TlsQuicTrans
         _draw!(connectionSpec);
 }
 
-// ADDING A PARAMETER TO THE PRESET BELOW? THREE THINGS ARE OWED.
+// THERE IS NO PRESET IN THIS FILE ANY MORE, AND THAT IS THE RULE.
 //
-//   1. CITE THE CAPTURE LINE. Every value in the preset block names the line of
-//      docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md
-//      it came from. A value with no citation is a value nobody can check.
-//   2. IF THE CAPTURE CANNOT BOUND IT, MARK IT. The marker's exact form is stated and
-//      enforced by TlsQuicTransportParameterSpecTests.EveryUnverifiedPresetChoice
-//      NamesATaskThatExistsInTheBPlan, which counts the markers in this file, counts
-//      the ones carrying a task reference, and resolves
-//      each reference against the B plan's headings. A marker with no task reference,
-//      or one naming a task that does not exist, fails that test. Copy the form off an
-//      existing marker below rather than from this comment - which deliberately does
-//      not spell it, so that this paragraph is not itself counted as a marker.
-//   3. PUT THE NUMBER IN THE PRESET BLOCK AND NOWHERE ELSE. Every numeric parameter
-//      value in this file is between the "PRESET BLOCK" banner and its end marker.
+//   1. NO PERSONA LIVES HERE. This file used to carry a captured browser's fourteen
+//      parameters as the DEFAULT for every spec, each value citing the capture line it
+//      came from. A persona's values, its wire order and its citations now live in the
+//      preset that measured it, and the default here is RfcMinimumParameters: RFC 9000
+//      s7.3's single mandatory initial_source_connection_id and nothing else.
+//   2. NO NUMBER WITHOUT A SPECIFICATION. What may still be written in this file is a
+//      value a specification defines - an identifier, a bound, a form - because that is
+//      recomputable by a reader. A number that is somebody's measurement is a preset's,
+//      and a number that is neither is the placeholder the standing rule forbids.
+//   3. THE KNOBS STAY OPEN. Removing the persona removed no capability: Parameters
+//      still accepts any identifier, any bytes, any order and any subset, and the three
+//      drawn families - reserved parameter, version_information, initial_rtt - are still
+//      here as factories a preset calls.
 //
 // WHAT THIS FILE DELIBERATELY DOES NOT DO, and the user's design directive that
 // settled it: "no placeholder values, everything must be configurable if different
@@ -273,8 +273,8 @@ internal readonly struct TlsQuicTransportParameterSlot : IEquatable<TlsQuicTrans
 /// this type's: <see cref="TlsQuicTransportParameters"/> rejects a duplicate identifier,
 /// which RFC 9000 s18 requires, and caps the count and the encoded length.</para>
 /// <para>THE DEFAULT IS THE PRESET, NOT A SET OF PER-PROPERTY DEFAULTS. There are no named
-/// value properties on this type to carry a default, which is what stops Brave's numbers from
-/// spreading: they exist once, in <see cref="Brave151Parameters"/>, each citing its capture
+/// value properties on this type to carry a default, which is what stops one client's numbers
+/// from spreading: a persona's values exist once, in the preset that measured them, each citing its capture
 /// line. This follows <c>TlsQuicHttp3Spec.CaptureSettings</c>.</para>
 /// <para>NOTHING READS THIS YET. <see cref="TlsQuicConnectionSpec.TransportParameters"/> holds
 /// it and task B8's profile factory is what will pass <see cref="Compose"/>'s output to
@@ -286,84 +286,28 @@ internal readonly struct TlsQuicTransportParameterSlot : IEquatable<TlsQuicTrans
 internal sealed class TlsQuicTransportParameterSpec
 {
     // ------------------------------------------------------------------------------
-    // THE PRESET BLOCK. Every numeric parameter value in this file is below this line
-    // and above the "END OF THE PRESET BLOCK" marker; nothing else in this file
-    // carries one.
+    // THE PRESET BLOCK IS GONE, AND ITS ABSENCE IS THE DESIGN.
+    //
+    // This file used to carry a captured browser's fourteen transport parameters as the
+    // DEFAULT for every TlsQuicTransportParameterSpec - its Google-private connection-options
+    // string, its GREASE parameter, its max_datagram_frame_size, its max_idle_timeout, its
+    // max_udp_payload_size and its version_information. A bare TlsQuicConnectionSpec therefore
+    // dialled as that browser, and any persona that did not override a field inherited that
+    // browser's value for it without saying so.
+    //
+    // SharpTls now ships NO captured persona at all. What is left below is identifiers that
+    // RFC 9000 and the Google-private registry DEFINE - facts recomputable from a
+    // specification rather than measurements of somebody's client - and a default list holding
+    // the one parameter RFC 9000 s7.3 makes mandatory. A persona is a preset's whole
+    // responsibility; nothing here supplies half of one, which is what makes an unset field a
+    // visible omission instead of an inherited stranger.
     // ------------------------------------------------------------------------------
 
-    /// <summary>RFC 9000 s18.1's reserved-identifier step, the 31 of "31 * N + 27".</summary>
-    /// <remarks>rfc9000-section18-transport-parameters.txt lines 50-53: "Transport parameters
-    /// with an identifier of the form <c>31 * N + 27</c> for integer values of N are reserved
-    /// to exercise the requirement that unknown transport parameters be ignored. These
-    /// transport parameters have no semantics and can carry arbitrary values." Note this is
-    /// NOT RFC 9114 s7.2.8's <c>0x1f * N + 0x21</c>, which
-    /// <see cref="TlsQuicHttp3Frames.ReservedIdentifier(ulong)"/> implements for HTTP/3
-    /// settings and frame types; the two families share a step and differ in base, so reusing
-    /// the HTTP/3 helper here would produce identifiers that are not reserved for QUIC.
-    /// </remarks>
+
     internal const ulong ReservedIdentifierStep = 31;
 
     /// <summary>RFC 9000 s18.1's reserved-identifier base, the 27 of "31 * N + 27".</summary>
     internal const ulong ReservedIdentifierBase = 27;
-
-    /// <summary>One N consistent with the reserved identifier the capture observed. NOT what
-    /// this preset emits - the preset draws a fresh N per connection.</summary>
-    /// <remarks>
-    /// <para>UNVERIFIED, settled by task B12. The capture publishes the reserved parameter's
-    /// VALUE - line 80's <c>0xfb</c> - and does not publish its identifier: line 107 prints
-    /// only "id ~ 3.7457e18", five significant digits of an identifier that Chromium redraws
-    /// per connection. So the capture bounds this to two things and no further - RFC 9000
-    /// s18.1's form, and the interval those five digits denote - and MANY N satisfy both.
-    /// This is one of them, which is what makes it unverified rather than measured; only a
-    /// packet capture, task B12, could name the one Chromium drew.
-    /// TlsQuicTransportParameterSpecTests.TheReservedIdentifierIsOfSection18Point1s
-    /// FormAndInsideTheCapturesInterval checks the form and the interval by recomputing
-    /// both, and checks that the neighbouring N is inside the interval too, so the test
-    /// states what the capture leaves open instead of pinning a number it cannot see.</para>
-    /// <para>KEPT AS EVIDENCE AND NOT AS A CHOICE. Task B4 replaced this preset's single N
-    /// with a per-connection draw over <see cref="MaximumReservedIdentifierN"/>'s whole
-    /// range, so nothing is chosen here any more; this constant survives only so the test
-    /// above can go on stating what the capture does and does not bound.</para>
-    /// </remarks>
-    internal const ulong Brave151ReservedIdentifierN = 120829032258064516;
-
-    /// <summary>The reserved (GREASE) transport-parameter identifier the capture's five
-    /// significant digits are consistent with. See <see cref="Brave151ReservedIdentifierN"/>
-    /// for why this is evidence rather than the preset's emitted value.</summary>
-    internal const ulong Brave151ReservedIdentifier =
-        (ReservedIdentifierStep * Brave151ReservedIdentifierN) + ReservedIdentifierBase;
-
-    /// <summary>The capture's reserved-parameter value, line 80's <c>0xfb</c>.</summary>
-    /// <remarks>Published outright by the capture, unlike the identifier it rides under.
-    /// s18.1 says a reserved parameter "can carry arbitrary values", so this single byte is a
-    /// choice the capture observed and not a form anything constrains.</remarks>
-    private static readonly byte[] Brave151ReservedValue = [0xfb];
-
-    /// <summary>The version <c>version_information</c> chooses, capture line 87's "chosen 1" -
-    /// RFC 9000's version 1.</summary>
-    /// <remarks>THERE IS NO COMPANION CONSTANT FOR THE GREASE VERSION, and its absence is task
-    /// B3's result rather than an omission. Capture line 87 gives <c>version_information</c> as
-    /// "chosen 1, available <c>[GREASE, 1]</c>": the chosen version and the list's shape are
-    /// published, the GREASE entry's four bytes are not, because the fingerprint string renders
-    /// it as a bare token. RFC 9368 s3 bounds it to a pattern -
-    /// rfc9368-section3-and-10.1-version-information.txt lines 71-74, "Clients and servers MAY
-    /// both include versions following the pattern <c>0x?a?a?a?a</c> in their Available
-    /// Versions list. Those versions are reserved to exercise version negotiation ... and will
-    /// never be selected when choosing a version to use." A pattern over four nibbles is a set
-    /// of exactly 16^4 versions, so B3 draws uniformly from that whole set per connection
-    /// rather than choosing one member of it. Nothing is invented, so nothing here is marked
-    /// unverified: the SUPPORT is the RFC's, and only the distribution Chromium uses within it
-    /// is unknown - which changes no byte a fingerprint service reads, because Finding 3 shows
-    /// this half of the parameter is tokenised rather than hashed.</remarks>
-    private const uint Brave151ChosenVersion = 1;
-
-    /// <summary><c>google_connection_options</c> (12584)'s value, capture line 79's
-    /// <c>0x4f524947</c>, which that line also glosses as ASCII <c>ORIG</c>.</summary>
-    /// <remarks>Written as the four characters and encoded to bytes here, so the capture's hex
-    /// is what a test derives rather than what it copies - four raw bytes, not a variable-
-    /// length integer, since 0x4f524947 exceeds the 2^30-1 a four-byte varint holds and the
-    /// capture's value is four bytes on the wire.</remarks>
-    private const string Brave151GoogleConnectionOptions = "ORIG";
 
     /// <summary>The Google-private identifier the capture carries an <c>initial_rtt</c> draw
     /// under, capture line 91. Not an RFC 9000 s18.2 parameter and not in
@@ -382,139 +326,32 @@ internal sealed class TlsQuicTransportParameterSpec
     /// <see cref="InitialRttIdentifier"/>, no specification defines it.</summary>
     internal const ulong GoogleConnectionOptionsIdentifier = 12584;
 
-    /// <summary>The one <c>initial_rtt</c> draw the capture observed, line 91's 192859
-    /// microseconds. NOT what this preset emits - the preset draws afresh per connection.
+    /// <summary>
+    /// The default list: RFC 9000 section 7.3's mandatory <c>initial_source_connection_id</c>,
+    /// and nothing else.
     /// </summary>
-    /// <remarks>Capture line 95: "192859 is not a constant to copy - uQUIC models this as
-    /// <c>ChromeRandomInitialRTT()</c>. A fixed value here would itself be a fingerprint." So
-    /// this is evidence and not a choice, and task B5 stopped emitting it. It survives because
-    /// it is the ONE fact the capture establishes about the distribution - that 192859 is in
-    /// its support - which is the only checkable constraint on
-    /// <see cref="Brave151InitialRttRange"/> and is what
-    /// TlsQuicTransportParameterSpecTests.TheDeclaredInitialRttRangeContainsTheCaptures
-    /// ObservedDraw checks.</remarks>
-    internal const ulong Brave151InitialRtt = 192859;
-
-    /// <summary>The inclusive range this preset draws <c>initial_rtt</c> from when the
-    /// connection spec names none.</summary>
     /// <remarks>
-    /// <para>UNVERIFIED, settled by task B12 - and it is the only genuinely invented bound in
-    /// this file, which is why it is the one carrying this marker. The reserved identifier and
-    /// the GREASE version are drawn over sets RFC 9000 s18.1 and RFC 9368 s3 define, so their
-    /// supports are recomputable; <c>initial_rtt</c> is Google-private and no specification
-    /// describes it, so nothing outside a capture bounds it. What would settle it is uQUIC's
-    /// <c>ChromeRandomInitialRTT()</c>, whose bounds and distribution task B12 acquires
-    /// alongside the packet capture.</para>
-    /// <para>HOW THESE TWO NUMBERS WERE PICKED, STATED PLAINLY SO NOBODY LATER READS THEM AS
-    /// MEASURED: the WIDTH is arbitrary. The single property the capture does establish is
-    /// that the range must CONTAIN 192859 microseconds, because that draw happened; these
-    /// bounds are the round hundred-millisecond interval either side of it that does. Any
-    /// other interval containing it would be equally consistent with the evidence.</para>
-    /// <para>SHIPPING AN ARBITRARY WIDTH BEATS BOTH ALTERNATIVES. Refusing to emit the
-    /// parameter makes this client distinguishable from Chromium by an absence, and pinning
-    /// the capture's single draw makes it distinguishable to anyone who watches two
-    /// connections - capture line 95 names that second failure exactly. Finding 3 measured at
-    /// commit 4ed90bf that the fingerprint service hashes neither this value nor its absence,
-    /// so a wrong width costs nothing at the gate and a pinned value costs everything at a
-    /// packet capture.</para>
-    /// <para>A KNOB. <c>TlsQuicConnectionSpec.InitialRttRange</c> overrides this per spec, and
-    /// the entry itself is one slot a caller replaces with any draw at all.</para>
+    /// <para>ONE ENTRY, BECAUSE ONE IS MANDATORY. s7.3: "The client MUST include the
+    /// initial_source_connection_id transport parameter", and a server that does not receive it
+    /// closes with TRANSPORT_PARAMETER_ERROR. Every other parameter has an s18.2 default that
+    /// applies when it is absent, so a list of exactly this length is the shortest one a
+    /// conforming client can send.</para>
+    /// <para>IT IS NOT A PERSONA AND IS NOT MEANT TO BE ONE. A connection built on this default
+    /// is conformant and anonymous - it looks like nothing in particular, which is the honest
+    /// state for a library that has not been told who to imitate. Presets supply the rest.</para>
     /// </remarks>
-    internal static readonly (TimeSpan Minimum, TimeSpan Maximum) Brave151InitialRttRange =
-        (TimeSpan.FromMicroseconds(100000), TimeSpan.FromMicroseconds(300000));
-
-    /// <summary>The Brave 151 capture's fourteen transport parameters, in the capture's wire
-    /// order.</summary>
-    /// <remarks>
-    /// <para>2026-08-16-brave-151-http3-impersonate-pro.md, the table headed "QUIC transport
-    /// parameters, in wire order", lines 79-92 - one entry per line, in the table's order,
-    /// which line 74 states is "the fingerprint. It is not sorted, and it is not the RFC's
-    /// presentation order."</para>
-    /// <para>SEVEN OF THE FOURTEEN ARE <see cref="TlsQuicTransportParameterSlot.Placed(ulong)"/>
-    /// AND CARRY NO VALUE HERE: the six flow-control identifiers, whose numbers
-    /// <c>TlsQuicLocalFlowControlSpec</c> owns and already cites the same capture rows for, and
-    /// <c>initial_source_connection_id</c>, whose value is the connection's own source
-    /// connection ID.</para>
-    /// <para>THREE MORE ARE <see cref="TlsQuicTransportParameterSlot.Drawn"/> AND CARRY A
-    /// FUNCTION RATHER THAN BYTES: rows 2, 9 and 13, the three the capture cannot bound and
-    /// which Chromium redraws per connection. 7 placed + 3 drawn + 4 literal = 14, and the
-    /// three drawn ones are exactly the three Finding 3 shows the fingerprint string renders
-    /// as a bare token instead of hashing.</para>
-    /// <para>THE ORDER IS DATA AND NOT CODE. A caller wanting a different client's order
-    /// assigns a different <see cref="ImmutableArray{T}"/> to <see cref="Parameters"/>;
-    /// nothing in <see cref="Compose"/> knows this order exists.</para>
-    /// </remarks>
-    internal static readonly ImmutableArray<TlsQuicTransportParameterSlot> Brave151Parameters =
+    internal static readonly ImmutableArray<TlsQuicTransportParameterSlot> RfcMinimumParameters =
     [
-        // 1: line 79, 12584 google_connection_options = 0x4f524947 (ASCII ORIG).
-        TlsQuicTransportParameterSlot.Literal(
-            GoogleConnectionOptionsIdentifier,
-            Encoding.ASCII.GetBytes(Brave151GoogleConnectionOptions)),
-        // 2: line 80, a reserved (GREASE) identifier carrying 0xfb. The VALUE is the
-        // capture's; the IDENTIFIER is redrawn per connection over the whole of RFC 9000
-        // s18.1's reserved set, because line 107 publishes only five significant digits of
-        // one connection's draw. The POSITION - second of fourteen - is the part Finding 3
-        // measured as hashed, and it is expressed by this entry's index in this list and
-        // by nothing else.
-        DrawnReservedParameter(0, MaximumReservedIdentifierN, Brave151ReservedValue),
-        // 3: line 81, 32 max_datagram_frame_size = 65536.
-        TlsQuicTransportParameterSlot.Literal(
-            (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
-            QuicVariableLengthInteger.Encode(65536)),
-        // 4: line 82, 9 initial_max_streams_uni = 103.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
-        // 5: line 83, 8 initial_max_streams_bidi = 100.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
-        // 6: line 84, 7 initial_max_stream_data_uni = 6291456.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
-        // 7: line 85, 5 initial_max_stream_data_bidi_local = 6291456.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
-        // 8: line 86, 15 initial_source_connection_id - "empty, consistent with a
-        // zero-length source CID", which is what SourceConnectionIdLength's default of 0
-        // produces without this entry naming a length of its own.
         TlsQuicTransportParameterSlot.Placed(
             (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
-        // 9: line 87, 17 version_information - chosen 1, available [GREASE, 1]. The null is
-        // the GREASE slot, redrawn per connection; capture line 107 says of both GREASE
-        // values "Both are positional", so which entry of the available list is the drawn
-        // one is data in this list and not a flag beside it.
-        DrawnVersionInformation(
-            Brave151ChosenVersion,
-            [null, Brave151ChosenVersion]),
-        // 10: line 88, 1 max_idle_timeout = 30000.
-        TlsQuicTransportParameterSlot.Literal(
-            (ulong)TlsQuicTransportParameterId.MaxIdleTimeout,
-            QuicVariableLengthInteger.Encode(30000)),
-        // 11: line 89, 6 initial_max_stream_data_bidi_remote = 6291456.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
-        // 12: line 90, 4 initial_max_data = 15728640.
-        TlsQuicTransportParameterSlot.Placed(
-            (ulong)TlsQuicTransportParameterId.InitialMaxData),
-        // 13: line 91, 12583 initial_rtt. NOT 192859 - capture line 95 says that number "is
-        // not a constant to copy", so this is a fresh microsecond draw per connection from
-        // TlsQuicConnectionSpec.InitialRttRange when that is set and from
-        // Brave151InitialRttRange when it is not.
-        DrawnInitialRtt(InitialRttIdentifier, Brave151InitialRttRange),
-        // 14: line 92, 3 max_udp_payload_size = 1472. NOT PaddingTarget and NOT the
-        // transport's ceiling - capture line 103: "Advertised parameter and actual ceiling
-        // are separate concerns and must not be wired together." Three numbers, three
-        // meanings; no arithmetic between them anywhere in this codebase.
-        TlsQuicTransportParameterSlot.Literal(
-            (ulong)TlsQuicTransportParameterId.MaxUdpPayloadSize,
-            QuicVariableLengthInteger.Encode(1472)),
     ];
 
     // ------------------------------------------------------------------------------
-    // END OF THE PRESET BLOCK.
+    // END OF THE IDENTIFIER BLOCK.
     // ------------------------------------------------------------------------------
 
     private readonly ImmutableArray<TlsQuicTransportParameterSlot> _parameters =
-        Brave151Parameters;
+        RfcMinimumParameters;
 
     private readonly int _cyclicRotationLength;
 
@@ -596,7 +433,7 @@ internal sealed class TlsQuicTransportParameterSpec
     /// <summary>Gets the entries this client emits, in the order it emits them.</summary>
     /// <remarks>ANY IDENTIFIER, ANY BYTES, ANY ORDER, ANY SUBSET. Nothing here narrows what a
     /// caller may list; see this type's remarks. The default is
-    /// <see cref="Brave151Parameters"/>.</remarks>
+    /// a preset's own list.</remarks>
     /// <exception cref="ArgumentException">Set to a default-valued
     /// <see cref="ImmutableArray{T}"/>.</exception>
     public ImmutableArray<TlsQuicTransportParameterSlot> Parameters
@@ -626,7 +463,7 @@ internal sealed class TlsQuicTransportParameterSpec
     /// <remarks>NOT A CHOICE AND NOT IN THE PRESET BLOCK, because it is not a value: it is
     /// s18.1's form solved for its own ceiling, recomputed from the two named constants and
     /// <see cref="QuicVariableLengthInteger.MaximumValue"/>. It is what
-    /// <see cref="Brave151Parameters"/>' reserved entry draws over, so that entry invents no
+    /// a preset's reserved entry draws over, so that entry invents no
     /// range - the support is the whole of the set the RFC defines.</remarks>
     internal const ulong MaximumReservedIdentifierN =
         (QuicVariableLengthInteger.MaximumValue - ReservedIdentifierBase) /
@@ -831,7 +668,8 @@ internal sealed class TlsQuicTransportParameterSpec
     /// <para>BOTH NULL MEANS THE PARAMETER IS ABSENT, and absence is a position this seam lets
     /// a caller take rather than one it takes for them: a client that sends no
     /// <c>initial_rtt</c> is a real client, and so is one that sends a drawn one. The preset
-    /// here passes a non-null fallback, so the Brave profile always emits it.</para>
+    /// here passes a non-null fallback, so a preset that wants the parameter emitted
+    /// unconditionally supplies one.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="fallbackRange"/>'s
     /// minimum is not positive, or its maximum is below its minimum - the same bounds

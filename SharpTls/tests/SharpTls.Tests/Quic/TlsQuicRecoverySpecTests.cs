@@ -251,7 +251,7 @@ public sealed class TlsQuicRecoverySpecTests
         // perfectly ordinary RTT. It is caught only by a range that excludes it, and the
         // preset range - 100 to 300 ms - is exactly such a range, which is why this uses the
         // shipped preset rather than one invented for the test.
-        var range = TlsQuicTransportParameterSpec.Brave151InitialRttRange;
+        var range = TestQuicSpecValues.SampleInitialRttRange;
         Assert.True(range.Maximum < TlsQuicRecoverySpec.KInitialRtt);
         var spec = new TlsQuicConnectionSpec { InitialRttRange = range };
 
@@ -308,7 +308,7 @@ public sealed class TlsQuicRecoverySpecTests
     {
         var spec = new TlsQuicConnectionSpec
         {
-            InitialRttRange = TlsQuicTransportParameterSpec.Brave151InitialRttRange,
+            InitialRttRange = TestQuicSpecValues.SampleInitialRttRange,
         };
 
         // A null source is the shared one rather than a throw - the branch a caller with no

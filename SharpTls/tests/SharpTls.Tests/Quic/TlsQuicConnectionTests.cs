@@ -392,7 +392,7 @@ public sealed partial class TlsQuicConnectionTests
         using var pki = TestPki.Create();
         await using var transport = new ScriptedDatagramTransport();
 
-        // THE TARGET'S OWN SHAPE, NOT A CORNER CASE. The Brave capture's X25519MLKEM768 key
+        // THE TARGET'S OWN SHAPE, NOT A CORNER CASE. A client capture's X25519MLKEM768 key
         // share is 1216 bytes on its own, so a Chromium-shaped ClientHello cannot be one
         // datagram; TlsQuicDatagramBuilder's header says as much. The split here is small
         // because this test is about the connection's bookkeeping and not about the builder's
@@ -975,10 +975,41 @@ public sealed partial class TlsQuicConnectionTests
     private static TlsQuicConnectionSpec Spec() => new()
     {
         // 1200 is RFC 9000 s14.1's floor rather than a fingerprint choice, and nothing here
-        // asserts the number. Every other knob but the source connection ID length is
-        // TlsQuicConnectionSpec's default.
+        // asserts the number.
         PaddingTarget = 1200,
         SourceConnectionIdLength = SourceConnectionIdLength,
+
+        // THE FLOW-CONTROL LIMITS ARE THE HARNESS'S NOW, NOT THE LIBRARY'S. SharpTls ships no
+        // captured persona, so TlsQuicLocalFlowControlSpec's six limits are RFC 9000 s18.2's
+        // absent-parameter zero - correct for a library that advertises none of them, and
+        // useless as a fixture for tests that need a connection which can actually receive
+        // something. These say "generous enough not to be the subject" and assert nothing.
+        LocalFlowControl = TestQuicSpecValues.HarnessFlowControl,
+
+        // ...and the slots that put them on the wire, because enforcement now reads what was
+        // advertised: TlsQuicLocalFlowControlSpec.AsAdvertisedBy zeroes any limit the
+        // parameter list does not emit, so a populated spec with the default one-entry list
+        // would still enforce zero.
+        TransportParameters = new TlsQuicTransportParameterSpec
+        {
+            Parameters =
+            [
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxData),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+            ],
+        },
     };
 
     // THE TRANSPORT IS THE INTERFACE, so that A3-1's ImpairingDatagramTransport can be
@@ -1078,7 +1109,7 @@ public sealed partial class TlsQuicConnectionTests
 
         // NOT ADVERTISED BY DEFAULT EITHER, and the HTTP/3 harness is the one caller that asks
         // for it. A connection that sends SETTINGS_H3_DATAGRAM = 1 - which
-        // TlsQuicHttp3Spec.CaptureSettings does, and every Harness connection therefore does -
+        // SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable does, and every Harness connection therefore does -
         // has claimed to receive HTTP/3 datagrams, and RFC 9221 s3's 0x20 is the transport half
         // of that claim. TlsQuicHttp3Connection's constructor refuses the pair when only one
         // half is present, so passing it here is the harness advertising what it says rather

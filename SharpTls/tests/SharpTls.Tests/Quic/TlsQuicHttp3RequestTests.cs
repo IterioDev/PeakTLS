@@ -2760,7 +2760,7 @@ public sealed class TlsQuicHttp3RequestTests
     // s4.5.1.1's MaxEntries here is the one a real peer would compute.
     private static TlsQuicQpackDynamicTable TableWith(int count)
     {
-        var table = new TlsQuicQpackDynamicTable((int)TlsQuicHttp3Spec.CaptureSettings
+        var table = new TlsQuicQpackDynamicTable((int)SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable
             .Single(setting =>
                 setting.Identifier == TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier)
             .Value);

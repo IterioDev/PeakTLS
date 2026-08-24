@@ -7,7 +7,7 @@ pattern) and 10.1 QUIC Transport Parameter (the IANA registration that assigns
 version_information the value 0x11 = 17).
 Captured for subsystem B task B0. Two things B depends on are stated here and
 nowhere else in the sections already captured:
-  - the identifier. The Brave capture lists transport parameter 17; 10.1 below
+  - the identifier. A client capture lists transport parameter 17; 10.1 below
     registers version_information as 0x11, and 0x11 = 17, which is what makes
     TlsQuicProtocol.cs:184 a checkable claim rather than a copied constant.
   - the reserved-version form the GREASE version in Available Versions is drawn

@@ -10,9 +10,9 @@ at branch `feat/quic-socks5-datagram-transport`, parent commit `3f642da`. The te
 full recording, including both response bodies verbatim, to
 `%TEMP%/quic-http3-live-run.txt`; every value below is copied from that recording.
 
-**This is the opposite kind of document from the Brave capture beside it.** That file records
+**This is the opposite kind of document from a client capture beside it.** That file records
 what a real browser puts on the wire and is the target. This file records what *we* put on the
-wire, as read back by two servers nobody here configured. Where the two disagree, the Brave
+wire, as read back by two servers nobody here configured. Where the two disagree, the that client
 file is right by definition.
 
 Nothing below is altered. No cookie or token was returned by either endpoint, so nothing is
@@ -71,7 +71,7 @@ below it.
 }
 ```
 
-**Both match the Brave capture exactly**, live, against a server we do not control. The spec's
+**Both match a client capture exactly**, live, against a server we do not control. The spec's
 default `SourceConnectionIdLength` is 0 and `DestinationConnectionIdLength` is 8, and this run
 used those defaults.
 
@@ -85,19 +85,19 @@ used those defaults.
 - `perk_hash_normalized` = `ff76216a19258be0123a5ee76da4fa7a`
 - normalized string = `1:0;6:262144;7:0|m,a,s,p|4:15728640;5:6291456;6:6291456;7:6291456;8:100;9:103;14:2;15:AUTO|0,8`
 
-For the Brave target beside it: `7d726b1554d23ae0ffb3e8c533f20a2f` and
+For the that client target beside it: `7d726b1554d23ae0ffb3e8c533f20a2f` and
 `733abf232de1c065c494640332f04555`.
 
 **THE FIELD IS CALLED `perk_text` ON THE WIRE, NOT `perk`.** The JSON keys the endpoint
 actually returns are `perk_text`, `perk_hash`, `perk_text_normalized`, `perk_hash_normalized`.
 Only the two hashes carry the names the plan and the handoff use; a reader looking up `perk`
-finds nothing. The Brave capture beside this one is half-right about it — its section heading
+finds nothing. A client capture beside this one is half-right about it — its section heading
 says "The `perk` fingerprint format" while its own prose at line 98 says `perk_text`. The test
 looks up both spellings so a recording is never empty because a document used the other one.
 
-Segment by segment against Brave:
+Segment by segment against that client:
 
-| # | segment | ours, live | Brave | owner |
+| # | segment | ours, live | that client | owner |
 | --- | --- | --- | --- | --- |
 | 1 | h3 SETTINGS | `1:0;6:262144;7:0` | `1:65536;6:262144;7:100;51:1;GREASE` | C — **narrowed arm, see above; the default arm matches exactly** |
 | 2 | pseudo-header order | `m,a,s,p` | `m,a,s,p` | C — **exact match, live** |
@@ -134,18 +134,18 @@ as RFC 9000 §18 varint triples yields exactly `15,14,4,5,6,7,8,9` with the same
 Two independent endpoints therefore agree on segment 3 even though only one of them publishes a
 perk.
 
-**Every value we share with Brave matches** (4, 5, 6, 7, 8, 9, and 15's emptiness). What
+**Every value we share with that client matches** (4, 5, 6, 7, 8, 9, and 15's emptiness). What
 differs is the *set* and the *order*, and both are subsystem B's:
 
-- **Missing, relative to Brave:** `google_connection_options` (12584),
+- **Missing, relative to that client:** `google_connection_options` (12584),
   the GREASE transport parameter, `max_datagram_frame_size` (32), `version_information` (17),
   `max_idle_timeout` (1), `initial_rtt` (12583), `max_udp_payload_size` (3).
-- **Sent, that Brave does not:** `active_connection_id_limit` (14).
+- **Sent, that that client does not:** `active_connection_id_limit` (14).
 - **Wire order itself.** Task 11 already recorded this as a MISMATCH and **task C13 does not
   re-file it.** It appears here so that a perk readout is not silently missing a perk segment,
   and for no other reason.
 - `initial_rtt` **must be randomised per connection** when it is added. A pinned value is
-  itself a fingerprint. The Brave capture's finding 3 is the authority.
+  itself a fingerprint. A client capture's finding 3 is the authority.
 
 ## TLS layer, carried inside the QUIC handshake
 
@@ -164,7 +164,7 @@ document.
 - Supported groups: X25519 (29), P-256 (23). Key share: X25519 only, 32 bytes.
 
 This is the interop test's own ClientHello, not a browser profile, and it is nowhere near
-Brave's — no ChaCha, no X25519MLKEM768, no `compress_certificate`, no ALPS, no ECH. That gap is
+that client's — no ChaCha, no X25519MLKEM768, no `compress_certificate`, no ALPS, no ECH. That gap is
 subsystem B's and E's and is out of C13's scope; it is recorded so nobody mistakes this file's
 TLS section for a target.
 
@@ -241,7 +241,7 @@ are marked as such and are not defects.
 | 21 | transport parameter 0x07 `initial_max_stream_data_uni` [B] | 6291456 | 6291456 | agree |
 | 22 | transport parameter 0x08 `initial_max_streams_bidi` [B] | 100 | 100 | agree |
 | 23 | transport parameter 0x09 `initial_max_streams_uni` [B] | 103 | 103 | agree |
-| 24 | transport parameter wire order (segment 3) [B] | 15,14,4,5,6,7,8,9 | 15,14,4,5,6,7,8,9, confirmed by **both** endpoints | agree (still a MISMATCH against Brave — task 11's, not re-filed) |
+| 24 | transport parameter wire order (segment 3) [B] | 15,14,4,5,6,7,8,9 | 15,14,4,5,6,7,8,9, confirmed by **both** endpoints | agree (still a MISMATCH against that client — task 11's, not re-filed) |
 | 25 | connection ID length pair (segment 4) [B] | 5,8 | **0,8** | harness-artifact confirmed |
 
 Verdict counts, derived from the rows above:
@@ -262,20 +262,20 @@ arm this run deliberately chose, a field neither endpoint publishes, or a harnes
 Three rows need comment.
 
 **Row 25 is the one the live run corrects.** The readout's `5,8` reads as a MISMATCH against
-Brave's `0,8`, and it is not one — its harness uses a five-byte source connection ID
+that client's `0,8`, and it is not one — its harness uses a five-byte source connection ID
 deliberately, per task 11's reason, so that `initial_source_connection_id` has a header field to
 agree with. This run uses the spec's default zero-length source CID and the endpoint read back
-**`0,8`, matching Brave exactly.** The readout row is a harness artifact and this capture is the
+**`0,8`, matching that client exactly.** The readout row is a harness artifact and this capture is the
 external evidence that says so.
 
-**Row 24 agrees with the readout and still mismatches Brave.** That is not a contradiction: the
+**Row 24 agrees with the readout and still mismatches that client.** That is not a contradiction: the
 readout's "ours" column is right about us and the MISMATCH is against the target. It is task
 11's finding and subsystem B's work, re-rendered here for completeness and not re-filed.
 
 **Row 17's grep recipe is now stale, though its conclusion is not.**
 `grep -rn '"h3"' src/ --include=*.cs` no longer "returns nothing" — it returns four hits, three
 of them the comments that assert it returns nothing, plus
-`TlsQuicHttp3FingerprintReadout.cs:753`, which is the readout printing the Brave column's own
+`TlsQuicHttp3FingerprintReadout.cs:753`, which is the readout printing the that client column's own
 literal. `grep -rn "WithAlpn" src/ --include=*.cs` still shows every profile under `src/`
 offering `h2`/`http/1.1` and none offering `h3`, so the claim holds and only its recipe has
 rotted.
@@ -288,9 +288,9 @@ rotted.
    one path on one day, not a guarantee.
 2. **`/api/http3` returned a body over genuinely negotiated h3**, five times out of five. The
    endpoint reports the protocol it was reached over, so no fallback can produce that answer.
-3. **Segment 2, `m,a,s,p`, matches Brave exactly, live, confirmed independently by both
+3. **Segment 2, `m,a,s,p`, matches that client exactly, live, confirmed independently by both
    endpoints.** C9's fingerprint argument holds against servers we do not control.
-4. **Segment 4, `0,8`, matches Brave exactly, live**, and the C12 readout's `5,8` is a harness
+4. **Segment 4, `0,8`, matches that client exactly, live**, and the C12 readout's `5,8` is a harness
    artifact rather than a defect.
 5. **Segment 1 under the narrowed arm is `1:0;6:262144;7:0`** and says nothing about the default
    arm, which already emits the capture's five pairs. C14–C16 is what makes the default arm

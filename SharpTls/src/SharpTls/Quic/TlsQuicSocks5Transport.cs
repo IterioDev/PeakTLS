@@ -94,6 +94,12 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
                 proxy.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
             TlsQuicUdpDatagramTransport.SetDontFragment(udp, proxy.AddressFamily);
 
+            // THE RELAY SOCKET NEEDS IT MOST. A SOCKS5 relay that drops its association,
+            // restarts, or simply has no listener for a moment answers with ICMP Port
+            // Unreachable, and Windows then fails this socket's NEXT receive with
+            // WSAECONNRESET - a datagram unrelated to the one that bounced.
+            TlsQuicUdpDatagramTransport.DisableUdpConnectionReset(udp);
+
             await NegotiateAsync(control, options, cancellationToken).ConfigureAwait(false);
             var relayEndPoint = await AssociateAsync(control, proxy, cancellationToken).ConfigureAwait(false);
 

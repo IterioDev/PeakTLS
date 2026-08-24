@@ -606,7 +606,7 @@ too short to parse the Quarter Stream ID and for a value above 2^60-1. None was 
 
 **THE SEVERITY NOTE HERE WAS TOO COMFORTABLE AND IS CORRECTED RATHER THAN DELETED.** It read
 that the client "advertises `max_datagram_frame_size` only when configured to, and a server
-sending unsolicited DATAGRAM frames is misbehaving". The shipped Brave 151 preset advertises
+sending unsolicited DATAGRAM frames is misbehaving". The shipped preset advertises
 `max_datagram_frame_size` = 65536 and the capture settings send SETTINGS_H3_DATAGRAM = 1,
 because the client being impersonated does — so a server sending DATAGRAM frames on that
 invitation is conforming, not misbehaving, and these rules were live rather than latent.

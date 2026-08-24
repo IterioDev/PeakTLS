@@ -1780,8 +1780,20 @@ public sealed partial class TlsQuicConnectionTests
         SourceConnectionIdLength = SourceConnectionIdLength,
         LocalFlowControl = new TlsQuicLocalFlowControlSpec
         {
+            // 64 IS THE SUBJECT - a window small enough that one frame crosses the update
+            // threshold. The other five are s18.2's zero by default now that SharpTls ships no
+            // captured persona, and a zero connection-level limit refuses the frame before the
+            // grant this test is about is ever owed.
+            InitialMaxData = 1_000_000,
             InitialMaxStreamDataBidiLocal = 64,
+            InitialMaxStreamDataBidiRemote = 100_000,
+            InitialMaxStreamDataUni = 100_000,
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
         },
+
+        // ...and the slots that advertise them, because enforcement reads the advertisement.
+        TransportParameters = TestQuicSpecValues.HarnessParameters,
     };
 
     // One RFC 9000 s19.8 STREAM frame as the PEER would send it. LoopbackQuicPeer builds no

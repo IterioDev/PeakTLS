@@ -1259,7 +1259,7 @@ public sealed class TlsQuicQpackDecoderTests
     // 4096, which is wider than every Required Insert Count Appendix B uses - which is exactly
     // why the wrapping arm needs s4.5.1.1's own worked example instead.
     private static int CaptureMaximumCapacity =>
-        (int)TlsQuicHttp3Spec.CaptureSettings
+        (int)SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable
             .Single(setting => setting.Identifier == TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier)
             .Value;
 

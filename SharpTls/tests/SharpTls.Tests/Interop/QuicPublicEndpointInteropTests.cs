@@ -227,13 +227,14 @@ public sealed class QuicPublicEndpointInteropTests
     /// one - is exactly what C16 closed. The decoder now drives a dynamic table from the peer's
     /// encoder stream and blocks on s2.2.1 rather than failing, so the narrowing buys nothing
     /// and costs the thing this file exists to measure: perk segment 1.</para>
-    /// <para>It is <see cref="TlsQuicHttp3Spec.CaptureSettings"/> ITSELF rather than a copy of
-    /// its values, so the arm this report names and the arm
-    /// <see cref="Http3AttemptAsync"/> runs cannot drift apart - which is the failure mode
-    /// point 4 of the header above records having happened once already.</para>
+    /// <para>IT IS THE TEST ASSEMBLY'S LIST NOW, NOT THE LIBRARY'S. This used to read
+    /// <c>SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable</c> - a captured browser's five pairs, shipped as
+    /// the library default - and the point of naming it rather than copying it was that this
+    /// report and the arm <see cref="Http3AttemptAsync"/> runs could not drift apart. They
+    /// still cannot: both read <see cref="SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable"/>.</para>
     /// </remarks>
     private static ImmutableArray<TlsQuicHttp3Setting> ShippedQpackSettings =>
-        TlsQuicHttp3Spec.CaptureSettings;
+        SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable;
 
     [InteropFact]
     [Trait("Category", "Interop")]
@@ -256,10 +257,10 @@ public sealed class QuicPublicEndpointInteropTests
         // so the same edit that made it wrong before would now change what it prints.
         report.AppendLine(
             "  the DEFAULT arm "
-                + (ShippedQpackSettings.SequenceEqual(TlsQuicHttp3Spec.CaptureSettings)
+                + (ShippedQpackSettings.SequenceEqual(SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable)
                     ? "IS TlsQuicHttp3Spec's own CaptureSettings, unnarrowed"
                     : "differs from TlsQuicHttp3Spec's own CaptureSettings "
-                        + $"({TlsQuicHttp3Settings.Render(TlsQuicHttp3Spec.CaptureSettings)})")
+                        + $"({TlsQuicHttp3Settings.Render(SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable)})")
                 + " - so perk segment 1 is what this client ships, not a narrowing of it.");
 
         // host -> the first body a completed attempt returned. Only the first: a second one
@@ -669,7 +670,7 @@ public sealed class QuicPublicEndpointInteropTests
     {
         // PaddingTarget is RFC 9000 s14.1's 1200-byte floor. Every other knob is
         // TlsQuicConnectionSpec's default, which means SourceConnectionIdLength 0 and
-        // DestinationConnectionIdLength 8 - the Brave 151 capture's two observed QUIC fields.
+        // DestinationConnectionIdLength 8 - a client capture's two observed QUIC fields.
         // The loopback snapshot uses a five-byte source connection ID so that
         // initial_source_connection_id has a header field to agree with; this run uses the
         // target's own zero-length shape, so that comparison is the one thing the live readout
@@ -785,11 +786,15 @@ public sealed class QuicPublicEndpointInteropTests
                     completed ? $" observation_ended_with=\"{failure}\"" : $" ended_with=\"{failure}\"");
             }
 
-            // The readout is produced from the datagrams actually put on the wire, which is
-            // what makes it evidence rather than a restatement of the spec above it.
+            // THE READOUT IS GONE, AND SO IS WHAT IT DIFFED AGAINST. It rendered this
+            // connection's fingerprint beside a captured browser's, scoring each field MATCH
+            // or DIFFER - which only meant anything while that browser's numbers were the
+            // library default. They are not: the default transport-parameter list is now RFC
+            // 9000 s7.3's single mandatory entry, so there is no target for a verdict column.
+            // What is left is the datagram count, which is still evidence about the wire.
             var readout = recorder.Sent.Count == 0
                 ? null
-                : TlsQuicFingerprintReadout.Describe(recorder.Sent, spec);
+                : $"{recorder.Sent.Count} datagram(s) sent; no fingerprint readout is shipped.";
             return new Outcome(completed, summary.ToString(), readout);
         }
     }
@@ -977,7 +982,7 @@ public sealed class QuicPublicEndpointInteropTests
     //
     // The B plan names one riskiest ordering assumption - that B7 (wire order) can be reached
     // with B5's `initial_rtt` range still a placeholder - and rests it entirely on prose. The
-    // Brave capture says wire order is fingerprinted "because both perk_hash and
+    // client capture says wire order is fingerprinted "because both perk_hash and
     // perk_hash_normalized are published, and sorting the parameters would change perk_hash
     // while leaving perk_hash_normalized intact"; Finding 3 says the hash sees a parameter's
     // POSITION and not its VALUE "because the perk renders 12583:AUTO". NEITHER SENTENCE IS A
@@ -1024,7 +1029,7 @@ public sealed class QuicPublicEndpointInteropTests
     /// <remarks>
     /// <para>THE NINTH ENTRY IS <c>max_datagram_frame_size</c> AND IT IS HERE BECAUSE THE
     /// SERVER SAID SO. C16 stopped hand-narrowing the HTTP/3 SETTINGS, so every test on this
-    /// class now sends <c>TlsQuicHttp3Spec.CaptureSettings</c> - which includes
+    /// class now sends <c>SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable</c> - which includes
     /// <c>51:1</c>, SETTINGS_H3_DATAGRAM - while this list carried no RFC 9221 s3 parameter to
     /// back it. fp.impersonate.pro answered that pair with H3_SETTINGS_ERROR every time.</para>
     /// <para>MEASURED, ONE VARIABLE PER ARM, THREE WHOLE CONNECTIONS EACH. Without 0x20:
@@ -1034,7 +1039,7 @@ public sealed class QuicPublicEndpointInteropTests
     /// QPACK capacity and the blocked-streams count are all exonerated and 0x20 is the whole
     /// cause.</para>
     /// <para>65536 IS THE CAPTURE'S NUMBER, not a value invented to satisfy a check:
-    /// <c>TlsQuicTransportParameterSpec.Brave151Parameters</c> row 3 cites capture line 81,
+    /// <c>TlsQuicTransportParameterSpec.RfcMinimumParameters</c> row 3 cites capture line 81,
     /// "32 max_datagram_frame_size = 65536", and this list now agrees with the preset it sits
     /// beside instead of contradicting it. The position - after 14, before the flow-control
     /// run - is the capture's relative order too, 32 preceding 9,8,7,5.</para>
@@ -1287,7 +1292,7 @@ public sealed class QuicPublicEndpointInteropTests
     // prediction beside it. A prediction that fails is the valuable outcome; nothing in this
     // file may be edited afterwards to make one come true.
     //
-    //   PRESET         TlsQuicTransportParameterSpec's own default Parameters - the Brave 151
+    //   PRESET         TlsQuicTransportParameterSpec's own default Parameters - the a captured client
     //                  preset as shipped, fourteen entries in the capture's order.
     //                  PREDICTION: /api/http3 answers with a body over genuinely negotiated
     //                  h3, and segment 3 reproduces the capture's fourteen identifiers in the
@@ -1325,20 +1330,15 @@ public sealed class QuicPublicEndpointInteropTests
     /// whole cost.</summary>
     private const int FactoryAttemptsPerArm = 4;
 
-    /// <summary>The Brave 151 capture's perk, line 47 of
-    /// <c>docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md</c>.
-    /// The target, quoted so the diff below is against the file and not against a memory of
-    /// it.</summary>
-    private const string BravePerk =
-        "1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|12584:0x4f524947;GREASE;32:65536;9:103;"
-            + "8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;4:15728640;"
-            + "12583:AUTO;3:1472|0,8";
-
-    /// <summary>The Brave capture's <c>perk_hash</c>, its line 50.</summary>
-    private const string BravePerkHash = "7d726b1554d23ae0ffb3e8c533f20a2f";
-
-    /// <summary>The Brave capture's <c>perk_hash_normalized</c>, its line 51.</summary>
-    private const string BravePerkHashNormalized = "733abf232de1c065c494640332f04555";
+    /// <summary>A client capture's perk, line 47 of
+    /// <c>the preset that measured it</c>.
+    // THE CAPTURED-PERSONA TARGETS ARE GONE, and so is the comparison that used them. This
+    // file used to hold one browser's perk string and its two hashes and diff the LIBRARY
+    // DEFAULT against them, which only made sense while that browser's numbers WERE the
+    // library default. SharpTls ships no captured persona now - the default parameter list is
+    // RFC 9000 s7.3's single mandatory entry - so there is nothing for a captured hash to be
+    // the target of. A persona's fingerprint is asserted where the persona lives, against the
+    // capture that measured it.
 
     /// <summary>C13's recorded segment 3, from
     /// <c>docs/superpowers/specs/reference-captures/2026-08-20-sharptls-c13-live-http3.md</c>.
@@ -1355,7 +1355,7 @@ public sealed class QuicPublicEndpointInteropTests
     private const string C13PerkHashNormalized = "ff76216a19258be0123a5ee76da4fa7a";
 
     /// <summary>The preset as shipped: a default <see cref="TlsQuicTransportParameterSpec"/>,
-    /// whose <c>Parameters</c> default is <c>Brave151Parameters</c>. Deliberately NOT a copy of
+    /// whose <c>Parameters</c> default is <c>RfcMinimumParameters</c>. Deliberately NOT a copy of
     /// that list - an arm that retyped it would stop measuring what ships.</summary>
     private static TlsQuicTransportParameterSpec PresetParameters() => new();
 
@@ -1376,7 +1376,7 @@ public sealed class QuicPublicEndpointInteropTests
         var composed = reference.TransportParameters
             .Compose(reference, new byte[reference.SourceConnectionIdLength])
             .Parameters;
-        var slots = TlsQuicTransportParameterSpec.Brave151Parameters;
+        var slots = TlsQuicTransportParameterSpec.RfcMinimumParameters;
         if (composed.Count != slots.Length)
         {
             // A drawn entry returning null shortens the composed list, and a shortened list
@@ -1563,13 +1563,12 @@ public sealed class QuicPublicEndpointInteropTests
                     + $"{(string.Equals(preset.NormalizedHash, sorted.Hash, StringComparison.Ordinal) ? "MATCH" : "DIFFER")}");
         }
 
-        // THE DIFF THAT THE PHASE EXISTS FOR. Segment by segment against the Brave capture,
-        // and segment 3 additionally against C13's recorded run, so the delta from wiring the
-        // factory in is visible here and not only in a document written afterwards.
+        // THE SEGMENTS ARE STILL PRINTED, WITH NOTHING TO DIFF THEM AGAINST. What the live
+        // service returns for this connection is the interesting half either way; the other
+        // half used to be one browser's published perk string, and that comparison went with
+        // the persona it belonged to.
         report.AppendLine();
-        report.AppendLine(
-            "## P1 - PRESET against Brave 151, segment by segment. PREDICTED: segment 3 "
-                + "reproduces the capture's fourteen identifiers in the capture's order.");
+        report.AppendLine("## P1 - PRESET segments as the live service rendered them");
         var owners = new[]
         {
             "C - h3 SETTINGS",
@@ -1579,28 +1578,20 @@ public sealed class QuicPublicEndpointInteropTests
         };
         for (var index = 0; index < owners.Length; index++)
         {
-            var ours = Segment(preset?.Text, index);
-            var theirs = Segment(BravePerk, index);
             report.AppendLine();
             report.AppendLine($"  segment {index + 1} [{owners[index]}]");
-            report.AppendLine($"    ours  = {ours}");
-            report.AppendLine($"    brave = {theirs}");
-            report.AppendLine(
-                $"    -> {(string.Equals(ours, theirs, StringComparison.Ordinal) ? "MATCH" : "DIFFER")}");
+            report.AppendLine($"    ours  = {Segment(preset?.Text, index)}");
         }
 
         report.AppendLine();
         report.AppendLine("## segment 3 against C13's recorded run - the delta the factory made");
         report.AppendLine($"  C13   = {C13Segment3}");
         report.AppendLine($"  B11   = {Segment3(preset?.Text)}");
-        report.AppendLine($"  brave = {Segment(BravePerk, 2)}");
         report.AppendLine();
         report.AppendLine($"  perk_hash            C13 = {C13PerkHash}");
         report.AppendLine($"  perk_hash            B11 = {preset?.Hash}");
-        report.AppendLine($"  perk_hash            brave = {BravePerkHash}");
         report.AppendLine($"  perk_hash_normalized C13 = {C13PerkHashNormalized}");
         report.AppendLine($"  perk_hash_normalized B11 = {preset?.NormalizedHash}");
-        report.AppendLine($"  perk_hash_normalized brave = {BravePerkHashNormalized}");
 
         if (presetBody is { } recorded)
         {

@@ -303,9 +303,9 @@ would be the mistake this project has already refused twice.
 
 `TlsQuicConnectionSpec.InitialRttRange` (`:575`) is `(TimeSpan Minimum, TimeSpan Maximum)?` and B5
 gave it a consumer:
-`TlsQuicTransportParameterSpec.Brave151InitialRttRange` (`:421-422`) ships
+`TlsQuicTransportParameterSpec.DeclaredInitialRttRange` (`:421-422`) ships
 `(100000µs, 300000µs)` as the range the preset draws `initial_rtt` (parameter 12583) from, marked
-UNVERIFIED. The Brave capture (line 91) records one observed draw of **192859µs ≈ 193ms**.
+UNVERIFIED. A client capture (line 91) records one observed draw of **192859µs ≈ 193ms**.
 
 **333ms and 193ms are different numbers, and a client that advertises one while retransmitting on
 the other is self-contradictory on the wire.** RFC 9002's constant is the interoperable default;
@@ -318,9 +318,9 @@ initialiser).
 `uquic-u_parrot-chrome-random-initial-rtt.txt` — the only capture whose name matches any recovery
 term — records uQUIC's `ChromeRandomInitialRTT()` as uniform over `[1000, 20000)` microseconds, and
 then refuses to adopt it, in a banner: *"THE OBSERVED 192859 IS OUTSIDE THIS RANGE. THIS FUNCTION
-DOES NOT SETTLE `Brave151InitialRttRange`."* Its reading of the two data points is the interesting
+DOES NOT SETTLE `DeclaredInitialRttRange`."* Its reading of the two data points is the interesting
 part: *"there are now two single draws from the real world — 7740 us (uQUIC's Chrome 146 pcap) and
-192859 us (this repo's Brave 151 capture) — a factor of 25 apart, and BOTH inside the range of a
+192859 us (this repo's client capture) — a factor of 25 apart, and BOTH inside the range of a
 plausible measured network RTT. **The simplest reading consistent with both is that Chromium reports
 a path-derived RTT estimate rather than drawing a random number**, in which case there is no fixed
 distribution to copy."*
@@ -335,7 +335,7 @@ experiment that distinguishes a draw from an estimate. -> tasks A3-2, A3-7, A3-1
 
 ### Finding 7 — `max_ack_delay` is absent from Chromium's fourteen parameters, and its absence is the binding value
 
-The capture's transport-parameter table (`2026-08-16-brave-151-http3-impersonate-pro.md`, the table
+The capture's transport-parameter table (`the preset that measured it`, the table
 headed *"QUIC transport parameters, in wire order"*) lists **14** entries and
 `max_ack_delay` (0x0B) is not among them — the identifiers present are 12584, GREASE, 32, 9, 8, 7,
 5, 15, 17, 1, 6, 4, 12583, 3. The identifier exists in our codec
@@ -498,7 +498,7 @@ never refused, never silently invented.
 
 | # | Knob | Why an observer can see it | Source for the preset |
 | --- | --- | --- | --- |
-| 1 | **Initial RTT** (`kInitialRtt`) | decides *when* the first retransmission leaves, before any sample exists. Directly timeable off two datagrams | **already a knob**: `InitialRttRange` (`:575`), preset `Brave151InitialRttRange` = 100-300ms, UNVERIFIED. Finding 6 |
+| 1 | **Initial RTT** (`kInitialRtt`) | decides *when* the first retransmission leaves, before any sample exists. Directly timeable off two datagrams | **already a knob**: `InitialRttRange` (`:575`), preset `DeclaredInitialRttRange` = 100-300ms, UNVERIFIED. Finding 6 |
 | 2 | **Initial congestion window** (`10 * max_datagram_size`) | how many datagrams go out before the first ACK. B9's two-datagram Initial already sits at this boundary | RFC 9002 App. B default; Chromium's is **UNVERIFIED** — A3-14 |
 | 3 | **Minimum congestion window** (`2 * max_datagram_size`) | the floor a heavily-lossy path settles at; changes steady-state pacing | same |
 | 4 | **The congestion controller itself** — NewReno / CUBIC / BBR | the send-rate curve under loss. **The largest single fingerprint in A3.** Chromium ships BBR; RFC 9002 §7 ships NewReno | §7's own replaceability clause. Which one Chromium runs is **UNVERIFIED** here |
@@ -1130,9 +1130,9 @@ What A3 needs that B12 does not already ask for, and the count is the length of 
 Capture **two connections to the same host in sequence**, and compare their `initial_rtt` (12583)
 values against the *measured* RTT of the first. If the second connection's advertised value tracks
 the first's measured RTT, `initial_rtt` is a path-derived estimate and **A3 produces it rather than
-consuming it** — which inverts B5's dependency and makes `Brave151InitialRttRange` a stand-in for a
+consuming it** — which inverts B5's dependency and makes `DeclaredInitialRttRange` a stand-in for a
 cache rather than a distribution. If the two are uncorrelated, it is a draw and the range is real.
-**Neither the Brave capture nor the uQUIC source can distinguish these**, and
+**Neither a client capture nor the uQUIC source can distinguish these**, and
 `uquic-u_parrot-chrome-random-initial-rtt.txt` says so in its own conclusion.
 
 **Done when** each recorded artefact carries a provenance header naming what produced it, when, and

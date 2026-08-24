@@ -17,7 +17,7 @@ numbers byte for byte, which is what makes it a control rather than a second run
 
 **Why it exists.** `docs/superpowers/plans/2026-08-20-quic-b-fingerprint-spec-scoping.md` names one
 riskiest ordering assumption — *that B7 (wire order) can be reached with B5's `initial_rtt` range
-still a placeholder* — and rests it entirely on prose: the Brave capture's *"sorting the parameters
+still a placeholder* — and rests it entirely on prose: a client capture's *"sorting the parameters
 would change `perk_hash` while leaving `perk_hash_normalized` intact"*, and Finding 3's *"the perk
 renders `12583:AUTO`, so the hash sees position and not value."* Neither sentence was a measurement
 before this file. The plan itself puts the mitigation in B11 and says to run it as soon as anything
@@ -122,7 +122,7 @@ The plan's 12-task estimate holds on this axis. Uncertainty item 2 does not add 
 
 ## Where the documents stood up and where they did not
 
-**The Brave capture's prose was right, and this is the first time in this project a document has
+**A client capture's prose was right, and this is the first time in this project a document has
 beaten a measurement rather than losing to one.** Its line 53–55 claim — that both hashes are
 published, that the normalized form sorts by identifier, that the raw form preserves wire order, and
 that *"sorting the parameters would change `perk_hash` while leaving `perk_hash_normalized`
@@ -130,7 +130,7 @@ intact"* — is now measured, in both directions, 3 times per arm. Finding 3's *
 reading is likewise measured, for `12583`. **Neither claim needed rewriting.**
 
 **What was still wrong, and it is the same thing C13 already filed:** the field is `perk_text`, not
-`perk`. The Brave capture's own section heading says `perk`; a reader querying `perk` gets nothing
+`perk`. A client capture's own section heading says `perk`; a reader querying `perk` gets nothing
 back. C13 recorded this and it remains true — this probe reads `perk_text`, `perk_hash`,
 `perk_text_normalized` and `perk_hash_normalized` and only the latter three carry the names the plan
 and the capture use.

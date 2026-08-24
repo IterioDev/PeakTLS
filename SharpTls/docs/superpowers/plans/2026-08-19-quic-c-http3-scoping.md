@@ -23,7 +23,7 @@ history. Every claim about the tree was checked with a read or a grep, and the g
 | --- | --- | --- |
 | A4 task 14, correctly sized (1-RTT sending - a transport prerequisite, not HTTP) | **5** | tasks 14a-14e below |
 | C, enough to make `/api/http3` **answer** | **14** | tasks C0-C13 below |
-| C, enough to make its `perk` settings segment **match Brave 151** | **+3** | tasks C14-C16 below |
+| C, enough to make its `perk` settings segment **match a captured client** | **+3** | tasks C14-C16 below |
 | RFC 9221 DATAGRAM parse-and-drop, forced by the capture's own advertisement | **+1** | task C17 below |
 
 5 + 14 = **19 tasks to ask the endpoint**. 19 + 3 = **22 to satisfy its QPACK half**.
@@ -114,7 +114,7 @@ SETTINGS frame with a non-zero value of SETTINGS_QPACK_MAX_TABLE_CAPACITY. When 
 capacity is zero, the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any
 encoder instructions on the encoder stream."*
 
-The Brave capture's h3 SETTINGS carry `1: 65536`. So:
+A client capture's h3 SETTINGS carry `1: 65536`. So:
 
 - **Advertise 0** and the server's encoder is *forbidden* by the RFC from using the dynamic table or
   sending a single encoder instruction. A static-table-only decoder is then complete, not a gamble.
@@ -741,7 +741,7 @@ handshake, this is a materially larger exposure than A4 task 13's, and it is A3'
 **Done when** `/api/http3` returns a body rather than its protocol-segregation refusal - which is the
 gate, because it cannot be satisfied by a fallback; the returned `perk`, `perk_hash` and
 `perk_hash_normalized` are recorded verbatim into a new file under `reference-captures/` alongside
-the Brave capture; the task C12 readout is diffed against it field by field; the attempt count and
+a client capture; the task C12 readout is diffed against it field by field; the attempt count and
 the QPACK arm in force are recorded; and **the two `perk` segments C does not own - transport
 parameter wire order and the CID length pair - are reported as subsystem B's, not as C's failures.**
 Task 11 already recorded transport parameter wire order as a MISMATCH; C must not re-file it.
@@ -902,7 +902,7 @@ than derived has moved at least once.
 
 One row per decision, with the clause that decides it.
 
-| Decision | Minimal (`/api/http3` answers) | Complete (matches Brave 151) | The clause |
+| Decision | Minimal (`/api/http3` answers) | Complete (matches a captured client) | The clause |
 | --- | --- | --- | --- |
 | `SETTINGS_QPACK_MAX_TABLE_CAPACITY` (0x01) | **0** | **65536** | RFC 9204 §3.2.3. At 0 the peer's encoder MUST NOT use the dynamic table or send encoder instructions. At 65536 it may |
 | `SETTINGS_QPACK_BLOCKED_STREAMS` (0x07) | **0** | **100** | RFC 9204 §5, §2.1.2 |
@@ -921,7 +921,7 @@ One row per decision, with the clause that decides it.
 
 **The one-sentence version:** the smallest thing that makes `/api/http3` answer is a static-table-only
 QPACK with a Huffman decoder, one control stream, and no encoder or decoder stream at all - and it
-gets a different `perk_hash` than Brave, because the two QPACK settings that make it legal are
+gets a different `perk_hash` than that client, because the two QPACK settings that make it legal are
 themselves part of the hash.
 
 ---
@@ -985,7 +985,7 @@ this section exists to prevent.
 | The CONNECT method, HTTP Upgrade | **never, or E** | not a fingerprinting path |
 | Request cancellation and rejection (§4.1.1), `RESET_STREAM` and `STOP_SENDING` semantics | **C-complete** | a cancelled request leaks a stream until the connection closes |
 | Trailing header sections | **C-complete** | recognised and skipped, not decoded |
-| Priority (RFC 9218), `h3PriorityParam` | **B** | bogdanfinn exposes it; the Brave capture's `perk` does not carry it, so there is nothing to match against yet |
+| Priority (RFC 9218), `h3PriorityParam` | **B** | bogdanfinn exposes it; a client capture's `perk` does not carry it, so there is nothing to match against yet |
 | More than one request per connection, connection reuse (§3.3) | **E** | the acceptance gate is one GET |
 | Alt-Svc discovery (§3.1.1) and the h1-or-h2 upgrade path | **E** | the parent scoping notes the service advertises h3 via Alt-Svc, so reaching it may take a retry. C connects to a known h3 endpoint directly |
 | A response body decompressor (gzip, br, zstd) | **E** | if we advertise `accept-encoding` we must decode. C's minimal request may omit it - **and omitting it is itself a fingerprint difference from Chromium**, so this is a cut with a cost, not a free one |

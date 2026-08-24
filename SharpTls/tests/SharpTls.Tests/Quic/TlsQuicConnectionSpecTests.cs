@@ -17,11 +17,11 @@ namespace SharpTls.Tests.Quic;
 public sealed class TlsQuicConnectionSpecTests
 {
     [Fact]
-    public void DefaultsAreTheBraveCaptureShapeAtTheSectionFourteenFloor()
+    public void DefaultsAreTheACaptureShapeAtTheSectionFourteenFloor()
     {
         var spec = new TlsQuicConnectionSpec();
 
-        // Brave 151: "client_connection_id_length": 0, "server_connection_id_length": 8.
+        // a captured client: "client_connection_id_length": 0, "server_connection_id_length": 8.
         Assert.Equal(0, spec.SourceConnectionIdLength);
         Assert.Equal(8, spec.DestinationConnectionIdLength);
         // RFC 9000 s14.1's smallest allowed maximum datagram size.
@@ -47,7 +47,7 @@ public sealed class TlsQuicConnectionSpecTests
 
     // THE s7.2 WITNESS. RFC 9000 s7.2: "This Destination Connection ID MUST be at least 8
     // bytes in length." The expectation comes from that sentence, not from the default -
-    // Brave's own value of 8 sits exactly on the floor, so the capture agrees with every
+    // that client's own value of 8 sits exactly on the floor, so the capture agrees with every
     // length at or above it and proves nothing about what is below.
     //
     // 7 is the boundary case and is the row that fails against a mutant weakening the bound
@@ -367,7 +367,7 @@ public sealed class TlsQuicConnectionSpecTests
         Assert.Equal("InitialCryptoFramesPerDatagram", error.ParamName);
     }
 
-    // The two-datagram Initial the Brave capture forces: the X25519MLKEM768 key share is 1216
+    // The two-datagram Initial a client capture forces: the X25519MLKEM768 key share is 1216
     // bytes, so a Chromium-shaped ClientHello splits, and the split and the per-datagram
     // grouping are independent choices. Here three CRYPTO frames are grouped two-then-one.
     [Fact]
@@ -566,9 +566,23 @@ public sealed class TlsQuicConnectionSpecTests
     {
         var range = (Minimum: TimeSpan.FromMicroseconds(7000), Maximum: TimeSpan.FromMicroseconds(9000));
         var spec = new TlsQuicConnectionSpec { InitialRttRange = range };
-        Assert.True(range.Maximum < TlsQuicTransportParameterSpec.Brave151InitialRttRange.Minimum);
 
-        var parameter = new TlsQuicTransportParameterSpec()
+        // THE SLOT HAS TO BE LISTED, because the library's default list no longer carries one:
+        // it is RFC 9000 s7.3's single mandatory entry now that SharpTls ships no persona. What
+        // this test is about is unchanged - a listed initial_rtt entry reads its range from the
+        // CONNECTION spec rather than from the fallback beside it.
+        var parameters = new TlsQuicTransportParameterSpec
+        {
+            Parameters =
+            [
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                TlsQuicTransportParameterSpec.DrawnInitialRtt(
+                    TlsQuicTransportParameterSpec.InitialRttIdentifier, null),
+            ],
+        };
+
+        var parameter = parameters
             .Compose(spec, [])
             .Get(TlsQuicTransportParameterSpec.InitialRttIdentifier);
 
@@ -615,10 +629,16 @@ public sealed class TlsQuicConnectionSpecTests
         Assert.NotNull(budget.DescribeSection62Violation(
             TlsQuicPeerFlowControlBudget.Http3RequiredUnidirectionalStreams));
 
-        // The fix, read the same way: the six the spec emits are not zero.
+        // The fix, read the same way: a spec whose six limits are SET emits six non-zero
+        // values, and the violation goes.
+        //
+        // A BARE SPEC NO LONGER IS THAT FIX. TlsQuicLocalFlowControlSpec's six defaults are
+        // s18.2's zero now that SharpTls ships no captured persona, so a bare one describes the
+        // SAME violation as the two-parameter list above - which is the honest reading and the
+        // reason the limits have to be named by whoever wants them.
         var fixedUp = TlsQuicPeerFlowControlBudget.FromPeerParameters(
             new TlsQuicTransportParameters(
-                new TlsQuicLocalFlowControlSpec().ToTransportParameters()));
+                TestQuicSpecValues.HarnessFlowControl.ToTransportParameters()));
         Assert.Null(fixedUp.DescribeSection62Violation(
             TlsQuicPeerFlowControlBudget.Http3RequiredUnidirectionalStreams));
     }
@@ -630,7 +650,7 @@ public sealed class TlsQuicConnectionSpecTests
     public void TheTransportParameterListDefaultsToTheCapturePresetAndRejectsNull()
     {
         Assert.Equal(
-            TlsQuicTransportParameterSpec.Brave151Parameters,
+            TlsQuicTransportParameterSpec.RfcMinimumParameters,
             new TlsQuicConnectionSpec().TransportParameters.Parameters);
 
         var error = Assert.Throws<ArgumentNullException>(
@@ -653,25 +673,31 @@ public sealed class TlsQuicConnectionSpecTests
         Assert.Empty(spec.TransportParameters.Parameters);
     }
 
-    // THE CAPTURE BOUNDS ALL SIX, so there is no placeholder among them and every number below
-    // is transcribed from one row of
-    // reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md's "QUIC transport
-    // parameters, in wire order" table. One assertion per parameter rather than one per spec,
-    // for the reason TlsQuicConnectionFlowControlTests' header gives: six reads of the same
-    // shape need six witnesses or a swapped pair is invisible.
+    // ZERO, WHICH IS RFC 9000 s18.2's VALUE FOR AN ABSENT PARAMETER: "If this value is absent,
+    // then the flow control limit is zero", and for the two counts "If this parameter is absent
+    // or zero, the peer cannot open [streams] of the corresponding type."
+    //
+    // THESE SIX USED TO BE A CAPTURED BROWSER'S NUMBERS, shipped as the library default, which
+    // meant a spec advertising none of the six still ENFORCED that browser's limits - the
+    // advertise/enforce split TlsQuicLocalFlowControlSpec.AsAdvertisedBy exists to close.
+    // Matching s18.2 makes the stored value and the enforced value agree by construction for a
+    // spec that lists no slots, which the default parameter list now is.
+    //
+    // One assertion per parameter rather than one per spec, for the reason
+    // TlsQuicConnectionFlowControlTests' header gives: six reads of the same shape need six
+    // witnesses or a swapped pair is invisible.
     [Theory]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxData, 15728640UL)]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal, 6291456UL)]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote, 6291456UL)]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataUni, 6291456UL)]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamsBidi, 100UL)]
-    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamsUni, 103UL)]
-    public void EveryFlowControlDefaultIsTheBraveCapturesOwnNumber(
-        TlsQuicTransportParameterId id, ulong expected)
+    [InlineData(TlsQuicTransportParameterId.InitialMaxData)]
+    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal)]
+    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote)]
+    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamDataUni)]
+    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamsBidi)]
+    [InlineData(TlsQuicTransportParameterId.InitialMaxStreamsUni)]
+    public void EveryFlowControlDefaultIsSectionEighteenTwosZero(TlsQuicTransportParameterId id)
     {
         var emitted = new TlsQuicTransportParameters(
             new TlsQuicConnectionSpec().LocalFlowControl.ToTransportParameters());
-        Assert.Equal(expected, emitted.Get((ulong)id)?.GetVariableInteger());
+        Assert.Equal(0UL, emitted.Get((ulong)id)?.GetVariableInteger());
     }
 
     // THE REACHABILITY WITNESS PER FIELD, AND IT IS ABOUT THE BYTES. A knob that validates and
@@ -749,7 +775,7 @@ public sealed class TlsQuicConnectionSpecTests
     // s18.2 scopes each per-stream parameter to one of s2.1's four stream types, and from the
     // SENDER's side - we send these, so they bound what arrives. The four rows are the four
     // types; getting any pair of them the wrong way round is invisible against a peer whose
-    // limits are all equal, which the Brave defaults are for three of the four.
+    // limits are all equal, which the that client defaults are for three of the four.
     //
     // The values are distinct and each names its own parameter's id so a wrong read produces a
     // number that says where it came from, the convention TlsQuicConnectionFlowControlTests

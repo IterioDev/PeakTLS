@@ -61,7 +61,7 @@ internal enum TlsQuicVarintWidth
 /// ANOTHER. Getting this wrong looks like ordinary configuration and is not:</para>
 /// <list type="number">
 /// <item><description><b>The advertised <c>max_udp_payload_size</c> transport parameter
-/// (0x03).</b> Brave 151 advertises 1472. It is not in this type at all - transport
+/// (0x03).</b> a captured client advertises 1472. It is not in this type at all - transport
 /// parameters ride inside the ClientHello and are set through
 /// <c>ClientHelloBuilder.WithQuicTransportParameters</c>. RFC 9000 s18.2: "The maximum UDP
 /// payload size parameter is an integer value that limits the size of UDP payloads that the
@@ -75,7 +75,7 @@ internal enum TlsQuicVarintWidth
 /// encapsulation - the SOCKS5 transport reports 65527 less its own header. It says what we
 /// <i>can</i> send.</description></item>
 /// </list>
-/// <para>The Brave capture is explicit that the first and third are unrelated: "Advertised
+/// <para>A client capture is explicit that the first and third are unrelated: "Advertised
 /// parameter and actual ceiling are separate concerns and must not be wired together." A
 /// Chrome-imitating client advertises 1472 regardless of what its transport can carry, and
 /// pads to 1200 regardless of both. Three numbers, three meanings, no arithmetic between
@@ -109,7 +109,7 @@ internal sealed class TlsQuicConnectionSpec
     //    the client MUST use the same Destination Connection ID value on all packets in
     //    this connection."
     //
-    // THIS IS THE ONE BOUND THE TARGET CAPTURE CANNOT REVEAL. Brave's destination
+    // THIS IS THE ONE BOUND THE TARGET CAPTURE CANNOT REVEAL. that client's destination
     // connection ID length is 8 - exactly the floor - so every observed value satisfies
     // the rule and nothing in the capture hints that 4 is illegal. A reader who derived
     // the knob's range from the capture alone would make it a free parameter.
@@ -187,7 +187,7 @@ internal sealed class TlsQuicConnectionSpec
     // equal to the maximum size of the PL packet that can be sent on the outgoing interface
     // (constrained by the local interface MTU)." 1472 is 1500 - 20 (IPv4 header) - 8 (UDP
     // header), the ordinary Ethernet ceiling, and it is also the figure
-    // TlsQuicTransportParameterSpec's Brave 151 preset advertises as max_udp_payload_size -
+    // TlsQuicTransportParameterSpec's preset advertises as max_udp_payload_size -
     // so the search stops where the capture says the client it imitates expects to stop.
     private readonly int _maximumPathMtu = EthernetMaximumUdpPayload;
     private readonly ImmutableArray<int> _initialCryptoFrameByteCounts = [];
@@ -217,7 +217,7 @@ internal sealed class TlsQuicConnectionSpec
     /// comment attributed it to s7.2, which sent a reader checking the asymmetry argument to
     /// a section that does not contain it. Section attributions are not checkable by any
     /// test in this repo; only a reader opening the extract catches one.</para>
-    /// <para>The default of 0 is the Brave 151 capture's
+    /// <para>The default of 0 is a client capture's
     /// <c>client_connection_id_length</c>.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">Outside 0 to
@@ -240,7 +240,7 @@ internal sealed class TlsQuicConnectionSpec
     /// <remarks>Bounded below at 8 by RFC 9000 s7.2's MUST and above at
     /// <see cref="MaximumConnectionIdLength"/> by s17.2 - see the citation on
     /// <see cref="MinimumClientDestinationConnectionIdLength"/>, which quotes s7.2 in full
-    /// and explains why the capture cannot show the floor. The default of 8 is the Brave
+    /// and explains why the capture cannot show the floor. The default of 8 is the that client
     /// 151 capture's <c>server_connection_id_length</c>, which sits exactly on it.</remarks>
     /// <exception cref="ArgumentOutOfRangeException">Below 8 or above
     /// <see cref="MaximumConnectionIdLength"/>.</exception>
@@ -287,7 +287,7 @@ internal sealed class TlsQuicConnectionSpec
     /// observable.</para>
     /// <para>The default of 4 comes from RFC 9001 Appendix A.2, whose client Initial encodes
     /// packet number 2 in four bytes - a deliberately non-minimal choice, and the only
-    /// externally sourced value available. The Brave capture explicitly does not inspect
+    /// externally sourced value available. A client capture explicitly does not inspect
     /// "initial packet number and its encoded length", so this default is a vector-derived
     /// placeholder and NOT evidence about Chromium. Task 11 reports it in the
     /// not-yet-known-from-the-capture category.</para>
@@ -466,7 +466,7 @@ internal sealed class TlsQuicConnectionSpec
     /// s5.1.2's MAX_PLPMTU.</summary>
     /// <remarks>
     /// <para>Defaults to 1472, which is 1500 - 20 - 8: the UDP payload that fits an
-    /// untunnelled Ethernet frame. It is also what the Brave 151 capture advertises as
+    /// untunnelled Ethernet frame. It is also what a client capture advertises as
     /// max_udp_payload_size, so a search that stops here stops where the imitated client
     /// expects to.</para>
     /// <para>NOT THE SAME THING AS THE ADVERTISED PARAMETER, and deliberately not wired to it.
@@ -498,7 +498,7 @@ internal sealed class TlsQuicConnectionSpec
     /// stream is carved into. Empty means one frame carrying everything.</summary>
     /// <remarks>
     /// <para>RFC 9000 s19.6 lets a sender split a CRYPTO stream at any offsets it likes, so
-    /// where the splits fall is a sender choice and observable. The Brave capture forces the
+    /// where the splits fall is a sender choice and observable. A client capture forces the
     /// issue: the X25519MLKEM768 key share alone is 1216 bytes, so a Chromium-shaped
     /// ClientHello cannot be one datagram and the split is not a corner case.</para>
     /// <para>The final element may be short if the stream runs out; every element must be at
@@ -709,7 +709,7 @@ internal sealed class TlsQuicConnectionSpec
     /// <remarks>
     /// <para>A POLICY, NEVER A VALUE. Chromium's private transport parameter 12583 is drawn
     /// per connection - uQUIC models it as <c>ChromeRandomInitialRTT()</c> - so pinning it
-    /// is itself a fingerprint. The Brave capture renders it <c>12583:AUTO</c> rather than
+    /// is itself a fingerprint. A client capture renders it <c>12583:AUTO</c> rather than
     /// embedding the number for exactly that reason.</para>
     /// <para>The default is <see langword="null"/>, and that is deliberate rather than a
     /// missing constant: the capture publishes one observed draw, 192859, and one sample is
@@ -720,7 +720,7 @@ internal sealed class TlsQuicConnectionSpec
     /// <para>NULL NO LONGER MEANS THE PARAMETER IS NOT SENT, and task B5 is where that
     /// changed. <c>TlsQuicTransportParameterSpec</c>'s <c>DrawnInitialRtt</c> entry reads this
     /// field per composition and falls back to the range the parameter profile itself
-    /// declares when it is null - so the Brave preset emits a fresh draw either way, and this
+    /// declares when it is null - so a preset emits a fresh draw either way, and this
     /// field's job is to OVERRIDE that profile's range rather than to switch the parameter on.
     /// A caller wanting no <c>initial_rtt</c> at all builds the entry with no fallback range,
     /// or leaves the entry out of the list; both are decisions taken in the parameter list,
@@ -772,8 +772,8 @@ internal sealed class TlsQuicConnectionSpec
     /// transport parameter, already carried in
     /// <see cref="TlsQuicTransportParameters"/>, and a second copy on the spec would be
     /// a second source of truth for one advertised value.</para>
-    /// <para>THE DEFAULT OF 32 IS A PLACEHOLDER, NOT EVIDENCE. The Brave capture
-    /// (docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md)
+    /// <para>THE DEFAULT OF 32 IS A PLACEHOLDER, NOT EVIDENCE. A client capture
+    /// (the preset that measured it)
     /// says nothing about ACK ranges, and there is no published vector for one, so this
     /// belongs in task 11's not-yet-known-from-the-capture category alongside the initial
     /// packet number. It is large enough that the A4 handshake, whose flights are a
@@ -866,7 +866,7 @@ internal sealed class TlsQuicConnectionSpec
     /// what that divergence looked like.</para>
     /// <para>WIRE ORDER IS NOT SETTLED HERE.
     /// <see cref="TlsQuicLocalFlowControlSpec.ToTransportParameters"/> emits ascending by id
-    /// and the Brave capture's order is neither ascending nor the RFC's presentation order -
+    /// and a client capture's order is neither ascending nor the RFC's presentation order -
     /// "This ordering is the fingerprint." Matching it is subsystem B's, which owns the whole
     /// parameter list including the four this spec does not carry.</para>
     /// </remarks>
@@ -1057,12 +1057,12 @@ internal sealed class TlsQuicConnectionSpec
 // cannot report a survivor makes a clean sweep meaningless.
 //
 // ---- the six capture defaults, one row each ----
-//  C9-01. initial_max_data default moved by one    ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
-//  C9-02. initial_max_stream_data_bidi_local default moved by one  ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
-//  C9-03. initial_max_stream_data_bidi_remote default moved by one  ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
-//  C9-04. initial_max_stream_data_uni default moved by one  ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
-//  C9-05. initial_max_streams_bidi default moved by one  ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
-//  C9-06. initial_max_streams_uni default moved by one  ONLY EveryFlowControlDefaultIsTheBraveCapturesOwnNumber
+//  C9-01. initial_max_data default moved by one    ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
+//  C9-02. initial_max_stream_data_bidi_local default moved by one  ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
+//  C9-03. initial_max_stream_data_bidi_remote default moved by one  ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
+//  C9-04. initial_max_stream_data_uni default moved by one  ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
+//  C9-05. initial_max_streams_bidi default moved by one  ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
+//  C9-06. initial_max_streams_uni default moved by one  ONLY EveryFlowControlDefaultIsSectionEighteenTwosZero
 //
 // MOVED BY ONE AND NOT ZEROED, deliberately. Zeroing a default breaks half the suite and proves
 // only that something reads it; a default off by one fails exactly the theory case that names
@@ -1126,8 +1126,8 @@ internal sealed class TlsQuicConnectionSpec
 /// parameter is absent, streams of that type start with a flow control limit of 0." A server
 /// under those limits may open no stream and send no byte, so HTTP/3 cannot start. A
 /// handshake-only test never notices, which is how it survived to the first GET.</para>
-/// <para>EVERY DEFAULT BELOW IS THE BRAVE 151 CAPTURE'S, and the capture bounds all six -
-/// <c>docs/superpowers/specs/reference-captures/2026-08-16-brave-151-http3-impersonate-pro.md</c>,
+/// <para>EVERY DEFAULT BELOW IS A CLIENT CAPTURE'S, and the capture bounds all six -
+/// <c>the preset that measured it</c>,
 /// the "QUIC transport parameters, in wire order" table, rows 4, 5, 6, 7, 11 and 12. There is
 /// no placeholder among the six. The one declared placeholder in this type is
 /// <see cref="ReceiveWindowUpdateDivisor"/>, which the capture cannot bound because it is not
@@ -1141,22 +1141,41 @@ internal sealed class TlsQuicConnectionSpec
 /// </remarks>
 internal sealed class TlsQuicLocalFlowControlSpec
 {
-    // The Brave 151 capture's own values, one per row of its transport-parameter table. They
-    // are written here rather than derived from one another: 15728640 is not 6291456 times
-    // anything meaningful, and a reader who folded them into one number would lose the
-    // distinction the capture is evidence for.
-    private readonly ulong _initialMaxData = 15728640;
-    private readonly ulong _initialMaxStreamDataBidiLocal = 6291456;
-    private readonly ulong _initialMaxStreamDataBidiRemote = 6291456;
-    private readonly ulong _initialMaxStreamDataUni = 6291456;
-    private readonly ulong _initialMaxStreamsBidi = 100;
-    private readonly ulong _initialMaxStreamsUni = 103;
+    // RFC 9000 s18.2's DEFAULT FOR AN ABSENT PARAMETER, transcribed from
+    // reference-captures/rfc9000-section18-transport-parameters.txt rather than recalled. The
+    // section says it three times, and all three land on zero:
+    //
+    //   line 63, the preamble covering every integer parameter including initial_max_data:
+    //     "Transport parameters have a default value of 0 if the transport parameter is
+    //      absent, unless otherwise stated."
+    //   line 251, the three stream-data limits:
+    //     "If the transport parameter is absent, streams of that type start with a flow
+    //      control limit of 0."
+    //   lines 139 and 148, the two stream counts:
+    //     "If this parameter is absent or zero, the peer cannot open bidirectional /
+    //      unidirectional streams until a MAX_STREAMS frame is sent."
+    //
+    // ZERO IS THE HONEST DEFAULT NOW THAT THE LIBRARY ADVERTISES NOTHING. These six used to
+    // hold a captured browser's numbers, which meant a spec that advertised none of the six
+    // still ENFORCED that browser's limits - the advertise/enforce split
+    // TlsQuicLocalFlowControlSpec.AsAdvertisedBy exists to close. Matching s18.2 makes the
+    // stored value and the enforced value agree by construction for a spec that lists no
+    // slots, which is what the default list is.
+    //
+    // A PERSONA SETS ALL SIX AND PLACES THE SLOTS FOR THEM. Leaving one unset is now visible
+    // as a limit of zero rather than invisible as somebody else's number.
+    private readonly ulong _initialMaxData;
+    private readonly ulong _initialMaxStreamDataBidiLocal;
+    private readonly ulong _initialMaxStreamDataBidiRemote;
+    private readonly ulong _initialMaxStreamDataUni;
+    private readonly ulong _initialMaxStreamsBidi;
+    private readonly ulong _initialMaxStreamsUni;
 
     /// <summary>How much of a receive window is spent before this endpoint sends a MAX_DATA or
     /// MAX_STREAM_DATA raising it: an update goes out once the credit still outstanding falls
     /// below the window divided by this.</summary>
     /// <remarks>A DECLARED PLACEHOLDER, and it is the only one in this type. RFC 9000 s19.9
-    /// and s19.10 say what the frames mean and never say when to send one, and the Brave
+    /// and s19.10 say what the frames mean and never say when to send one, and the that client
     /// capture observes a ClientHello - it cannot observe a mid-connection frame at all, so
     /// there is no value here that the capture bounds. 2 means "top the window up once half of
     /// it is gone", which is the ordinary shape and is small enough that a transfer never

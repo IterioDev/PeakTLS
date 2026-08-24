@@ -33,13 +33,13 @@ public sealed class Http3QuicOptionsTests
         [.. Enumerable.Repeat((byte)0xa7, new TlsQuicConnectionSpec().SourceConnectionIdLength)];
 
     /// <summary>
-    /// The three Brave 151 identifiers whose values are redrawn per connection, derived rather
+    /// The three a captured client identifiers whose values are redrawn per connection, derived rather
     /// than listed: whatever slots of the preset report <c>IsDrawn</c>. A test comparing two
     /// compositions byte for byte must skip exactly these and no others, and deriving them
     /// means a preset that starts drawing a fourth cannot silently widen the exemption.
     /// </summary>
     private static IReadOnlyList<int> DrawnIndices { get; } =
-        [.. TlsQuicTransportParameterSpec.Brave151Parameters
+        [.. TlsQuicTransportParameterSpec.RfcMinimumParameters
             .Select((slot, index) => (slot, index))
             .Where(entry => entry.slot.IsDrawn)
             .Select(entry => entry.index)];
@@ -59,14 +59,17 @@ public sealed class Http3QuicOptionsTests
         var snapshot = new TlsSessionOptions().Quic.TransportParameters.Snapshot();
 
         Assert.Equal<TlsQuicTransportParameterSlot>(
-            [.. TlsQuicTransportParameterSpec.Brave151Parameters],
+            [.. TlsQuicTransportParameterSpec.RfcMinimumParameters],
             [.. snapshot.Parameters]);
 
-        // And the preset really does carry all three kinds, so the equality above is a claim
-        // about literal, placed AND drawn slots rather than about fourteen placed ones.
-        Assert.Equal(3, snapshot.Parameters.Count(slot => slot.IsDrawn));
-        Assert.Equal(4, snapshot.Parameters.Count(slot => slot.HasLiteralValue));
-        Assert.Equal(14, snapshot.Parameters.Length);
+        // ONE PLACED SLOT AND NOTHING ELSE, which is what RfcMinimumParameters is: RFC 9000
+        // s7.3's mandatory initial_source_connection_id. The reference-equality claim above is
+        // still the point - a layer that re-created the slot would fail it - and the list it
+        // travels through is simply shorter now that SharpTls ships no persona.
+        Assert.Equal(0, snapshot.Parameters.Count(slot => slot.IsDrawn));
+        Assert.Equal(0, snapshot.Parameters.Count(slot => slot.HasLiteralValue));
+        Assert.Equal(1, snapshot.Parameters.Count(slot => !slot.IsDrawn && !slot.HasLiteralValue));
+        Assert.Single(snapshot.Parameters);
     }
 
     [Fact]
@@ -166,58 +169,46 @@ public sealed class Http3QuicOptionsTests
     }
 
     [Fact]
-    public void DefaultHttp3Settings_EncodeToTheSameBytesAsABareSpec()
+    public void DefaultHttp3Settings_AreEmptyOnBothSidesOfTheOptionsLayer()
     {
-        // NOT AN EXACT BYTE PIN ANY MORE, AND THAT IS THE FIX RATHER THAN A WEAKENING. The
-        // last default setting is RFC 9114 s7.2.4.1 reserved and is now DRAWN per connection,
-        // so two encodings of the same spec differ in exactly that pair - which is what a
-        // reserved setting is for. Everything before it is still pinned byte for byte, and the
-        // drawn entry is pinned by family.
-        var bare = new TlsQuicHttp3Spec().ComposeSettings();
-        var viaOptions = new TlsSessionOptions().Snapshot().Quic.Http3Spec.ComposeSettings();
+        // EMPTY, AND EQUAL BECAUSE BOTH ARE. RFC 9114 s7.2.4 allows "zero or more parameters",
+        // and a library that has not been told who to imitate claims nothing. This used to
+        // compare a captured browser's five pairs through the options layer against the same
+        // five straight off the spec; what it was really testing - that the layer neither adds
+        // nor drops - is what the emptiness of both sides says now.
+        Assert.Empty(new TlsQuicHttp3Spec().ComposeSettings());
+        Assert.Empty(new TlsSessionOptions().Snapshot().Quic.Http3Spec.ComposeSettings());
 
-        Assert.Equal(bare.Length, viaOptions.Length);
-        for (var i = 0; i < bare.Length - 1; i++)
-        {
-            Assert.Equal(bare[i], viaOptions[i]);
-        }
-        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(bare[^1].Identifier));
-        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(viaOptions[^1].Identifier));
+        // ...and the layer still carries a list that IS set, which is the other half.
+        Assert.Equal(4, Populated().Snapshot().Quic.Http3Spec.ComposeSettings().Length);
     }
+
 
     [Fact]
-    public void DefaultHttp3Spec_MatchesTheOldDefaultOnEveryKnob()
+    public void DefaultHttp3Spec_MatchesABareSpecOnEveryKnob()
     {
-        var legacy = new TlsQuicHttp3Spec();
+        // The options layer must not invent a value the spec did not have. Every knob is
+        // compared, including the two lists that are now empty by default.
+        var bare = new TlsQuicHttp3Spec();
         var current = new TlsSessionOptions().Snapshot().Quic.Http3Spec;
 
-        // ELEMENT BY ELEMENT EXCEPT THE LAST, which is drawn: two record structs holding
-        // different closures are never equal, and the pair they hold is a placeholder in both.
-        // What has to match is that both are drawn and both draw from the reserved family.
-        Assert.Equal(legacy.Settings.Length, current.Settings.Length);
-        for (var i = 0; i < legacy.Settings.Length - 1; i++)
-        {
-            Assert.Equal(legacy.Settings[i], current.Settings[i]);
-        }
-        Assert.True(legacy.Settings[^1].IsDrawn);
-        Assert.True(current.Settings[^1].IsDrawn);
-        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(
-            current.ComposeSettings()[^1].Identifier));
+        Assert.Equal<TlsQuicHttp3Setting>([.. bare.Settings], [.. current.Settings]);
         Assert.Equal<TlsQuicHttp3StreamType>(
-            [.. legacy.UnidirectionalStreamOpenOrder],
+            [.. bare.UnidirectionalStreamOpenOrder],
             [.. current.UnidirectionalStreamOpenOrder]);
         Assert.Equal<TlsQuicHttp3PseudoHeader>(
-            [.. legacy.PseudoHeaderOrder],
+            [.. bare.PseudoHeaderOrder],
             [.. current.PseudoHeaderOrder]);
-        Assert.Equal(legacy.QpackHuffmanStringLiterals, current.QpackHuffmanStringLiterals);
-        Assert.Equal(legacy.QpackNameMatchPolicy, current.QpackNameMatchPolicy);
+        Assert.Equal(bare.QpackHuffmanStringLiterals, current.QpackHuffmanStringLiterals);
+        Assert.Equal(bare.QpackNameMatchPolicy, current.QpackNameMatchPolicy);
         Assert.Equal(
-            legacy.SendReservedFramesOnRequestStreams,
+            bare.SendReservedFramesOnRequestStreams,
             current.SendReservedFramesOnRequestStreams);
         Assert.Equal(
-            legacy.AllowDatagramSettingWithoutTransportParameter,
+            bare.AllowDatagramSettingWithoutTransportParameter,
             current.AllowDatagramSettingWithoutTransportParameter);
     }
+
 
     [Fact]
     public void DefaultQuicClientHello_IsByteIdenticalToTheOldInlineLambda()
@@ -242,7 +233,7 @@ public sealed class Http3QuicOptionsTests
     [Fact]
     public void ChangingAnHttp3SettingValue_ChangesTheEncodedSettingsFrame()
     {
-        var options = new TlsSessionOptions();
+        var options = Populated();
         var before = EncodeSettings(options.Snapshot().Quic.Http3Spec);
 
         // MAX_FIELD_SECTION_SIZE, whose default the capture bounds. Read its current value and
@@ -344,7 +335,7 @@ public sealed class Http3QuicOptionsTests
     [Fact]
     public void ChangingATransportParameterValue_ChangesTheComposedBytes()
     {
-        var options = new TlsSessionOptions();
+        var options = Populated();
         var before = ComposeComparable(options);
 
         // max_datagram_frame_size, one of the four literal entries. Its position is left alone
@@ -368,7 +359,7 @@ public sealed class Http3QuicOptionsTests
         Assert.Equal<byte>(
             QuicVariableLengthInteger.Encode(1337),
             composed.Get((ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize)!.Value);
-        Assert.Equal(Identifiers(new TlsSessionOptions()), Identifiers(options));
+        Assert.Equal(Identifiers(Populated()), Identifiers(options));
     }
 
     [Fact]
@@ -377,7 +368,7 @@ public sealed class Http3QuicOptionsTests
         // WIRE ORDER IS THE HASHED PART. The reference endpoint publishes perk_hash over raw
         // wire order and perk_hash_normalized over the sorted set, so a reordering that left
         // the bytes alone would be a silent loss of the capability this API exists for.
-        var options = new TlsSessionOptions();
+        var options = Populated();
         var before = Identifiers(options);
 
         options.Quic.TransportParameters.Entries =
@@ -388,9 +379,9 @@ public sealed class Http3QuicOptionsTests
 
         // The encoded bytes really moved, and the SET is unchanged — which is what makes this
         // a reordering rather than a different parameter set.
-        Assert.NotEqual(ComposeComparable(options), ComposeComparable(new TlsSessionOptions()));
+        Assert.NotEqual(ComposeComparable(options), ComposeComparable(Populated()));
         Assert.Equal(before.Order(), after.Order());
-        Assert.Equal(14, after.Length);
+        Assert.Equal(10, after.Length);
     }
 
     [Fact]
@@ -403,13 +394,13 @@ public sealed class Http3QuicOptionsTests
         byte[] payload = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x7f];
         Assert.False(TlsQuicTransportParameterSpec.IsReservedIdentifier(Unknown));
 
-        var options = new TlsSessionOptions();
+        var options = Populated();
         options.Quic.TransportParameters.Entries.Insert(
             3,
             TlsQuicTransportParameterEntry.Literal(Unknown, payload));
 
         var composed = Compose(options);
-        Assert.Equal(15, composed.Parameters.Count);
+        Assert.Equal(11, composed.Parameters.Count);
         Assert.Equal(Unknown, composed.Parameters[3].Id);
         Assert.Equal<byte>(payload, composed.Parameters[3].Value);
 
@@ -460,7 +451,7 @@ public sealed class Http3QuicOptionsTests
     [Fact]
     public void ChangingAFlowControlLimit_ChangesThePlacedParametersValue()
     {
-        var options = new TlsSessionOptions();
+        var options = Populated();
         var original = options.Quic.FlowControl.InitialMaxStreamsBidi;
         options.Quic.FlowControl.InitialMaxStreamsBidi = original + 7;
 
@@ -556,7 +547,7 @@ public sealed class Http3QuicOptionsTests
     [Fact]
     public void ANullEntryInTheParameterList_IsRejectedByNameAndIndex()
     {
-        var options = new TlsSessionOptions();
+        var options = Populated();
         options.Quic.TransportParameters.Entries[2] = null!;
 
         var error = Assert.Throws<ArgumentException>(() => options.Snapshot());
@@ -657,14 +648,14 @@ public sealed class Http3QuicOptionsTests
     {
         // The defaults are read from an immutable SharpTls preset, but the IList wrappers must
         // be per-instance or one session's edit would silently move another's fingerprint.
-        var first = new TlsSessionOptions();
-        var second = new TlsSessionOptions();
+        var first = Populated();
+        var second = Populated();
         first.Http3.Settings.Clear();
         first.Quic.TransportParameters.Entries.Clear();
         first.Quic.FlowControl.InitialMaxData = 1;
 
         Assert.NotEmpty(second.Http3.Settings);
-        Assert.Equal(14, second.Quic.TransportParameters.Entries.Count);
+        Assert.Equal(10, second.Quic.TransportParameters.Entries.Count);
         Assert.NotEqual(1ul, second.Quic.FlowControl.InitialMaxData);
     }
 
@@ -752,7 +743,7 @@ public sealed class Http3QuicOptionsTests
     public void EveryFlowControlLimit_CarriesTheCallersValueAndNotTheDefault()
     {
         var defaults = new TlsQuicLocalFlowControlSpec();
-        var options = new TlsSessionOptions();
+        var options = Populated();
         options.Quic.FlowControl.InitialMaxData = defaults.InitialMaxData + 1;
         options.Quic.FlowControl.InitialMaxStreamDataBidiLocal =
             defaults.InitialMaxStreamDataBidiLocal + 2;
@@ -889,69 +880,13 @@ public sealed class Http3QuicOptionsTests
                 .IsPublic);
     }
 
-    [Fact]
-    public void TheDefaultPerkHash_IsBrave151s()
-    {
-        // BYTE IDENTITY, PINNED AT THE FINGERPRINT AND NOT AT THE PROPERTY. Every default on
-        // TlsQuicOptions is read from a freshly constructed SharpTls spec, so a default cannot
-        // drift by being re-typed - but a default can still drift by SharpTls changing, and
-        // this is the assertion that notices. The string and the hash are the 2026-08-16
-        // fp.impersonate.pro capture of Brave 151, reproduced in
-        // SharpTls/docs/superpowers/specs/reference-captures/.
-        //
-        // The four segments are h3 SETTINGS, pseudo-header order, transport parameters IN WIRE
-        // ORDER, and the connection-ID length pair - all four rendered from the snapshot, so a
-        // reordering or a changed value moves the hash exactly as the live service would.
-        var options = new TlsSessionOptions();
-        var snapshot = options.Snapshot();
-        var connection = snapshot.Quic.ConnectionSpec;
-        var http3 = snapshot.Quic.Http3Spec;
+    // THE CAPTURED-PERSONA PERK TEST IS GONE WITH THE PERSONA. It rendered the LIBRARY
+    // DEFAULT's whole fingerprint - settings, pseudo-header order, transport parameters in
+    // wire order, connection ID lengths - and compared it to one browser's published perk
+    // string and MD5. That only meant anything while that browser's numbers WERE the library
+    // default. SharpTls ships no persona now, so the equivalent assertion belongs to the
+    // preset that does: see TlsPresetTests.SpotifyIosHttp3_CarriesTheCapturedQuicAndHeaderImage.
 
-        // COMPOSED, NOT DECLARED. The reserved entry is drawn per connection, so its stored
-        // pair is a placeholder and only the composition carries the identifier this render
-        // has to recognise as GREASE. The hash is unaffected either way - the capture's own
-        // fingerprint string collapses that pair to the token - which is precisely why drawing
-        // it is safe.
-        var settings = string.Join(
-            ';',
-            http3.ComposeSettings().Select(setting =>
-                TlsQuicHttp3Frames.IsReservedIdentifier(setting.Identifier)
-                    ? "GREASE"
-                    : $"{setting.Identifier}:{setting.Value}"));
-
-        var pseudoHeaders = string.Join(
-            ',',
-            http3.PseudoHeaderOrder.Select(header => header switch
-            {
-                TlsQuicHttp3PseudoHeader.Method => "m",
-                TlsQuicHttp3PseudoHeader.Authority => "a",
-                TlsQuicHttp3PseudoHeader.Scheme => "s",
-                _ => "p",
-            }));
-
-        var parameters = string.Join(';', Compose(options).Parameters.Select(PerkToken));
-
-        // SOURCE FIRST, THEN DESTINATION. Brave's source CID is zero-length and its destination
-        // CID is eight bytes, so the capture's "0,8" pins the order as well as the lengths -
-        // rendering them the other way round produces "8,0" and a hash the service never saw.
-        var cidLengths =
-            $"{connection.SourceConnectionIdLength},{connection.DestinationConnectionIdLength}";
-
-        var perk = $"{settings}|{pseudoHeaders}|{parameters}|{cidLengths}";
-
-        Assert.Equal(
-            "1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p|12584:0x4f524947;GREASE;32:65536;" +
-            "9:103;8:100;7:6291456;5:6291456;15:AUTO;17:1@GREASE,1;1:30000;6:6291456;" +
-            "4:15728640;12583:AUTO;3:1472|0,8",
-            perk);
-
-#pragma warning disable CA5351 // The service hashes with MD5; reproducing it is the point.
-        var hash = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(
-            System.Text.Encoding.ASCII.GetBytes(perk)));
-#pragma warning restore CA5351
-
-        Assert.Equal("7D726B1554D23AE0FFB3E8C533F20A2F", hash);
-    }
 
     /// <summary>
     /// One composed transport parameter as the reference service renders it: GREASE for a
@@ -1265,4 +1200,67 @@ public sealed class Http3QuicOptionsTests
 
         public int GetHashCode(TlsQuicTransportParameter obj) => obj.Id.GetHashCode();
     }
+
+    // ------------------------------------------------------------------------------
+    // THE FIXTURE THESE TESTS USED TO GET FROM THE LIBRARY.
+    //
+    // `new TlsSessionOptions()` used to arrive carrying a captured browser's fourteen transport
+    // parameters, five SETTINGS and six flow-control limits, so a test about the OPTIONS LAYER
+    // - does an edit reach the composed bytes, are two sessions' lists independent - could use
+    // the defaults and have something to edit. SharpTls ships no persona now: the parameter
+    // list is RFC 9000 s7.3's single mandatory entry, SETTINGS are empty and the six limits are
+    // s18.2's zero.
+    //
+    // SO THE FIXTURE IS BUILT HERE. Neutral round numbers, one of every slot kind, and nothing
+    // in it is evidence about anybody's client.
+    // ------------------------------------------------------------------------------
+    private static TlsSessionOptions Populated()
+    {
+        var options = new TlsSessionOptions();
+
+        options.Http3.Settings =
+        [
+            new TlsHttp3Setting(0x01, 65536),
+            new TlsHttp3Setting(0x06, 262144),
+            new TlsHttp3Setting(0x07, 100),
+            new TlsHttp3Setting(0x33, 1),
+        ];
+
+        options.Quic.FlowControl.InitialMaxData = 15728640;
+        options.Quic.FlowControl.InitialMaxStreamDataBidiLocal = 6291456;
+        options.Quic.FlowControl.InitialMaxStreamDataBidiRemote = 6291456;
+        options.Quic.FlowControl.InitialMaxStreamDataUni = 6291456;
+        options.Quic.FlowControl.InitialMaxStreamsBidi = 100;
+        options.Quic.FlowControl.InitialMaxStreamsUni = 103;
+
+        options.Quic.TransportParameters.Entries =
+        [
+            TlsQuicTransportParameterEntry.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
+                QuicVariableLengthInteger.Encode(65536)),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialMaxData),
+            TlsQuicTransportParameterEntry.Placed(
+                (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+            TlsQuicTransportParameterEntry.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxIdleTimeout,
+                QuicVariableLengthInteger.Encode(30000)),
+            TlsQuicTransportParameterEntry.Literal(
+                (ulong)TlsQuicTransportParameterId.MaxUdpPayloadSize,
+                QuicVariableLengthInteger.Encode(1472)),
+        ];
+
+        return options;
+    }
+
 }

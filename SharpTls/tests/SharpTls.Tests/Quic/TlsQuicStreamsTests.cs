@@ -1005,7 +1005,18 @@ public sealed class TlsQuicStreamsTests
         // uni (0x07) this endpoint emits, so moving the parameter moves the guard, and a peer
         // conforming to what we told it can never be refused. Stream 3 is s2.1's server-
         // initiated unidirectional type, which is the one 0x07 governs.
-        var local = new TlsQuicLocalFlowControlSpec { InitialMaxStreamDataUni = 4096 };
+        var local = new TlsQuicLocalFlowControlSpec { InitialMaxStreamDataUni = 4096,
+                                                        // s18.2's absent-parameter zero would let the peer open no stream at all,
+                                                        // so the counts are named even where the test is about data limits.
+                                                        InitialMaxStreamsBidi = 100,
+                                                        InitialMaxStreamsUni = 100,
+                                                        // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+                                                        // s18.2's zero for all six now, so anything the test does not name would
+                                                        // otherwise refuse the frame before the rule under test was reached.
+                                                        InitialMaxData = 1_000_000,
+                                                        InitialMaxStreamDataBidiLocal = 100_000,
+                                                        InitialMaxStreamDataBidiRemote = 100_000,
+                                                    };
         var streams = Set(local: local);
         var last = local.InitialMaxStreamDataUni - 1;
 
@@ -1025,7 +1036,16 @@ public sealed class TlsQuicStreamsTests
         // s19.11's own worked example: "a server that receives a unidirectional stream limit
         // of 3 is permitted to open streams 3, 7, and 11, but not stream 15." Four here rather
         // than three so the loop and the refusal are separate numbers.
-        var local = new TlsQuicLocalFlowControlSpec { InitialMaxStreamsUni = 4 };
+        var local = new TlsQuicLocalFlowControlSpec { InitialMaxStreamsUni = 4,
+                                                        // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+                                                        // s18.2's zero for all six now, so anything the test does not name would
+                                                        // otherwise refuse the frame before the rule under test was reached.
+                                                        InitialMaxData = 1_000_000,
+                                                        InitialMaxStreamDataBidiLocal = 100_000,
+                                                        InitialMaxStreamDataBidiRemote = 100_000,
+                                                        InitialMaxStreamDataUni = 100_000,
+                                                        InitialMaxStreamsBidi = 100,
+                                                    };
         var streams = Set(local: local);
         for (var index = 0UL; index < local.InitialMaxStreamsUni; index++)
         {
@@ -1098,6 +1118,15 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxData = 64,
             InitialMaxStreamDataUni = 64,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1143,6 +1172,15 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxData = 16,
             InitialMaxStreamDataUni = 16,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1182,6 +1220,15 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxData = 16,
             InitialMaxStreamDataUni = 16,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1205,6 +1252,15 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxData = 12,
             InitialMaxStreamDataUni = 8,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1226,6 +1282,15 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxData = 8,
             InitialMaxStreamDataUni = 8,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1251,6 +1316,13 @@ public sealed class TlsQuicStreamsTests
         {
             InitialMaxStreamsUni = 1,
             InitialMaxStreamsBidi = 2,
+            // THE LIMITS THIS TEST IS NOT ABOUT. A bare spec advertises RFC 9000
+            // s18.2's zero for all six now, so anything the test does not name would
+            // otherwise refuse the frame before the rule under test was reached.
+            InitialMaxData = 1_000_000,
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+            InitialMaxStreamDataUni = 100_000,
         };
         var streams = Set(local: local);
 
@@ -1283,6 +1355,10 @@ public sealed class TlsQuicStreamsTests
             InitialMaxStreamDataBidiLocal = 5005,
             InitialMaxStreamDataBidiRemote = 6006,
             InitialMaxStreamDataUni = 7007,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
         });
 
         Assert.True(streams.TryReceive(Frame(streamId, expected - 1, [1]), out _));
@@ -1349,7 +1425,20 @@ public sealed class TlsQuicStreamsTests
             TlsQuicTransportParameter.VariableInteger(
                 TlsQuicTransportParameterId.InitialMaxStreamsUni, streamsUni),
         ])),
-        local);
+        // POPULATED, BECAUSE THE LIBRARY DEFAULT NO LONGER IS. TlsQuicLocalFlowControlSpec's
+        // six limits are RFC 9000 s18.2's absent-parameter zero now that SharpTls ships no
+        // captured persona, and a set built on zeros refuses every frame these tests send.
+        // What the tests want is "some limits generous enough not to be the subject" - so they
+        // say so here rather than inheriting somebody's fingerprint for its side effects.
+        local ?? new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxData = 1_000_000,
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+            InitialMaxStreamDataUni = 100_000,
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+        });
 
     // s19.4's, s19.5's and s19.13's frames as the PEER would send them, carrying only the two
     // fields the direction rules read. The application error code and final size are omitted

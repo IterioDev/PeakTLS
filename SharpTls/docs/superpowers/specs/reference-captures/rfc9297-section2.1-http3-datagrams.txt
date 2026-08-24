@@ -1,7 +1,7 @@
 RFC 9297 Section 2.1 - HTTP/3 Datagrams (complete: 2.1, 2.1.1 The
 SETTINGS_H3_DATAGRAM HTTP/3 Setting)
 Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9297.txt on 2026-08-19.
-Captured for subsystem C task C0. The Brave capture this subsystem reproduces
+Captured for subsystem C task C0. A client capture this subsystem reproduces
 sends SETTINGS_H3_DATAGRAM as "51: 1"; 2.1.1 names the setting 0x33, and
 0x33 = 51, so the capture's decimal 51 and this RFC's hex 0x33 are the same
 identifier. This extract is what makes that a checkable claim rather than a

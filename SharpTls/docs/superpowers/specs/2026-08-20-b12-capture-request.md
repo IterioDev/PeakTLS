@@ -11,13 +11,13 @@ neither verification endpoint observes.
 
 | Unverified thing | Where it lives now | Why nothing else settles it |
 | --- | --- | --- |
-| `initial_rtt` (12583) **range width** | `Brave151InitialRttRange`, marked `UNVERIFIED, settled by task B12` | The capture publishes exactly one draw, 192859 us. One sample bounds nothing. Task 1 refused to invent a range and that refusal stands. **The uQUIC shortcut was tried at `5c0039c` and failed - see below.** |
-| Reserved (GREASE) parameter's **N** in `31 * N + 27` | `Brave151ReservedIdentifierN`, kept as evidence only | The `perk` string hashes the parameter's POSITION, not its identifier - measured at `4ed90bf` - so the endpoint cannot reveal N. |
+| `initial_rtt` (12583) **range width** | `DeclaredInitialRttRange`, marked `UNVERIFIED, settled by task B12` | The capture publishes exactly one draw, 192859 us. One sample bounds nothing. Task 1 refused to invent a range and that refusal stands. **The uQUIC shortcut was tried at `5c0039c` and failed - see below.** |
+| Reserved (GREASE) parameter's **N** in `31 * N + 27` | `ReservedIdentifierNExample`, kept as evidence only | The `perk` string hashes the parameter's POSITION, not its identifier - measured at `4ed90bf` - so the endpoint cannot reveal N. |
 | **Initial flight split point** | B9's `[1400, 112]` budget, `3a7852f` | Capture lines 30-33: `fp.impersonate.pro` does not inspect per-datagram Initial flight plans or CRYPTO frame splitting. **No live run will ever catch a wrong split.** 1400 is `1472 - 43` rounded down for headroom - a headroom calculation, not a measurement. One-frame-per-datagram is part of the same guess. |
 
 ## What to capture
 
-**A packet capture of Brave (or Chromium) opening an HTTP/3 connection**, from the very first
+**A packet capture of that client (or Chromium) opening an HTTP/3 connection**, from the very first
 datagram. The opening Initial flight is the subject; the rest of the connection is not needed.
 
 Any h3 origin works. `https://fp.impersonate.pro/api/http3` is convenient because the same host is
@@ -26,7 +26,7 @@ avoid mixing this measurement with the fingerprint runs.
 
 ### Procedure
 
-1. Close all running Brave/Chrome instances, so the capture is not polluted by existing connections.
+1. Close all running that client/Chrome instances, so the capture is not polluted by existing connections.
 2. Start the capture **before** launching the browser, filtered to UDP port 443 - the Initial flight
    is the first thing on the wire and cannot be recovered afterwards.
    - Wireshark: capture filter `udp port 443`, display filter `quic`.
@@ -67,19 +67,19 @@ This section previously said that reading uQUIC's `ChromeRandomInitialRTT()` wou
 is captured verbatim at `reference-captures/uquic-u_parrot-chrome-random-initial-rtt.txt`
 (`refraction-networking/uquic`, `u_parrot.go`, master `837c7ce1`, not in any released tag).
 
-It draws **uniformly over [1000, 20000) microseconds**. The Brave capture's observed 192859 is
+It draws **uniformly over [1000, 20000) microseconds**. A client capture's observed 192859 is
 **outside that range by 9.6x**, and three readings say so independently:
 
 1. 192859 > 20000 outright.
 2. The function emits a **2-byte varint**, whose maximum is 16383. 192859 requires a 4-byte varint.
-   **Brave's wire encoding is not this encoding**, whatever the values.
+   **that client's wire encoding is not this encoding**, whatever the values.
 3. uQUIC's own numbers do not close: `maxRTT` 20000 exceeds what a 2-byte varint holds, so its draws
    in [16384, 19999] silently lose their overflow bits. Its effective on-wire distribution is not its
    documented one. That is a defect in uQUIC, noted here only because it means the function cannot be
    treated as an authority even on its own terms.
 
 **Two real-world draws now exist and they are 25x apart** - uQUIC's own doc comment records 7740 us,
-and the Brave capture records 192859 us. Both are plausible *measured* RTTs. The simplest reading
+and a client capture records 192859 us. Both are plausible *measured* RTTs. The simplest reading
 consistent with both is that **Chromium reports a path-derived estimate rather than a random draw**,
 in which case there is no distribution to copy and a "range" is the wrong model entirely. That is
 inference from two points and is flagged as such in the capture.

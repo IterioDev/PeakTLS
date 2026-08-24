@@ -49,7 +49,7 @@ fingerprint — not their contents:
 | List | Where | Why order is the fingerprint |
 | --- | --- | --- |
 | ClientHello extension order | `ClientHelloBuilder.WithExtensionOrder` / `WithExtensionLayout` (`src/SharpTls/ClientHello/ClientHelloBuilder.cs:467`, `:480`) | JA3/JA4 hash the extension type sequence. |
-| QUIC transport parameters | `TlsQuicTransportParameterSpec.Parameters` (`src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs:523`) | The Brave capture's table is headed *"in wire order"*: *"This ordering is the fingerprint. It is not sorted, and it is not the RFC's presentation order."* Task B11 proved it live — reordering the list moved `perk_hash` at `fp.impersonate.pro` and left `perk_hash_normalized` byte-identical over 12 attempts (`TlsQuicConnectionSpec.cs:731-737`). |
+| QUIC transport parameters | `TlsQuicTransportParameterSpec.Parameters` (`src/SharpTls/Quic/TlsQuicTransportParameterSpec.cs:523`) | A client capture's table is headed *"in wire order"*: *"This ordering is the fingerprint. It is not sorted, and it is not the RFC's presentation order."* Task B11 proved it live — reordering the list moved `perk_hash` at `fp.impersonate.pro` and left `perk_hash_normalized` byte-identical over 12 attempts (`TlsQuicConnectionSpec.cs:731-737`). |
 | HTTP/3 SETTINGS | `TlsQuicHttp3Spec.Settings` (`src/SharpTls/Quic/TlsQuicHttp3Spec.cs:247`) | RFC 9114 §7.2.4 fixes no order, so the sequence is a sender choice. The encoder is *forbidden to sort* (`TlsQuicHttp3Spec.cs:211-216`). |
 
 This is why the transport-parameter and SETTINGS models are `(identifier, value)` pairs in an
@@ -414,7 +414,7 @@ var reloaded = ClientHelloProfiles.FromSpec(ClientHelloSpecJson.Deserialize(json
 
 **Not knobs here, deliberately** — the type's header (`:60-90`) names three size numbers that must
 never be derived from one another:
-1. `max_udp_payload_size` (0x03, Brave advertises 1472) — a **transport parameter**, so it lives in
+1. `max_udp_payload_size` (0x03, that client advertises 1472) — a **transport parameter**, so it lives in
    `TlsQuicTransportParameterSpec`, not here. Says what we are willing to *receive*.
 2. `PaddingTarget` — says what we *send*.
 3. `ITlsQuicDatagramTransport.MaxDatagramPayloadSize` — says what we *can* send.
@@ -435,7 +435,7 @@ the connection spec**, because RFC 9000 §4.1 makes a receiver's enforced limits
 advertised — the number on the wire and the number `TlsQuicStreamSet` enforces must be one number
 (`:699-707`). `TlsQuicTransportParameterSpec.Compose` *places* them rather than restating them.
 
-**Every default below is the Brave 151 capture's**, rows 4, 5, 6, 7, 11 and 12 of its
+**Every default below is a client capture's**, rows 4, 5, 6, 7, 11 and 12 of its
 "QUIC transport parameters, in wire order" table (`:970-975`). There is no placeholder among the
 six.
 
@@ -469,7 +469,7 @@ byte-identical, over 12 attempts (`TlsQuicConnectionSpec.cs:731-737`).
 
 | Knob | Type | Default | Wire effect | Fingerprinted | Reach |
 | --- | --- | --- | --- | --- | --- |
-| `Parameters` `:523` | `ImmutableArray<TlsQuicTransportParameterSlot>` | **`Brave151Parameters`** (`:514-515`, `:445-508`) — 14 entries in the capture's order | The whole extension-57 body, emitted **unchanged, in the order listed** | **Yes — position *and* contents** | in-assembly |
+| `Parameters` `:523` | `ImmutableArray<TlsQuicTransportParameterSlot>` | **`RfcMinimumParameters`** (`:514-515`, `:445-508`) — 14 entries in the capture's order | The whole extension-57 body, emitted **unchanged, in the order listed** | **Yes — position *and* contents** | in-assembly |
 
 *Any identifier, any bytes, any order, any subset* (`:518-520`). No refusal here. The only two
 remaining constraints are `TlsQuicTransportParameters`': no duplicate identifier (RFC 9000 §18), and
@@ -493,9 +493,9 @@ pinned per-connection field is itself a fingerprint:
 | --- | --- | --- | --- |
 | `DrawnReservedParameter` `:667` | `(ulong minimumN, ulong maximumN, byte[] value)` | Entry **2**, capture line 80. Value `0xfb`; identifier redrawn (`:451-457`) | `0 … MaximumReservedIdentifierN` `:552` — the **whole** of RFC 9000 §18.1's `31*N+27` reserved set, computed from the RFC's own form (`:547-551`) |
 | `DrawnVersionInformation` `:697` | `(uint chosenVersion, IReadOnlyList<uint?> availableVersions)` | Entry **9**, capture line 87. `chosen 1, available [GREASE, 1]`; the `null` element **is** the GREASE slot (`:479-485`) | RFC 9368 §3's `0x?a?a?a?a` pattern — four free nibbles, 16^4 versions, drawn independently (`DrawReservedVersion` `:594-603`) |
-| `DrawnInitialRtt` `:734` | `(ulong identifier, (TimeSpan Min, TimeSpan Max)? fallbackRange)` | Entry **13**, capture line 91, identifier **12583** (`:376`) | `TlsQuicConnectionSpec.InitialRttRange` when set, else the entry's declared fallback — the preset's is `Brave151InitialRttRange` `:421-422` = **100 ms … 300 ms**, which is **`UNVERIFIED`** |
+| `DrawnInitialRtt` `:734` | `(ulong identifier, (TimeSpan Min, TimeSpan Max)? fallbackRange)` | Entry **13**, capture line 91, identifier **12583** (`:376`) | `TlsQuicConnectionSpec.InitialRttRange` when set, else the entry's declared fallback — the preset's is `DeclaredInitialRttRange` `:421-422` = **100 ms … 300 ms**, which is **`UNVERIFIED`** |
 
-**`Brave151Parameters`** `:445-508` — the fourteen, in the capture's wire order. 4 literal +
+**`RfcMinimumParameters`** `:445-508` — the fourteen, in the capture's wire order. 4 literal +
 7 placed + 3 drawn = 14 (`:431-440`):
 
 | # | Capture line | Identifier | Kind | Value |
@@ -596,7 +596,7 @@ frame in one oversized datagram. Legal under §14.1, throws nothing, and is *not
 sends*. Derive the split with
 `TlsQuicDatagramBuilder.PlanInitialFlightSplit(cryptoStreamLength, cryptoStreamBytesPerDatagram)`
 (`src/SharpTls/Quic/TlsQuicDatagramBuilder.cs:506`);
-`Brave151InitialCryptoStreamBytesPerDatagram = 1400` (`:467`) is a **headroom calculation, not a
+`CryptoStreamBytesPerInitialDatagram = 1400` (`:467`) is a **headroom calculation, not a
 measurement** — the exact split point is `UNVERIFIED`, task B12 (`:427-438`).
 
 ### Example — QUIC layer
@@ -716,7 +716,7 @@ var clientHello = factory.Create(sourceConnectionId: default);
 ## Layer 3 — HTTP/3
 
 `src/SharpTls/Quic/TlsQuicHttp3Spec.cs:126`. **`internal sealed`.** Defaults split in two, and the
-split is the point (`:116-122`): where the Brave 151 capture bounds a default it is taken and the
+split is the point (`:116-122`): where a client capture bounds a default it is taken and the
 capture line is cited; where the capture *cannot* see the choice the default is a **declared
 placeholder** naming the task that would settle it.
 
@@ -826,7 +826,7 @@ that task A3-11 added without moving the count.
 | 1 | `WithGreaseSignatureAlgorithms` **index placement** | `ClientHello/ClientHelloBuilder.cs:235` | `0` (BoringSSL prepends) | A capture of a non-BoringSSL client that greases `signature_algorithms` |
 | 2 | **Which congestion controller Chromium runs** | `Quic/TlsQuicCongestionControl.cs:315` | NewReno | A3-14 |
 | 3 | `KInitialWindowDatagrams` / `KInitialWindowByteCap` **against Chromium** | `Quic/TlsQuicCongestionControl.cs:524` | 10 / 14720 | A3-14 |
-| 4 | **The exact Initial CRYPTO split point** (`Brave151InitialCryptoStreamBytesPerDatagram`) | `Quic/TlsQuicDatagramBuilder.cs:427` | **1400** — a headroom calculation from `1472 − 43 = 1429`, rounded down | B12 |
+| 4 | **The exact Initial CRYPTO split point** (`CryptoStreamBytesPerInitialDatagram`) | `Quic/TlsQuicDatagramBuilder.cs:427` | **1400** — a headroom calculation from `1472 − 43 = 1429`, rounded down | B12 |
 | 5 | **`initial_rtt`'s range** — *the parameter itself is sent* | `Quic/TlsQuicFingerprintReadout.cs:1297` | 100 ms … 300 ms | B12 |
 | 6 | `KInitialWindowDatagrams` (the const) | `Quic/TlsQuicRecoverySpec.cs:423` | **10** | A3-14 |
 | 7 | `DefaultPacingBurstDatagrams` (the const) | `Quic/TlsQuicRecoverySpec.cs:527` | **10** — *that Chromium paces at all is a widely repeated claim this project has not measured* | A3-14 |
@@ -834,8 +834,8 @@ that task A3-11 added without moving the count.
 | 9 | `CongestionController` | `Quic/TlsQuicRecoverySpec.cs:615` | **`null`** = NewReno. *The A3 plan records that it very probably is not what Chromium runs* | A3-14 |
 | 10 | `AckPolicy` | `Quic/TlsQuicRecoverySpec.cs:792` | **`Immediate`** — *the behaviour this client already has, not a measurement* | A3-14 |
 | 11 | `PacingBurstDatagrams`, **both halves at once** | `Quic/TlsQuicRecoverySpec.cs:817` | **10** | A3-14 |
-| 12 | `Brave151ReservedIdentifierN` | `Quic/TlsQuicTransportParameterSpec.cs:310` | **120829032258064516** — kept only as *evidence*; the preset draws a fresh N per connection | B12 |
-| 13 | `Brave151InitialRttRange` — *"the only genuinely invented bound in this file"* | `Quic/TlsQuicTransportParameterSpec.cs:399` | **100 ms … 300 ms**. The **width is arbitrary**; the one property the capture establishes is that the range must contain 192859 µs | B12 (uQUIC's `ChromeRandomInitialRTT()`) |
+| 12 | `ReservedIdentifierNExample` | `Quic/TlsQuicTransportParameterSpec.cs:310` | **120829032258064516** — kept only as *evidence*; the preset draws a fresh N per connection | B12 |
+| 13 | `DeclaredInitialRttRange` — *"the only genuinely invented bound in this file"* | `Quic/TlsQuicTransportParameterSpec.cs:399` | **100 ms … 300 ms**. The **width is arbitrary**; the one property the capture establishes is that the range must contain 192859 µs | B12 (uQUIC's `ChromeRandomInitialRTT()`) |
 | 14 | `DefaultPacingIntervalScale` (the const) | `Quic/TlsQuicRecoverySpec.cs:571` | **1.25** | A3-14 |
 | 15 | `PacingIntervalScale` (the property) | `Quic/TlsQuicRecoverySpec.cs:1004` | **1.25** | A3-14 |
 | 16 | **Whether a real client delays its ACKs at all** | `Quic/TlsQuicApplicationSendPath.cs:123` | the send path never consults the pacer on an ACK-only pass, per §7.7's "packets containing only ACK frames SHOULD therefore not be paced" | A3-14 |
@@ -896,7 +896,7 @@ task A3-7.
 
 **A live divergence in the shipped defaults**, recorded on `DrawInitialRtt` itself
 (`TlsQuicRecoverySpec.cs:858-870`): `TlsQuicConnectionSpec.InitialRttRange` defaults to `null`,
-while the transport-parameter preset advertises `initial_rtt` drawn from `Brave151InitialRttRange`
+while the transport-parameter preset advertises `initial_rtt` drawn from `DeclaredInitialRttRange`
 (100–300 ms). So an unconfigured client **advertises** a number between 100 and 300 ms and
 **starts from** 333 ms. Both are legal; they are two answers to one question. Setting
 `InitialRttRange` makes them agree.

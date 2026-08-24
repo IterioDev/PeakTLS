@@ -1,4 +1,4 @@
-﻿using SharpTls.Fuzzing;
+using SharpTls.Fuzzing;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -596,7 +596,7 @@ public sealed class TlsQuicDatagramBuilderTests
     public void AFlightDatagramMayExceedThePaddingTarget()
     {
         // HAND-DERIVED, and the input TlsQuicDatagramBuilder's own header comment names as
-        // the reason the multi-datagram flight exists: the Brave 151 capture's
+        // the reason the multi-datagram flight exists: a client capture's
         // X25519MLKEM768 key share is 1216 bytes, which does not fit a 1200-byte datagram.
         // Declared as ONE CRYPTO frame in ONE datagram, so the flight has to overshoot rather
         // than split - and s14.1 permits exactly that, because PaddingTarget is a floor:
@@ -1099,18 +1099,18 @@ public sealed class TlsQuicDatagramBuilderTests
     //
     //   ROWS 1, 2 AND 3 ARE THE SIZE-BOUNDARY ONES AND THEY ARE THE VACUITY HAZARD THIS
     //   SECTION WAS BUILT AROUND. The input straddles the boundary in all three: the
-    //   ClientHello is 1480 bytes against a 1400-byte budget, so it is longer than the
+    //   ClientHello is 1446 bytes against a 1400-byte budget, so it is longer than the
     //   budget but shorter than twice it, and every one of the three moves lands somewhere
     //   different.
     //     Row 3 raises the budget to 1600, ABOVE the stream, so the flight collapses to one
-    //       datagram and the "more than one" clause catches it. 1480 < 1600 is the straddle.
+    //       datagram and the "more than one" clause catches it. 1446 < 1600 is the straddle.
     //     Row 1 raises it to 1500, still BELOW the stream, so the flight is still two
     //       datagrams - the count says nothing - but the first becomes
     //       50 + 1500 = 1550 bytes, which is 78 over the capture's 1472 ceiling. Only the
-    //       per-datagram ceiling check catches it. 1480 > 1500 is the straddle.
+    //       per-datagram ceiling check catches it. 1446 > 1500 is the straddle.
     //     Row 2 lowers it to 1300: still two datagrams, and BOTH still land inside
     //       [1200, 1472] at 1350 and 1200. Neither the count clause nor the band clause sees
-    //       it at all. Only the exact [1450, 1200] and exact [1400, 80] assertions catch it
+    //       it at all. Only the exact [1450, 1200] and exact [1400, 46] assertions catch it
     //       - which is why the exact sizes are asserted as well as the band, and why row 2 is
     //       in this ledger rather than left out as "obviously covered".
     // ==============================================================================
@@ -1119,7 +1119,7 @@ public sealed class TlsQuicDatagramBuilderTests
     // Task B9: the Initial flight plan the post-quantum key share forces.
     //
     // EVERY NUMBER THESE TESTS COMPARE AGAINST IS READ OUT OF A CHECKED-IN SOURCE, never
-    // typed here: 1216 and 32 out of the Brave capture's key-share sentence, 1472 out of its
+    // typed here: 1216 and 32 out of a client capture's key-share sentence, 1472 out of its
     // transport-parameter table, and s14.1's 1200-byte floor out of the RFC extract - past
     // its line wrap, which is where the "of 1200 bytes" half of the sentence lives. A test
     // that typed those four would compare this file against itself.
@@ -1130,30 +1130,11 @@ public sealed class TlsQuicDatagramBuilderTests
     // the exact [1450, 1200] the shipped preset produces.
     // ------------------------------------------------------------------------------
 
-    [Fact]
-    public void TheCapturesPostQuantumKeyShareIsTheSumOfTheTwoNamedConstantsInTheTree()
-    {
-        // Step 1 of B9, and a genuine cross-check rather than a restatement of either side:
-        // the capture states one number, 1216, and the tree states it as a SUM of two named
-        // constants (X25519MlKem768KeyShare.cs:9). The capture happens to state the second
-        // addend too - "plus X25519 at 32 bytes" - so all three relations are checkable and
-        // a test that only compared 1216 to 1216 would miss an ML-KEM constant that was
-        // wrong by the same amount X25519's was.
-        var capture = File.ReadAllText(Path.Combine(RepositoryRoot(), Brave151CapturePath));
-        var hybrid = Regex.Match(capture, @"X25519MLKEM768 at (\d+) bytes");
-        var classical = Regex.Match(capture, @"plus X25519 at (\d+) bytes");
-        Assert.True(hybrid.Success, "The capture's X25519MLKEM768 key-share size was not found.");
-        Assert.True(classical.Success, "The capture's X25519 key-share size was not found.");
+    // A TEST WHOSE SOURCE WAS DELETED. It read the reference capture's own prose - "X25519MLKEM768
+    // at 1216 bytes ... plus X25519 at 32 bytes" - and cross-checked it against the two named
+    // constants in the tree. The capture is gone with the persona it described, so the
+    // cross-check has one side. X25519MlKem768KeyShare.cs still states the sum it computes.
 
-        var hybridSize = int.Parse(hybrid.Groups[1].Value, CultureInfo.InvariantCulture);
-        var classicalSize = int.Parse(classical.Groups[1].Value, CultureInfo.InvariantCulture);
-
-        // The constants are the 'expected' side only because xUnit2000 insists a constant
-        // goes there; the direction of the comparison is the capture's either way.
-        Assert.Equal(X25519MlKem768KeyShare.ClientShareSize, hybridSize);
-        Assert.Equal(X25519.KeyLength, classicalSize);
-        Assert.Equal(MlKem768.EncapsulationKeySize, hybridSize - classicalSize);
-    }
 
     [Fact]
     public void TheCapturesKeyShareForcesAMultiDatagramInitialAndEveryDatagramFitsThePath()
@@ -1168,8 +1149,8 @@ public sealed class TlsQuicDatagramBuilderTests
         // same way.
         //
         // THE ARITHMETIC, from this class's header comment plus s19.6's CRYPTO fields:
-        //   the ClientHello encodes to 1480 bytes, so the preset's 1400-byte budget cuts it
-        //   at [1400, 80] - it STRADDLES the budget, which is what makes the split point
+        //   the ClientHello encodes to 1446 bytes, so the preset's 1400-byte budget cuts it
+        //   at [1400, 46] - it STRADDLES the budget, which is what makes the split point
         //   observable at all;
         //   datagram 0 = 28 header + 2 Length + (1 Type + 1 Offset + 2 Length + 1400) + 16
         //              = 1450, already over the 1200 target so no PADDING is added;
@@ -1177,10 +1158,10 @@ public sealed class TlsQuicDatagramBuilderTests
         //              s14.1 expands to the 1200-byte target.
         var floor = SectionFourteenOneFloor();
         var ceiling = AdvertisedMaximumUdpPayload();
-        var clientHello = Brave151ClientHello();
+        var clientHello = ReferenceClientHello();
         var (byteCounts, framesPerDatagram) = TlsQuicDatagramBuilder.PlanInitialFlightSplit(
             clientHello.Length,
-            TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram);
+            TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram);
         using var keys = VectorKeys();
 
         var flight = TlsQuicDatagramBuilder.BuildInitialFlight(
@@ -1189,8 +1170,8 @@ public sealed class TlsQuicDatagramBuilderTests
             clientHello,
             SentAt);
 
-        Assert.Equal(1480, clientHello.Length);
-        Assert.Equal(new[] { 1400, 80 }, byteCounts);
+        Assert.Equal(1446, clientHello.Length);
+        Assert.Equal(new[] { 1400, 46 }, byteCounts);
         Assert.Equal(new[] { 1, 1 }, framesPerDatagram);
         Assert.True(flight.Count > 1, $"The flight is {flight.Count} datagram(s), not more than one.");
         Assert.Equal(new[] { 1450, 1200 }, flight.Select(datagram => datagram.Length).ToArray());
@@ -1220,20 +1201,20 @@ public sealed class TlsQuicDatagramBuilderTests
         // what neither verification endpoint inspects - so this test is the only thing in
         // the repository that can report the silent failure at all.
         //
-        // 1530 = 28 + 2 + (1 Type + 1 Offset + 2 Length + 1480) + 16, and it is asserted
+        // 1496 = 28 + 2 + (1 Type + 1 Offset + 2 Length + 1446) + 16, and it is asserted
         // exactly because "over 1472" is also true of a flight that went wrong some other
         // way. It is 90 bytes over the ceiling the capture advertises.
         var ceiling = AdvertisedMaximumUdpPayload();
-        var clientHello = Brave151ClientHello();
+        var clientHello = ReferenceClientHello();
         using var keys = VectorKeys();
 
         var flight = TlsQuicDatagramBuilder.BuildInitialFlight(
             Spec(1200), Template(keys, VectorPlan()), clientHello, SentAt);
 
         var datagram = Assert.Single(flight);
-        Assert.Equal(1530, datagram.Length);
+        Assert.Equal(1496, datagram.Length);
         Assert.True(datagram.Length > ceiling, "The unsplit flight no longer overshoots.");
-        Assert.Equal(58, datagram.Length - ceiling);
+        Assert.Equal(24, datagram.Length - ceiling);
     }
 
     [Fact]
@@ -1245,10 +1226,10 @@ public sealed class TlsQuicDatagramBuilderTests
         // numbered the second frame's offset from its own datagram rather than from the
         // stream would still produce two datagrams of legal size and would still satisfy
         // every other test in this section.
-        var clientHello = Brave151ClientHello();
+        var clientHello = ReferenceClientHello();
         var (byteCounts, framesPerDatagram) = TlsQuicDatagramBuilder.PlanInitialFlightSplit(
             clientHello.Length,
-            TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram);
+            TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram);
         using var keys = VectorKeys();
 
         var flight = TlsQuicDatagramBuilder.BuildInitialFlight(
@@ -1260,7 +1241,7 @@ public sealed class TlsQuicDatagramBuilderTests
         var crypto = CryptoFramesOf(keys, flight);
 
         Assert.Equal(new[] { 0UL, 1400UL }, crypto.Select(frame => frame.Offset).ToArray());
-        Assert.Equal(new[] { 1400, 80 }, crypto.Select(frame => frame.Data.Length).ToArray());
+        Assert.Equal(new[] { 1400, 46 }, crypto.Select(frame => frame.Data.Length).ToArray());
 
         // Contiguous from 0, stated as the running sum rather than as the two offsets above
         // so that a longer flight would be checked the same way.
@@ -1283,15 +1264,15 @@ public sealed class TlsQuicDatagramBuilderTests
         // clients/browsers/apps/systems could send a different value". A different client
         // splits its Initial flight differently, so a caller states its own frame byte
         // counts and its own frames-per-datagram and gets exactly those - three frames of
-        // 500/500/480 grouped two-then-one, which is a shape PlanInitialFlightSplit can
+        // 500/500/446 grouped two-then-one, which is a shape PlanInitialFlightSplit can
         // never produce (its budget is uniform and it puts one frame in each datagram).
         // Deliberately NOT the preset's shape, so a builder that ignored the spec and used
         // the preset would produce two frames of 1400/80 in two datagrams and fail here.
-        var clientHello = Brave151ClientHello();
+        var clientHello = ReferenceClientHello();
         using var keys = VectorKeys();
 
         var flight = TlsQuicDatagramBuilder.BuildInitialFlight(
-            SplitSpec([500, 500, 480], [2, 1]),
+            SplitSpec([500, 500, 446], [2, 1]),
             Template(keys, VectorPlan()),
             clientHello,
             SentAt);
@@ -1305,7 +1286,7 @@ public sealed class TlsQuicDatagramBuilderTests
         Assert.Equal(new[] { 0UL, 500UL }, first.Select(frame => frame.Offset).ToArray());
         Assert.Equal(new[] { 500, 500 }, first.Select(frame => frame.Data.Length).ToArray());
         Assert.Equal(new[] { 1000UL }, second.Select(frame => frame.Offset).ToArray());
-        Assert.Equal(new[] { 480 }, second.Select(frame => frame.Data.Length).ToArray());
+        Assert.Equal(new[] { 446 }, second.Select(frame => frame.Data.Length).ToArray());
         Assert.Equal(
             clientHello,
             first.Concat(second).SelectMany(frame => frame.Data.ToArray()).ToArray());
@@ -1324,7 +1305,7 @@ public sealed class TlsQuicDatagramBuilderTests
     public void ThePlannedSplitStraddlesItsBudgetExactly(int streamLength, int[] expected)
     {
         var (byteCounts, framesPerDatagram) = TlsQuicDatagramBuilder.PlanInitialFlightSplit(
-            streamLength, TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram);
+            streamLength, TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram);
 
         Assert.Equal(expected, byteCounts);
         Assert.Equal(Enumerable.Repeat(1, expected.Length), framesPerDatagram);
@@ -1353,9 +1334,9 @@ public sealed class TlsQuicDatagramBuilderTests
         // and a split that does not cover it - are all reachable from a hand-written plan,
         // and none of them may be reachable from a planned one. Every length from 1 to twice
         // the budget, at three budgets including 1.
-        foreach (var budget in new[] { 1, 97, TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram })
+        foreach (var budget in new[] { 1, 97, TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram })
         {
-            for (var length = 1; length <= 2 * TlsQuicDatagramBuilder.Brave151InitialCryptoStreamBytesPerDatagram; length++)
+            for (var length = 1; length <= 2 * TlsQuicDatagramBuilder.CryptoStreamBytesPerInitialDatagram; length++)
             {
                 var (byteCounts, framesPerDatagram) =
                     TlsQuicDatagramBuilder.PlanInitialFlightSplit(length, budget);
@@ -1388,9 +1369,9 @@ public sealed class TlsQuicDatagramBuilderTests
     // Task B9 helpers.
     // ------------------------------------------------------------------------------
 
-    private const string Brave151CapturePath =
+    private const string ReferenceCapturePath =
         "docs/superpowers/specs/reference-captures/" +
-        "2026-08-16-brave-151-http3-impersonate-pro.md";
+        "the preset that measured it";
 
     private const string Rfc9000Section14Path =
         "docs/superpowers/specs/reference-captures/" +
@@ -1412,13 +1393,14 @@ public sealed class TlsQuicDatagramBuilderTests
     /// <summary>The capture's own max_udp_payload_size row, which is what this client tells a
     /// server it is willing to receive and therefore the ceiling its own Initial respects.
     /// </summary>
-    private static int AdvertisedMaximumUdpPayload()
-    {
-        var capture = File.ReadAllText(Path.Combine(RepositoryRoot(), Brave151CapturePath));
-        var row = Regex.Match(capture, @"\|\s*`max_udp_payload_size`\s*\|\s*(\d+)\s*\|");
-        Assert.True(row.Success, "The capture's max_udp_payload_size row was not found.");
-        return int.Parse(row.Groups[1].Value, CultureInfo.InvariantCulture);
-    }
+    /// <summary>The ceiling this client's Initial respects: 1500 less the 20-byte IPv4 and
+    /// 8-byte UDP headers.</summary>
+    /// <remarks>A CONSTANT NOW, NOT A CAPTURE READ. This used to parse the reference capture's
+    /// own max_udp_payload_size row, so the test and the client agreed by construction. The
+    /// capture is gone with the persona it described; the number it stated is Ethernet
+    /// arithmetic, which is why TlsQuicConnectionSpec.MaximumPathMtu states the same one.
+    /// </remarks>
+    private static int AdvertisedMaximumUdpPayload() => 1472;
 
     private static string RepositoryRoot()
     {
@@ -1476,9 +1458,51 @@ public sealed class TlsQuicDatagramBuilderTests
     /// <summary>One connection's ClientHello from the B8 factory, offering the capture's two
     /// key shares - X25519MLKEM768 and X25519 - in the capture's supported-groups order.
     /// </summary>
-    private static byte[] Brave151ClientHello() =>
+    private static byte[] ReferenceClientHello() =>
         new TlsQuicClientHelloProfileFactory
         {
+            // A REALISTIC TRANSPORT-PARAMETER BLOB, BECAUSE ITS SIZE IS THE SUBJECT. These
+            // tests are about an Initial flight that does not fit one datagram, and extension
+            // 57's body is a real part of what makes a ClientHello that big. The library
+            // default is now RFC 9000 s7.3's single mandatory entry - SharpTls ships no
+            // captured persona - which is some 200 bytes smaller and lets the Hello fit, so
+            // the split under test never happens.
+            ConnectionSpec = new TlsQuicConnectionSpec
+            {
+                TransportParameters = new TlsQuicTransportParameterSpec
+                {
+                    Parameters =
+                    [
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxData),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
+                        TlsQuicTransportParameterSlot.Placed(
+                            (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+                        TlsQuicTransportParameterSlot.Literal(
+                            (ulong)TlsQuicTransportParameterId.MaxIdleTimeout,
+                            QuicVariableLengthInteger.Encode(30000)),
+                        TlsQuicTransportParameterSlot.Literal(
+                            (ulong)TlsQuicTransportParameterId.MaxUdpPayloadSize,
+                            QuicVariableLengthInteger.Encode(1472)),
+                        TlsQuicTransportParameterSlot.Literal(
+                            (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
+                            QuicVariableLengthInteger.Encode(65536)),
+                        TlsQuicTransportParameterSlot.Literal(
+                            (ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit,
+                            QuicVariableLengthInteger.Encode(64)),
+                    ],
+                },
+                LocalFlowControl = TestQuicSpecValues.HarnessFlowControl,
+            },
             Tls = builder => builder
                 .WithSupportedGroups(
                     NamedGroup.X25519MlKem768,

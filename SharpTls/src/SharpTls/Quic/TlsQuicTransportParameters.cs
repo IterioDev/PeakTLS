@@ -53,7 +53,7 @@ public sealed class TlsQuicTransportParameter
 // write. s18 states no ordering requirement of its own; this type preserves
 // insertion/wire order rather than imposing one (see Parameters below),
 // which is what matters for subsystem B - reference-captures/2026-08-16-
-// brave-151-http3-impersonate-pro.md publishes both perk_hash (raw wire
+// the preset that measured it publishes both perk_hash (raw wire
 // order) and perk_hash_normalized (sorted by ID) for the same parameter
 // set, confirming a real client's wire order is independently checkable and
 // must be reproduced, not merely any legal encoding of the same values.

@@ -483,7 +483,7 @@ public sealed partial class TlsQuicConnectionTests
     public void TheSixMegabyteCeilingIsGoneBecauseNeitherLimitIsCappedByWhatWasAdvertised()
     {
         // WHAT THIS TASK ACTUALLY REMOVED, stated as a number. The peer's advertised limits
-        // are Brave-shaped and small; the grants are not, and nothing clamps a grant to the
+        // are capture-shaped and small; the grants are not, and nothing clamps a grant to the
         // initial value. Sixty-four megabytes is not a supported figure - it is an arbitrary
         // point well past the ~6 MB the static budget imposed, chosen to show the old ceiling
         // was a property of the missing receive path and not of any cap that remains.

@@ -225,13 +225,13 @@ internal sealed class MsQuicLoopbackServer : IAsyncDisposable
 
                     // RFC 9221 s3's 0x20 IS HERE FOR THE SAME REASON THE FLOW-CONTROL LIMITS
                     // BELOW ARE, and it was missed for the same reason. Every HTTP/3 caller of
-                    // this fixture sends TlsQuicHttp3Spec.CaptureSettings, whose 51:1 claims
+                    // this fixture sends SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable, whose 51:1 claims
                     // willingness to receive HTTP/3 datagrams; 0x20 is the transport half of
                     // that claim and TlsQuicHttp3Connection now refuses one half without the
                     // other. MsQuic tolerates the inconsistent pair - which is precisely why
                     // this fixture never noticed, and why fp.impersonate.pro's 0x109 was the
-                    // first thing that did. 65536 is the Brave capture's value, cited by
-                    // TlsQuicTransportParameterSpec.Brave151Parameters row 3.
+                    // first thing that did. 65536 is a client capture's value, cited by
+                    // TlsQuicTransportParameterSpec.RfcMinimumParameters row 3.
                     TlsQuicTransportParameter.VariableInteger(
                         TlsQuicTransportParameterId.MaxDatagramFrameSize, 65536),
 

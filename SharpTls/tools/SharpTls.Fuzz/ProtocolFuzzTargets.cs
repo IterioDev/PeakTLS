@@ -4374,8 +4374,18 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         // varint, then s7.2.8's four HTTP/2 carry-overs, each of which must be a
         // connection error rather than an ignorable unknown.
         var control = new List<byte>();
+        // A PLAUSIBLE SETTINGS PAYLOAD, WRITTEN OUT HERE. This used to walk the library's
+        // default SETTINGS, which were a captured browser's five pairs; the default is empty
+        // now and an empty payload would exercise none of the walk below.
         var settingsPayload = new List<byte>();
-        foreach (var setting in TlsQuicHttp3Spec.CaptureSettings)
+        TlsQuicHttp3Setting[] seedSettings =
+        [
+            new(TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier, 65536),
+            new(TlsQuicHttp3Spec.MaxFieldSectionSizeIdentifier, 262144),
+            new(TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier, 100),
+            new(TlsQuicHttp3Spec.H3DatagramIdentifier, 1),
+        ];
+        foreach (var setting in seedSettings)
         {
             QuicVariableLengthInteger.Write(settingsPayload, setting.Identifier);
             QuicVariableLengthInteger.Write(settingsPayload, setting.Value);
