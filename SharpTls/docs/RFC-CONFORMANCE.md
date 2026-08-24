@@ -1,7 +1,8 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and RFC 9001 §5-§6
-(packet protection, key update) are done. Every other
+Status: **IN PROGRESS.** Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
+Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs). Surveyed only: RFC 9204.
+Untouched: RFC 9000, 9002, 8701, 9218, 9221, 9297, 9368, 9369. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -172,6 +173,56 @@ Severity **LATENT**, for the same arithmetic as FINDING 1.
 
 Still unaudited within RFC 9001: CRYPTO stream ordering and the §5.6 0-RTT key rules.
 
+### RFC 9114 (HTTP/3) — spot-checked, NOT exhaustive
+
+The ten pinned RFC 9114 extracts contain **139 MUST occurrences, 116 of them client-relevant**
+after removing server-only sentences. **14 were checked directly.** The rest are unaudited. This
+section is a high-confidence sample, not a clean bill, and the ratio is stated so it cannot be
+mistaken for one.
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 3.2 | Clients MUST send SNI | `ClientHello` SNI extension, exercised by every preset | COMPLIANT |
+| 3.2 | SETTINGS MUST be the initial frame of the control stream | `Quic/TlsQuicHttp3Connection.cs:543`, `:591` | COMPLIANT |
+| 4.1 | Transfer-Encoding MUST NOT be used | `Http3FieldMapper.cs:35` | COMPLIANT |
+| 4.2 | Field names MUST be converted to lowercase | `Http3FieldMapper.cs:78` | COMPLIANT |
+| 4.2 | Uppercase field names MUST be treated as malformed | `Http3FieldMapper.cs:290` (request), `:233` (response) | COMPLIANT |
+| 4.2 | Connection-specific fields MUST NOT be generated | `Http3FieldMapper.cs` connection-specific list | COMPLIANT |
+| 4.2 | TE, if present, MUST NOT be anything but "trailers" | `Http3FieldMapper.cs` TE branch | COMPLIANT |
+| 4.2 | Multiple cookie field lines MUST be joined with "; " | `Http3FieldMapper.cs` cookie branch | COMPLIANT |
+| 4.2 | Clients MUST NOT accept a malformed response | `Http3FieldMapper.cs:233` | COMPLIANT |
+| 4.3 | Pseudo-headers MUST appear before regular fields | `Http3FieldMapper.cs` field assembly | COMPLIANT |
+| 5 | No new requests after receiving GOAWAY | `Quic/TlsQuicHttp3Connection.cs:27` | COMPLIANT |
+| 7.2.8 | Reserved frame types / settings ignored on receive | `Quic/TlsQuicHttp3Frames.cs:45`, `:93` | COMPLIANT |
+| 10.8 | Frame length MUST exactly match its contents | `Quic/TlsQuicHttp3Frames.cs:324` | COMPLIANT |
+| 4.1 | After sending a request a client MUST close the stream for sending | `Http3Connection.cs:450` | COMPLIANT |
+
+**Inbound validation is present, which was the thing worth checking.** A client that validates
+only what it sends is the easy mistake: `ValidateReceivedField` applies RFC 9114 §4.2's rules to
+*received* fields and is wired into the response path at `Http3FieldMapper.cs:233`. Its own
+comment gives the reason — a field name carrying a delimiter, control character or uppercase
+letter is a request-splitting vector as soon as a caller copies it into another protocol, so
+QPACK's decoder is deliberately not the only guard.
+
+### RFC 9204 (QPACK) — structural survey only
+
+No MUST-by-MUST audit was performed. What was established is the shape of the implementation,
+because an earlier open question was whether the dynamic table existed at all:
+
+| Component | File | Present |
+|---|---|---|
+| Encoder | `Quic/TlsQuicQpackEncoder.cs` | yes |
+| Decoder | `Quic/TlsQuicQpackDecoder.cs` | yes |
+| Dynamic table | `Quic/TlsQuicQpackDynamicTable.cs` | yes |
+| Static table | `Quic/TlsQuicQpackStaticTable.cs` | yes |
+| Huffman | `Quic/TlsQuicQpackHuffman.cs` | yes |
+| Primitives | `Quic/TlsQuicQpackPrimitives.cs` | yes |
+
+QPACK is complete rather than the partial implementation the open question allowed for. The
+static table is **parsed from the pinned RFC extract rather than retyped**, and
+`TlsQuicQpackStaticTableTests` re-parses it — the same discipline this audit follows, applied
+in code.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -190,9 +241,12 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
   keys.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
   match exactly (a wrong constant is both a correctness and a fingerprint issue).
-- RFC 9114 — HTTP/3 framing, stream mapping, SETTINGS, pseudo-headers, error handling.
-- RFC 9204 — QPACK. Open question: is the dynamic table implemented, partial, or absent, and
-  if absent does the client advertise a capacity consistent with that.
+- RFC 9114 — 102 of 116 client-relevant MUSTs remain unchecked. The 14 sampled were all
+  compliant, which raises confidence but proves nothing about the rest. §6 stream mapping, §7
+  per-frame rules and §8 error codes are the largest untouched blocks.
+- RFC 9204 — surveyed structurally only. No MUST was checked: not the static table indices, the
+  prefixed-integer arithmetic, required-insert-count handling, blocked-stream limits, nor the
+  Huffman padding rules.
 - RFC 8446 — everything outside the five pinned sections. The pinned set covers the ClientHello
   and extension layer only; the record layer, key schedule, and certificate handling are not
   pinned and so were not audited.
@@ -201,7 +255,7 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 21. Confirmed: 17 compliant, 1 defect (already fixed), 2 MISSING (key update,
+Findings raised: 35. Confirmed: 31 compliant, 1 defect (already fixed), 2 MISSING (key update,
 AEAD packet counting). The one question previously left UNVERIFIED was closed by pinning
 RFC 9001 §6, which turned it from an open question into a confirmed MUST violation. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
