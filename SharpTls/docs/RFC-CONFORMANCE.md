@@ -3,7 +3,7 @@
 Status: **IN PROGRESS.**
 
 - Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-- Sampled, not exhaustive: RFC 9114 (23 of 116 client MUSTs), RFC 9000 (15 of 153).
+- Sampled, not exhaustive: RFC 9114 (23 of 116), RFC 9000 (16 of 153), RFC 9204 (9 of 28).
 - Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
 - Constants only: RFC 9002. Untouched: RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
@@ -251,7 +251,33 @@ comment gives the reason — a field name carrying a delimiter, control characte
 letter is a request-splitting vector as soon as a caller copies it into another protocol, so
 QPACK's decoder is deliberately not the only guard.
 
-### RFC 9204 (QPACK) — structural survey only
+### RFC 9204 (QPACK) — MUSTs audited
+
+The ten extracts hold **28 client-relevant MUSTs**; 9 were checked.
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 4.1.1 | "QPACK implementations MUST be able to decode integers up to and including 62 bits long" | `Quic/TlsQuicQpackPrimitives.cs:136` | COMPLIANT |
+| 4.1.2 | A second encoder or decoder stream is H3_STREAM_CREATION_ERROR | `Quic/TlsQuicHttp3Streams.cs:584` | COMPLIANT |
+| 4.1.2 | Closing either stream is H3_CLOSED_CRITICAL_STREAM | `Quic/TlsQuicHttp3Streams.cs:481` | COMPLIANT |
+| 3.1 | An invalid static table index is QPACK_DECOMPRESSION_FAILED | `Quic/TlsQuicQpackDecoder.cs:983` (`StaticIndexOutOfRange`) | COMPLIANT |
+| 2.1.2 | An encoder MUST limit blocked streams to SETTINGS_QPACK_BLOCKED_STREAMS | `Quic/TlsQuicHttp3Connection.cs:847` | COMPLIANT, mutation-tested |
+| 2.2 | More blocked streams than promised is QPACK_DECOMPRESSION_FAILED | `Quic/TlsQuicHttp3Connection.cs:1056` | COMPLIANT, named test |
+| RFC 7541 §5.2 | The Huffman EOS symbol is an error, not a string terminator | `Quic/TlsQuicQpackHuffman.cs:138` | COMPLIANT, mutation-tested |
+| RFC 7541 §5.2 | Padding longer than 7 bits is an error | `Quic/TlsQuicQpackPrimitives.cs:149` (`PaddingTooLong`) | COMPLIANT |
+| 2.1 | An encoder MAY decline the dynamic table | `Quic/TlsQuicQpackEncoder.cs:151` | COMPLIANT by construction |
+
+**The dynamic table is decode-only, and that is a deliberate shape rather than a gap.**
+`TryEncodeFieldSectionPrefix` writes a Required Insert Count of 0 and a Base of 0
+unconditionally, so this client never emits a dynamic reference; `TlsQuicQpackDynamicTable.cs`
+exists to RESOLVE the ones a server sends. §2.1 permits exactly this. The earlier open question
+— "is the dynamic table implemented, partial, or absent" — resolves to: fully present for
+decode, deliberately unused for encode.
+
+Nineteen MUSTs remain unchecked, mostly encoder-stream instruction semantics and eviction rules
+that a decode-only encoder never exercises.
+
+### RFC 9204 — structural survey (retained)
 
 No MUST-by-MUST audit was performed. What was established is the shape of the implementation,
 because an earlier open question was whether the dynamic table existed at all:
@@ -269,6 +295,25 @@ QPACK is complete rather than the partial implementation the open question allow
 static table is **parsed from the pinned RFC extract rather than retyped**, and
 `TlsQuicQpackStaticTableTests` re-parses it — the same discipline this audit follows, applied
 in code.
+
+### RFC 8701, 9218, 9221 — specifics checked
+
+| RFC | Requirement | Location | Verdict |
+|---|---|---|---|
+| 8701 | The reserved GREASE value set | `ClientHello/ClientHelloBuilder.cs:1001` | COMPLIANT, exact |
+| 9221 §4 | DATAGRAM frame types 0x30/0x31, low bit = length present | `Quic/TlsQuicFrameType.cs:146` | COMPLIANT |
+| 9218 §7.2 | The HTTP/3 PRIORITY_UPDATE frame (0xF0700 / 0xF0701) | NOT-FOUND | MISSING, N-A-nongoal |
+
+The GREASE predicate is `(value & 0x0F0F) == 0x0A0A && (byte)(value >> 8) == (byte)value`, which
+is RFC 8701's reserved set written as an expression rather than a table.
+
+**PRIORITY_UPDATE is absent and that is defensible.** Searched: `0xF0700`, decimal `986`/`987`,
+`PriorityUpdate` and `priorit` across `SharpTls/src/SharpTls/Quic` — the only `PriorityUpdate`
+surface in the tree is on the HTTP/2 request path. RFC 9218 §7.2's frame is not sent, and no
+MUST compels a client to send it: a client that never reprioritises simply never emits one, and
+servers apply their own scheduling. It is recorded as MISSING against the spec and
+N-A-nongoal in practice, because a fingerprinting client that emitted priority signals no real
+target sends would be MORE distinguishable, not less.
 
 ### Smaller specs — presence established, MUSTs not enumerated
 
@@ -294,8 +339,8 @@ the urgency and incremental defaults match §4, was NOT determined.
 
 ### RFC 9000 (QUIC transport) — sampled, NOT exhaustive
 
-The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **15 were checked
-directly.** 138 remain unchecked. This is a sample chosen for interop risk, not coverage.
+The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **16 were checked
+directly.** 137 remain unchecked. This is a sample chosen for interop risk, not coverage.
 
 | § | Requirement | Location | Verdict |
 |---|---|---|---|
@@ -319,6 +364,42 @@ directly.** 138 remain unchecked. This is a sample chosen for interop risk, not 
 source files themselves. That is stronger evidence than an audit read can produce: a ledger row
 naming the test that kills a specific deletion shows the rule is not merely present but load
 bearing. Retry handling and Version Negotiation are the best-evidenced areas in the codebase.
+
+
+#### FINDING 4 — received packets are not duplicate-suppressed (MISSING)
+
+RFC 9000 §12.3, from `rfc9000-section12-packets-and-frames.txt`: *"A receiver MUST discard a
+newly unprotected packet unless it is certain that it has not processed another packet with the
+same packet number from the same packet number space."* And: *"Duplicate suppression MUST happen
+after removing packet protection."*
+
+`Quic/TlsQuicPacketReceiver.cs:715` keeps only the largest packet number per space:
+
+```csharp
+if (packetNumber > _largestReceived[space])
+{
+    _largestReceived[space] = packetNumber;
+}
+```
+
+There is no record of which packet numbers were already processed, and the frame loop at `:754`
+dispatches to the handler unconditionally. A packet duplicated by the network has its frames
+applied twice.
+
+Searched: `duplicate`, `alreadyProcessed`, `seenPacket`, `replay`, `_received[`, `bitmap`,
+`window`, `HasProcessed`, `Seen` in the receiver; `duplicate` and `s12.3` in the ACK tracker.
+
+**Do not confuse this with the ACK-range deduplication, which IS present and mutation-tested.**
+`TlsQuicAckTracker` has killed mutants named `ADuplicatePacketNumberChangesNothing`,
+`ADuplicateOfTheLargestPacketDoesNotRestartTheDelayClock` and
+`ADuplicateOfTheSmallestPacketInAWideRangeChangesNothing`. ACK GENERATION handles duplicates
+correctly. What is absent is discarding the duplicate before its frames reach the handler.
+
+Severity **LATENT**. Most QUIC frames are idempotent by design — STREAM carries offsets, MAX_DATA
+and MAX_STREAM_DATA are monotonic, ACK is a set union — which is why a duplicated packet does not
+visibly break a connection. The MUST exists because not all of them are, and because
+"idempotent in practice" is a property of the frames a peer happens to send rather than one this
+receiver enforces.
 
 #### RESOLVED — empty-payload packet rejection IS implemented
 
@@ -413,9 +494,8 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 - RFC 9114 — 93 of 116 client-relevant MUSTs remain unchecked. Of the 23 sampled, 22 were
   compliant and one was not, which raises confidence but proves nothing about the rest. §6 stream mapping, §7
   per-frame rules and §8 error codes are the largest untouched blocks.
-- RFC 9204 — surveyed structurally only. No MUST was checked: not the static table indices, the
-  prefixed-integer arithmetic, required-insert-count handling, blocked-stream limits, nor the
-  Huffman padding rules.
+- RFC 9204 — 19 of 28 client MUSTs unchecked, mostly encoder-stream instruction semantics and
+  dynamic-table eviction rules that a decode-only encoder never exercises.
 - RFC 8446 — everything outside the five pinned sections. The pinned set covers the ClientHello
   and extension layer only; the record layer, key schedule, and certificate handling are not
   pinned and so were not audited.
@@ -426,15 +506,16 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 66 — every row in the verdict tables above, counted directly rather than
-estimated (62 + 1 + 3). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
-report is NOT, because it is an open question rather than a verdict. Confirmed: 62 compliant, 1 defect (already fixed), 3 MISSING (key
-update, AEAD packet counting, MAX_PUSH_ID acceptance). No UNRESOLVED remain: the one that existed was settled by
+Findings raised: 80 — every row in the verdict tables above, counted directly rather than
+estimated (74 + 1 + 5). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
+report is NOT, because it is an open question rather than a verdict. Confirmed: 74 compliant, 1 defect (already fixed), 5 MISSING (key update, AEAD packet counting,
+MAX_PUSH_ID acceptance, duplicate packet suppression, HTTP/3 PRIORITY_UPDATE — the last of which
+is a deliberate non-goal). No UNRESOLVED remain: the one that existed was settled by
 reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
 Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Five near-misses against 62 confirmations is the
+as absent while the code implemented it. Five near-misses against 74 confirmations is the
 number a reader should weigh when deciding how much to trust a MISSING verdict here.
 
 The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
