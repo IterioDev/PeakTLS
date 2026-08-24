@@ -1,8 +1,11 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.** Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs). Surveyed only: RFC 9204.
-Untouched: RFC 9000, 9002, 8701, 9218, 9221, 9297, 9368, 9369. Every other
+Status: **IN PROGRESS.**
+
+- Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
+- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (2 requirements).
+- Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
+- Untouched: RFC 9002, RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -223,6 +226,42 @@ static table is **parsed from the pinned RFC extract rather than retyped**, and
 `TlsQuicQpackStaticTableTests` re-parses it — the same discipline this audit follows, applied
 in code.
 
+### Smaller specs — presence established, MUSTs not enumerated
+
+These were checked to answer one question each: is the feature there at all? None had its
+MUSTs enumerated, so none is reported as compliant — only as present or absent.
+
+| RFC | Question | Answer | Evidence |
+|---|---|---|---|
+| 9221 | QUIC DATAGRAM frames and `max_datagram_frame_size`? | Present | `Quic/CustomTlsQuicClient.cs:102`, `:117` |
+| 9368 | Version Negotiation packet handling? | Present, and unusually well tested | `Quic/TlsQuicConnection.cs:205-208`, `:1288` |
+| 9369 | QUIC v2 key schedule? | Present | `Quic/TlsQuicSecrets.cs:109`, `:150` |
+| 9218 | Priority / PRIORITY_UPDATE? | Partially — a `PriorityUpdate` surface exists | `BufferedRequest.cs:47` |
+| 8701 | GREASE placement policy? | Present, modelled on BoringSSL's seed indices | `ClientHello/ClientHelloGreasePolicy.cs` |
+
+The RFC 9368 row is the notable one. Version Negotiation is not merely handled: the mutation
+ledger in `TlsQuicConnection.cs` records killed mutants for a VN packet honoured after a
+successfully processed packet, and for both the Destination and Source connection ID echo checks
+of §17.2.1. That is stronger evidence than this audit could produce on its own.
+
+The RFC 9218 row is deliberately "partially". A `PriorityUpdate` field exists on the request
+path, but whether the HTTP/3 PRIORITY_UPDATE frame (0xF0700 / 0xF0701) is emitted, and whether
+the urgency and incremental defaults match §4, was NOT determined.
+
+### RFC 9000 (QUIC transport) — two spot checks only
+
+Effectively unaudited. Two requirements were checked incidentally and both hold:
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 14.1 | Initial datagrams are padded to at least 1200 bytes | `Quic/TlsQuicConnectionSpec.cs:146` | COMPLIANT |
+| 18.2 | `max_udp_payload_size` below 1200 is a parameter error | `Quic/TlsQuicTransportParameters.cs:258` | COMPLIANT |
+
+Everything else in RFC 9000 — frame formats, variable-length integers, packet number encoding,
+stream state machines, flow control, connection IDs, address validation, error codes, ACK
+generation — is unchecked. It is the largest surface in scope and the least covered by this
+document.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -235,8 +274,8 @@ in code.
 
 Nothing below has been examined. Each is a gap in this document, not a clean result.
 
-- RFC 9000 — transport. Wire encoding (§12, §14, §16, §18, §19, packet formats) and lifecycle
-  (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20).
+- RFC 9000 — all but the two spot checks above. Wire encoding (§12, §16, §19, packet formats)
+  and lifecycle (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20). Largest remaining gap.
 - RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
   keys.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
@@ -250,12 +289,14 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 - RFC 8446 — everything outside the five pinned sections. The pinned set covers the ClientHello
   and extension layer only; the record layer, key schedule, and certificate handling are not
   pinned and so were not audited.
-- RFC 8701, 9218, 9221, 9297, 9368, 9369 — GREASE value sets, priorities, QUIC and HTTP
-  datagrams, version negotiation and QUIC v2.
+- RFC 8701, 9218, 9221, 9297, 9368, 9369 — presence established above, MUSTs never enumerated.
+  Specifically open: whether the GREASE values match RFC 8701's reserved set exactly, whether
+  the HTTP/3 PRIORITY_UPDATE frame is emitted with the correct type codes and defaults, and
+  whether RFC 9297 HTTP datagrams exist at all (not checked).
 
 ## Attrition
 
-Findings raised: 35. Confirmed: 31 compliant, 1 defect (already fixed), 2 MISSING (key update,
+Findings raised: 37. Confirmed: 33 compliant, 1 defect (already fixed), 2 MISSING (key update,
 AEAD packet counting). The one question previously left UNVERIFIED was closed by pinning
 RFC 9001 §6, which turned it from an open question into a confirmed MUST violation. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
