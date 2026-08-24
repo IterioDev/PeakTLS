@@ -1,0 +1,181 @@
+RFC 9218 Section 4 through 4.3 - Priority Parameters (complete: 4, 4.1, 4.2, 4.3)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc9218.txt on 2026-08-24.
+Captured for the client-side MUST conformance audit (docs/RFC-CONFORMANCE.md).
+Ground truth for the urgency (u) and incremental (i) parameters, their defaults
+(u=3, i=false) and their permitted ranges. The defaults matter: a client that
+sends an explicit priority equal to the default is distinguishable from one that
+omits the field.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+4.  Priority Parameters
+
+   The priority information is a sequence of key-value pairs, providing
+   room for future extensions.  Each key-value pair represents a
+   priority parameter.
+
+   The Priority HTTP header field (Section 5) is an end-to-end way to
+   transmit this set of priority parameters when a request or a response
+   is issued.  After sending a request, a client can change their view
+   of response priority (Section 6) by sending HTTP-version-specific
+   PRIORITY_UPDATE frames as defined in Sections 7.1 and 7.2.  Frames
+   transmit priority parameters on a single hop only.
+
+   Intermediaries can consume and produce priority signals in a
+   PRIORITY_UPDATE frame or Priority header field.  An intermediary that
+   passes only the Priority request header field to the next hop
+   preserves the original end-to-end signal from the client; see
+   Section 14.  An intermediary could pass the Priority header field and
+   additionally send a PRIORITY_UPDATE frame.  This would have the
+   effect of preserving the original client end-to-end signal, while
+   instructing the next hop to use a different priority, per the
+   guidance in Section 7.  An intermediary that replaces or adds a
+   Priority request header field overrides the original client end-to-
+   end signal, which can affect prioritization for all subsequent
+   recipients of the request.
+
+   For both the Priority header field and the PRIORITY_UPDATE frame, the
+   set of priority parameters is encoded as a Dictionary (see
+   Section 3.2 of [STRUCTURED-FIELDS]).
+
+   This document defines the urgency (u) and incremental (i) priority
+   parameters.  When receiving an HTTP request that does not carry these
+   priority parameters, a server SHOULD act as if their default values
+   were specified.
+
+   An intermediary can combine signals from requests and responses that
+   it forwards.  Note that omission of priority parameters in responses
+   is handled differently from omission in requests; see Section 8.
+
+   Receivers parse the Dictionary as described in Section 4.2 of
+   [STRUCTURED-FIELDS].  Where the Dictionary is successfully parsed,
+   this document places the additional requirement that unknown priority
+   parameters, priority parameters with out-of-range values, or values
+   of unexpected types MUST be ignored.
+
+4.1.  Urgency
+
+   The urgency (u) parameter value is Integer (see Section 3.3.1 of
+   [STRUCTURED-FIELDS]), between 0 and 7 inclusive, in descending order
+   of priority.  The default is 3.
+
+   Endpoints use this parameter to communicate their view of the
+   precedence of HTTP responses.  The chosen value of urgency can be
+   based on the expectation that servers might use this information to
+   transmit HTTP responses in the order of their urgency.  The smaller
+   the value, the higher the precedence.
+
+   The following example shows a request for a CSS file with the urgency
+   set to 0:
+
+   :method = GET
+   :scheme = https
+   :authority = example.net
+   :path = /style.css
+   priority = u=0
+
+   A client that fetches a document that likely consists of multiple
+   HTTP resources (e.g., HTML) SHOULD assign the default urgency level
+   to the main resource.  This convention allows servers to refine the
+   urgency using knowledge specific to the website (see Section 8).
+
+   The lowest urgency level (7) is reserved for background tasks such as
+   delivery of software updates.  This urgency level SHOULD NOT be used
+   for fetching responses that have any impact on user interaction.
+
+4.2.  Incremental
+
+   The incremental (i) parameter value is Boolean (see Section 3.3.6 of
+   [STRUCTURED-FIELDS]).  It indicates if an HTTP response can be
+   processed incrementally, i.e., provide some meaningful output as
+   chunks of the response arrive.
+
+   The default value of the incremental parameter is false (0).
+
+   If a client makes concurrent requests with the incremental parameter
+   set to false, there is no benefit in serving responses with the same
+   urgency concurrently because the client is not going to process those
+   responses incrementally.  Serving non-incremental responses with the
+   same urgency one by one, in the order in which those requests were
+   generated, is considered to be the best strategy.
+
+   If a client makes concurrent requests with the incremental parameter
+   set to true, serving requests with the same urgency concurrently
+   might be beneficial.  Doing this distributes the connection
+   bandwidth, meaning that responses take longer to complete.
+   Incremental delivery is most useful where multiple partial responses
+   might provide some value to clients ahead of a complete response
+   being available.
+
+   The following example shows a request for a JPEG file with the
+   urgency parameter set to 5 and the incremental parameter set to true.
+
+   :method = GET
+   :scheme = https
+   :authority = example.net
+   :path = /image.jpg
+   priority = u=5, i
+
+4.3.  Defining New Priority Parameters
+
+   When attempting to define new priority parameters, care must be taken
+   so that they do not adversely interfere with prioritization performed
+   by existing endpoints or intermediaries that do not understand the
+   newly defined priority parameters.  Since unknown priority parameters
+   are ignored, new priority parameters should not change the
+   interpretation of, or modify, the urgency (see Section 4.1) or
+   incremental (see Section 4.2) priority parameters in a way that is
+   not backwards compatible or fallback safe.
+
+   For example, if there is a need to provide more granularity than
+   eight urgency levels, it would be possible to subdivide the range
+   using an additional priority parameter.  Implementations that do not
+   recognize the parameter can safely continue to use the less granular
+   eight levels.
+
+   Alternatively, the urgency can be augmented.  For example, a
+   graphical user agent could send a visible priority parameter to
+   indicate if the resource being requested is within the viewport.
+
+   Generic priority parameters are preferred over vendor-specific,
+   application-specific, or deployment-specific values.  If a generic
+   value cannot be agreed upon in the community, the parameter's name
+   should be correspondingly specific (e.g., with a prefix that
+   identifies the vendor, application, or deployment).
+
+4.3.1.  Registration
+
+   New priority parameters can be defined by registering them in the
+   "HTTP Priority" registry.  This registry governs the keys (short
+   textual strings) used in the Dictionary (see Section 3.2 of
+   [STRUCTURED-FIELDS]).  Since each HTTP request can have associated
+   priority signals, there is value in having short key lengths,
+   especially single-character strings.  In order to encourage
+   extensions while avoiding unintended conflict among attractive key
+   values, the "HTTP Priority" registry operates two registration
+   policies, depending on key length.
+
+   *  Registration requests for priority parameters with a key length of
+      one use the Specification Required policy, per Section 4.6 of
+      [RFC8126].
+
+   *  Registration requests for priority parameters with a key length
+      greater than one use the Expert Review policy, per Section 4.5 of
+      [RFC8126].  A specification document is appreciated but not
+      required.
+
+   When reviewing registration requests, the designated expert(s) can
+   consider the additional guidance provided in Section 4.3 but cannot
+   use it as a basis for rejection.
+
+   Registration requests should use the following template:
+
+   Name:  [a name for the priority parameter that matches the parameter
+      key]
+
+   Description:  [a description of the priority parameter semantics and
+      value]
+
+   Reference:  [to a specification defining this priority parameter]
+
+   See the registry at <https://www.iana.org/assignments/http-priority>
+   for details on where to send registration requests.

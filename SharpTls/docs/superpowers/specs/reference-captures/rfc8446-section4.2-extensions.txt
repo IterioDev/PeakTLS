@@ -1,0 +1,1097 @@
+RFC 8446 Section 4.2 through 4.2.11 - Extensions (complete: 4.2, 4.2.1 - 4.2.11)
+Extracted verbatim from https://www.rfc-editor.org/rfc/rfc8446.txt on 2026-08-24.
+Captured for the client-side MUST conformance audit (docs/RFC-CONFORMANCE.md).
+Ground truth for extension ordering and duplication rules, supported_versions,
+signature_algorithms, supported_groups, key_share, psk_key_exchange_modes and
+early_data. Includes the 'MUST NOT appear more than once' rule and the rule that
+key_share entries appear in the same order as supported_groups.
+Copy these values; do not retype them.
+----------------------------------------------------------------------
+4.2.  Extensions
+
+   A number of TLS messages contain tag-length-value encoded extensions
+   structures.
+
+    struct {
+        ExtensionType extension_type;
+        opaque extension_data<0..2^16-1>;
+    } Extension;
+
+    enum {
+        server_name(0),                             /* RFC 6066 */
+        max_fragment_length(1),                     /* RFC 6066 */
+        status_request(5),                          /* RFC 6066 */
+        supported_groups(10),                       /* RFC 8422, 7919 */
+        signature_algorithms(13),                   /* RFC 8446 */
+        use_srtp(14),                               /* RFC 5764 */
+        heartbeat(15),                              /* RFC 6520 */
+        application_layer_protocol_negotiation(16), /* RFC 7301 */
+        signed_certificate_timestamp(18),           /* RFC 6962 */
+        client_certificate_type(19),                /* RFC 7250 */
+        server_certificate_type(20),                /* RFC 7250 */
+        padding(21),                                /* RFC 7685 */
+        pre_shared_key(41),                         /* RFC 8446 */
+        early_data(42),                             /* RFC 8446 */
+        supported_versions(43),                     /* RFC 8446 */
+        cookie(44),                                 /* RFC 8446 */
+        psk_key_exchange_modes(45),                 /* RFC 8446 */
+        certificate_authorities(47),                /* RFC 8446 */
+        oid_filters(48),                            /* RFC 8446 */
+        post_handshake_auth(49),                    /* RFC 8446 */
+        signature_algorithms_cert(50),              /* RFC 8446 */
+        key_share(51),                              /* RFC 8446 */
+        (65535)
+    } ExtensionType;
+
+
+Rescorla                     Standards Track                   [Page 35]
+
+
+   Here:
+
+   -  "extension_type" identifies the particular extension type.
+
+   -  "extension_data" contains information specific to the particular
+      extension type.
+
+   The list of extension types is maintained by IANA as described in
+   Section 11.
+
+   Extensions are generally structured in a request/response fashion,
+   though some extensions are just indications with no corresponding
+   response.  The client sends its extension requests in the ClientHello
+   message, and the server sends its extension responses in the
+   ServerHello, EncryptedExtensions, HelloRetryRequest, and Certificate
+   messages.  The server sends extension requests in the
+   CertificateRequest message which a client MAY respond to with a
+   Certificate message.  The server MAY also send unsolicited extensions
+   in the NewSessionTicket, though the client does not respond directly
+   to these.
+
+   Implementations MUST NOT send extension responses if the remote
+   endpoint did not send the corresponding extension requests, with the
+   exception of the "cookie" extension in the HelloRetryRequest.  Upon
+   receiving such an extension, an endpoint MUST abort the handshake
+   with an "unsupported_extension" alert.
+
+   The table below indicates the messages where a given extension may
+   appear, using the following notation: CH (ClientHello),
+   SH (ServerHello), EE (EncryptedExtensions), CT (Certificate),
+   CR (CertificateRequest), NST (NewSessionTicket), and
+   HRR (HelloRetryRequest).  If an implementation receives an extension
+   which it recognizes and which is not specified for the message in
+   which it appears, it MUST abort the handshake with an
+   "illegal_parameter" alert.
+
+
+Rescorla                     Standards Track                   [Page 36]
+
+
+   +--------------------------------------------------+-------------+
+   | Extension                                        |     TLS 1.3 |
+   +--------------------------------------------------+-------------+
+   | server_name [RFC6066]                            |      CH, EE |
+   |                                                  |             |
+   | max_fragment_length [RFC6066]                    |      CH, EE |
+   |                                                  |             |
+   | status_request [RFC6066]                         |  CH, CR, CT |
+   |                                                  |             |
+   | supported_groups [RFC7919]                       |      CH, EE |
+   |                                                  |             |
+   | signature_algorithms (RFC 8446)                  |      CH, CR |
+   |                                                  |             |
+   | use_srtp [RFC5764]                               |      CH, EE |
+   |                                                  |             |
+   | heartbeat [RFC6520]                              |      CH, EE |
+   |                                                  |             |
+   | application_layer_protocol_negotiation [RFC7301] |      CH, EE |
+   |                                                  |             |
+   | signed_certificate_timestamp [RFC6962]           |  CH, CR, CT |
+   |                                                  |             |
+   | client_certificate_type [RFC7250]                |      CH, EE |
+   |                                                  |             |
+   | server_certificate_type [RFC7250]                |      CH, EE |
+   |                                                  |             |
+   | padding [RFC7685]                                |          CH |
+   |                                                  |             |
+   | key_share (RFC 8446)                             | CH, SH, HRR |
+   |                                                  |             |
+   | pre_shared_key (RFC 8446)                        |      CH, SH |
+   |                                                  |             |
+   | psk_key_exchange_modes (RFC 8446)                |          CH |
+   |                                                  |             |
+   | early_data (RFC 8446)                            | CH, EE, NST |
+   |                                                  |             |
+   | cookie (RFC 8446)                                |     CH, HRR |
+   |                                                  |             |
+   | supported_versions (RFC 8446)                    | CH, SH, HRR |
+   |                                                  |             |
+   | certificate_authorities (RFC 8446)               |      CH, CR |
+   |                                                  |             |
+   | oid_filters (RFC 8446)                           |          CR |
+   |                                                  |             |
+   | post_handshake_auth (RFC 8446)                   |          CH |
+   |                                                  |             |
+   | signature_algorithms_cert (RFC 8446)             |      CH, CR |
+   +--------------------------------------------------+-------------+
+
+
+Rescorla                     Standards Track                   [Page 37]
+
+
+   When multiple extensions of different types are present, the
+   extensions MAY appear in any order, with the exception of
+   "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
+   the ClientHello (but can appear anywhere in the ServerHello
+   extensions block).  There MUST NOT be more than one extension of the
+   same type in a given extension block.
+
+   In TLS 1.3, unlike TLS 1.2, extensions are negotiated for each
+   handshake even when in resumption-PSK mode.  However, 0-RTT
+   parameters are those negotiated in the previous handshake; mismatches
+   may require rejecting 0-RTT (see Section 4.2.10).
+
+   There are subtle (and not so subtle) interactions that may occur in
+   this protocol between new features and existing features which may
+   result in a significant reduction in overall security.  The following
+   considerations should be taken into account when designing new
+   extensions:
+
+   -  Some cases where a server does not agree to an extension are error
+      conditions (e.g., the handshake cannot continue), and some are
+      simply refusals to support particular features.  In general, error
+      alerts should be used for the former and a field in the server
+      extension response for the latter.
+
+   -  Extensions should, as far as possible, be designed to prevent any
+      attack that forces use (or non-use) of a particular feature by
+      manipulation of handshake messages.  This principle should be
+      followed regardless of whether the feature is believed to cause a
+      security problem.  Often the fact that the extension fields are
+      included in the inputs to the Finished message hashes will be
+      sufficient, but extreme care is needed when the extension changes
+      the meaning of messages sent in the handshake phase.  Designers
+      and implementors should be aware of the fact that until the
+      handshake has been authenticated, active attackers can modify
+      messages and insert, remove, or replace extensions.
+
+
+Rescorla                     Standards Track                   [Page 38]
+
+
+4.2.1.  Supported Versions
+
+      struct {
+          select (Handshake.msg_type) {
+              case client_hello:
+                   ProtocolVersion versions<2..254>;
+
+              case server_hello: /* and HelloRetryRequest */
+                   ProtocolVersion selected_version;
+          };
+      } SupportedVersions;
+
+   The "supported_versions" extension is used by the client to indicate
+   which versions of TLS it supports and by the server to indicate which
+   version it is using.  The extension contains a list of supported
+   versions in preference order, with the most preferred version first.
+   Implementations of this specification MUST send this extension in the
+   ClientHello containing all versions of TLS which they are prepared to
+   negotiate (for this specification, that means minimally 0x0304, but
+   if previous versions of TLS are allowed to be negotiated, they MUST
+   be present as well).
+
+   If this extension is not present, servers which are compliant with
+   this specification and which also support TLS 1.2 MUST negotiate
+   TLS 1.2 or prior as specified in [RFC5246], even if
+   ClientHello.legacy_version is 0x0304 or later.  Servers MAY abort the
+   handshake upon receiving a ClientHello with legacy_version 0x0304 or
+   later.
+
+   If this extension is present in the ClientHello, servers MUST NOT use
+   the ClientHello.legacy_version value for version negotiation and MUST
+   use only the "supported_versions" extension to determine client
+   preferences.  Servers MUST only select a version of TLS present in
+   that extension and MUST ignore any unknown versions that are present
+   in that extension.  Note that this mechanism makes it possible to
+   negotiate a version prior to TLS 1.2 if one side supports a sparse
+   range.  Implementations of TLS 1.3 which choose to support prior
+   versions of TLS SHOULD support TLS 1.2.  Servers MUST be prepared to
+   receive ClientHellos that include this extension but do not include
+   0x0304 in the list of versions.
+
+   A server which negotiates a version of TLS prior to TLS 1.3 MUST set
+   ServerHello.version and MUST NOT send the "supported_versions"
+   extension.  A server which negotiates TLS 1.3 MUST respond by sending
+   a "supported_versions" extension containing the selected version
+   value (0x0304).  It MUST set the ServerHello.legacy_version field to
+   0x0303 (TLS 1.2).  Clients MUST check for this extension prior to
+   processing the rest of the ServerHello (although they will have to
+
+
+Rescorla                     Standards Track                   [Page 39]
+
+
+   parse the ServerHello in order to read the extension).  If this
+   extension is present, clients MUST ignore the
+   ServerHello.legacy_version value and MUST use only the
+   "supported_versions" extension to determine the selected version.  If
+   the "supported_versions" extension in the ServerHello contains a
+   version not offered by the client or contains a version prior to
+   TLS 1.3, the client MUST abort the handshake with an
+   "illegal_parameter" alert.
+
+4.2.2.  Cookie
+
+      struct {
+          opaque cookie<1..2^16-1>;
+      } Cookie;
+
+   Cookies serve two primary purposes:
+
+   -  Allowing the server to force the client to demonstrate
+      reachability at their apparent network address (thus providing a
+      measure of DoS protection).  This is primarily useful for
+      non-connection-oriented transports (see [RFC6347] for an example
+      of this).
+
+   -  Allowing the server to offload state to the client, thus allowing
+      it to send a HelloRetryRequest without storing any state.  The
+      server can do this by storing the hash of the ClientHello in the
+      HelloRetryRequest cookie (protected with some suitable integrity
+      protection algorithm).
+
+   When sending a HelloRetryRequest, the server MAY provide a "cookie"
+   extension to the client (this is an exception to the usual rule that
+   the only extensions that may be sent are those that appear in the
+   ClientHello).  When sending the new ClientHello, the client MUST copy
+   the contents of the extension received in the HelloRetryRequest into
+   a "cookie" extension in the new ClientHello.  Clients MUST NOT use
+   cookies in their initial ClientHello in subsequent connections.
+
+   When a server is operating statelessly, it may receive an unprotected
+   record of type change_cipher_spec between the first and second
+   ClientHello (see Section 5).  Since the server is not storing any
+   state, this will appear as if it were the first message to be
+   received.  Servers operating statelessly MUST ignore these records.
+
+
+Rescorla                     Standards Track                   [Page 40]
+
+
+4.2.3.  Signature Algorithms
+
+   TLS 1.3 provides two extensions for indicating which signature
+   algorithms may be used in digital signatures.  The
+   "signature_algorithms_cert" extension applies to signatures in
+   certificates, and the "signature_algorithms" extension, which
+   originally appeared in TLS 1.2, applies to signatures in
+   CertificateVerify messages.  The keys found in certificates MUST also
+   be of appropriate type for the signature algorithms they are used
+   with.  This is a particular issue for RSA keys and PSS signatures, as
+   described below.  If no "signature_algorithms_cert" extension is
+   present, then the "signature_algorithms" extension also applies to
+   signatures appearing in certificates.  Clients which desire the
+   server to authenticate itself via a certificate MUST send the
+   "signature_algorithms" extension.  If a server is authenticating via
+   a certificate and the client has not sent a "signature_algorithms"
+   extension, then the server MUST abort the handshake with a
+   "missing_extension" alert (see Section 9.2).
+
+   The "signature_algorithms_cert" extension was added to allow
+   implementations which supported different sets of algorithms for
+   certificates and in TLS itself to clearly signal their capabilities.
+   TLS 1.2 implementations SHOULD also process this extension.
+   Implementations which have the same policy in both cases MAY omit the
+   "signature_algorithms_cert" extension.
+
+
+Rescorla                     Standards Track                   [Page 41]
+
+
+   The "extension_data" field of these extensions contains a
+   SignatureSchemeList value:
+
+      enum {
+          /* RSASSA-PKCS1-v1_5 algorithms */
+          rsa_pkcs1_sha256(0x0401),
+          rsa_pkcs1_sha384(0x0501),
+          rsa_pkcs1_sha512(0x0601),
+
+          /* ECDSA algorithms */
+          ecdsa_secp256r1_sha256(0x0403),
+          ecdsa_secp384r1_sha384(0x0503),
+          ecdsa_secp521r1_sha512(0x0603),
+
+          /* RSASSA-PSS algorithms with public key OID rsaEncryption */
+          rsa_pss_rsae_sha256(0x0804),
+          rsa_pss_rsae_sha384(0x0805),
+          rsa_pss_rsae_sha512(0x0806),
+
+          /* EdDSA algorithms */
+          ed25519(0x0807),
+          ed448(0x0808),
+
+          /* RSASSA-PSS algorithms with public key OID RSASSA-PSS */
+          rsa_pss_pss_sha256(0x0809),
+          rsa_pss_pss_sha384(0x080a),
+          rsa_pss_pss_sha512(0x080b),
+
+          /* Legacy algorithms */
+          rsa_pkcs1_sha1(0x0201),
+          ecdsa_sha1(0x0203),
+
+          /* Reserved Code Points */
+          private_use(0xFE00..0xFFFF),
+          (0xFFFF)
+      } SignatureScheme;
+
+      struct {
+          SignatureScheme supported_signature_algorithms<2..2^16-2>;
+      } SignatureSchemeList;
+
+   Note: This enum is named "SignatureScheme" because there is already a
+   "SignatureAlgorithm" type in TLS 1.2, which this replaces.  We use
+   the term "signature algorithm" throughout the text.
+
+
+Rescorla                     Standards Track                   [Page 42]
+
+
+   Each SignatureScheme value lists a single signature algorithm that
+   the client is willing to verify.  The values are indicated in
+   descending order of preference.  Note that a signature algorithm
+   takes as input an arbitrary-length message, rather than a digest.
+   Algorithms which traditionally act on a digest should be defined in
+   TLS to first hash the input with a specified hash algorithm and then
+   proceed as usual.  The code point groups listed above have the
+   following meanings:
+
+   RSASSA-PKCS1-v1_5 algorithms:  Indicates a signature algorithm using
+      RSASSA-PKCS1-v1_5 [RFC8017] with the corresponding hash algorithm
+      as defined in [SHS].  These values refer solely to signatures
+      which appear in certificates (see Section 4.4.2.2) and are not
+      defined for use in signed TLS handshake messages, although they
+      MAY appear in "signature_algorithms" and
+      "signature_algorithms_cert" for backward compatibility with
+      TLS 1.2.
+
+   ECDSA algorithms:  Indicates a signature algorithm using ECDSA
+      [ECDSA], the corresponding curve as defined in ANSI X9.62 [ECDSA]
+      and FIPS 186-4 [DSS], and the corresponding hash algorithm as
+      defined in [SHS].  The signature is represented as a DER-encoded
+      [X690] ECDSA-Sig-Value structure.
+
+   RSASSA-PSS RSAE algorithms:  Indicates a signature algorithm using
+      RSASSA-PSS [RFC8017] with mask generation function 1.  The digest
+      used in the mask generation function and the digest being signed
+      are both the corresponding hash algorithm as defined in [SHS].
+      The length of the Salt MUST be equal to the length of the output
+      of the digest algorithm.  If the public key is carried in an X.509
+      certificate, it MUST use the rsaEncryption OID [RFC5280].
+
+   EdDSA algorithms:  Indicates a signature algorithm using EdDSA as
+      defined in [RFC8032] or its successors.  Note that these
+      correspond to the "PureEdDSA" algorithms and not the "prehash"
+      variants.
+
+   RSASSA-PSS PSS algorithms:  Indicates a signature algorithm using
+      RSASSA-PSS [RFC8017] with mask generation function 1.  The digest
+      used in the mask generation function and the digest being signed
+      are both the corresponding hash algorithm as defined in [SHS].
+      The length of the Salt MUST be equal to the length of the digest
+      algorithm.  If the public key is carried in an X.509 certificate,
+      it MUST use the RSASSA-PSS OID [RFC5756].  When used in
+      certificate signatures, the algorithm parameters MUST be DER
+      encoded.  If the corresponding public key's parameters are
+      present, then the parameters in the signature MUST be identical to
+      those in the public key.
+
+
+Rescorla                     Standards Track                   [Page 43]
+
+
+   Legacy algorithms:  Indicates algorithms which are being deprecated
+      because they use algorithms with known weaknesses, specifically
+      SHA-1 which is used in this context with either (1) RSA using
+      RSASSA-PKCS1-v1_5 or (2) ECDSA.  These values refer solely to
+      signatures which appear in certificates (see Section 4.4.2.2) and
+      are not defined for use in signed TLS handshake messages, although
+      they MAY appear in "signature_algorithms" and
+      "signature_algorithms_cert" for backward compatibility with
+      TLS 1.2.  Endpoints SHOULD NOT negotiate these algorithms but are
+      permitted to do so solely for backward compatibility.  Clients
+      offering these values MUST list them as the lowest priority
+      (listed after all other algorithms in SignatureSchemeList).
+      TLS 1.3 servers MUST NOT offer a SHA-1 signed certificate unless
+      no valid certificate chain can be produced without it (see
+      Section 4.4.2.2).
+
+   The signatures on certificates that are self-signed or certificates
+   that are trust anchors are not validated, since they begin a
+   certification path (see [RFC5280], Section 3.2).  A certificate that
+   begins a certification path MAY use a signature algorithm that is not
+   advertised as being supported in the "signature_algorithms"
+   extension.
+
+   Note that TLS 1.2 defines this extension differently.  TLS 1.3
+   implementations willing to negotiate TLS 1.2 MUST behave in
+   accordance with the requirements of [RFC5246] when negotiating that
+   version.  In particular:
+
+   -  TLS 1.2 ClientHellos MAY omit this extension.
+
+   -  In TLS 1.2, the extension contained hash/signature pairs.  The
+      pairs are encoded in two octets, so SignatureScheme values have
+      been allocated to align with TLS 1.2's encoding.  Some legacy
+      pairs are left unallocated.  These algorithms are deprecated as of
+      TLS 1.3.  They MUST NOT be offered or negotiated by any
+      implementation.  In particular, MD5 [SLOTH], SHA-224, and DSA
+      MUST NOT be used.
+
+   -  ECDSA signature schemes align with TLS 1.2's ECDSA hash/signature
+      pairs.  However, the old semantics did not constrain the signing
+      curve.  If TLS 1.2 is negotiated, implementations MUST be prepared
+      to accept a signature that uses any curve that they advertised in
+      the "supported_groups" extension.
+
+   -  Implementations that advertise support for RSASSA-PSS (which is
+      mandatory in TLS 1.3) MUST be prepared to accept a signature using
+      that scheme even when TLS 1.2 is negotiated.  In TLS 1.2,
+      RSASSA-PSS is used with RSA cipher suites.
+
+
+Rescorla                     Standards Track                   [Page 44]
+
+
+4.2.4.  Certificate Authorities
+
+   The "certificate_authorities" extension is used to indicate the
+   certificate authorities (CAs) which an endpoint supports and which
+   SHOULD be used by the receiving endpoint to guide certificate
+   selection.
+
+   The body of the "certificate_authorities" extension consists of a
+   CertificateAuthoritiesExtension structure.
+
+      opaque DistinguishedName<1..2^16-1>;
+
+      struct {
+          DistinguishedName authorities<3..2^16-1>;
+      } CertificateAuthoritiesExtension;
+
+   authorities:  A list of the distinguished names [X501] of acceptable
+      certificate authorities, represented in DER-encoded [X690] format.
+      These distinguished names specify a desired distinguished name for
+      a trust anchor or subordinate CA; thus, this message can be used
+      to describe known trust anchors as well as a desired authorization
+      space.
+
+   The client MAY send the "certificate_authorities" extension in the
+   ClientHello message.  The server MAY send it in the
+   CertificateRequest message.
+
+   The "trusted_ca_keys" extension [RFC6066], which serves a similar
+   purpose but is more complicated, is not used in TLS 1.3 (although it
+   may appear in ClientHello messages from clients which are offering
+   prior versions of TLS).
+
+4.2.5.  OID Filters
+
+   The "oid_filters" extension allows servers to provide a set of
+   OID/value pairs which it would like the client's certificate to
+   match.  This extension, if provided by the server, MUST only be sent
+   in the CertificateRequest message.
+
+      struct {
+          opaque certificate_extension_oid<1..2^8-1>;
+          opaque certificate_extension_values<0..2^16-1>;
+      } OIDFilter;
+
+      struct {
+          OIDFilter filters<0..2^16-1>;
+      } OIDFilterExtension;
+
+
+Rescorla                     Standards Track                   [Page 45]
+
+
+   filters:  A list of certificate extension OIDs [RFC5280] with their
+      allowed value(s) and represented in DER-encoded [X690] format.
+      Some certificate extension OIDs allow multiple values (e.g.,
+      Extended Key Usage).  If the server has included a non-empty
+      filters list, the client certificate included in the response MUST
+      contain all of the specified extension OIDs that the client
+      recognizes.  For each extension OID recognized by the client, all
+      of the specified values MUST be present in the client certificate
+      (but the certificate MAY have other values as well).  However, the
+      client MUST ignore and skip any unrecognized certificate extension
+      OIDs.  If the client ignored some of the required certificate
+      extension OIDs and supplied a certificate that does not satisfy
+      the request, the server MAY at its discretion either continue the
+      connection without client authentication or abort the handshake
+      with an "unsupported_certificate" alert.  Any given OID MUST NOT
+      appear more than once in the filters list.
+
+   PKIX RFCs define a variety of certificate extension OIDs and their
+   corresponding value types.  Depending on the type, matching
+   certificate extension values are not necessarily bitwise-equal.  It
+   is expected that TLS implementations will rely on their PKI libraries
+   to perform certificate selection using certificate extension OIDs.
+
+   This document defines matching rules for two standard certificate
+   extensions defined in [RFC5280]:
+
+   -  The Key Usage extension in a certificate matches the request when
+      all key usage bits asserted in the request are also asserted in
+      the Key Usage certificate extension.
+
+   -  The Extended Key Usage extension in a certificate matches the
+      request when all key purpose OIDs present in the request are also
+      found in the Extended Key Usage certificate extension.  The
+      special anyExtendedKeyUsage OID MUST NOT be used in the request.
+
+   Separate specifications may define matching rules for other
+   certificate extensions.
+
+
+Rescorla                     Standards Track                   [Page 46]
+
+
+4.2.6.  Post-Handshake Client Authentication
+
+   The "post_handshake_auth" extension is used to indicate that a client
+   is willing to perform post-handshake authentication (Section 4.6.2).
+   Servers MUST NOT send a post-handshake CertificateRequest to clients
+   which do not offer this extension.  Servers MUST NOT send this
+   extension.
+
+      struct {} PostHandshakeAuth;
+
+   The "extension_data" field of the "post_handshake_auth" extension is
+   zero length.
+
+4.2.7.  Supported Groups
+
+   When sent by the client, the "supported_groups" extension indicates
+   the named groups which the client supports for key exchange, ordered
+   from most preferred to least preferred.
+
+   Note: In versions of TLS prior to TLS 1.3, this extension was named
+   "elliptic_curves" and only contained elliptic curve groups.  See
+   [RFC8422] and [RFC7919].  This extension was also used to negotiate
+   ECDSA curves.  Signature algorithms are now negotiated independently
+   (see Section 4.2.3).
+
+   The "extension_data" field of this extension contains a
+   "NamedGroupList" value:
+
+      enum {
+
+          /* Elliptic Curve Groups (ECDHE) */
+          secp256r1(0x0017), secp384r1(0x0018), secp521r1(0x0019),
+          x25519(0x001D), x448(0x001E),
+
+          /* Finite Field Groups (DHE) */
+          ffdhe2048(0x0100), ffdhe3072(0x0101), ffdhe4096(0x0102),
+          ffdhe6144(0x0103), ffdhe8192(0x0104),
+
+          /* Reserved Code Points */
+          ffdhe_private_use(0x01FC..0x01FF),
+          ecdhe_private_use(0xFE00..0xFEFF),
+          (0xFFFF)
+      } NamedGroup;
+
+      struct {
+          NamedGroup named_group_list<2..2^16-1>;
+      } NamedGroupList;
+
+
+Rescorla                     Standards Track                   [Page 47]
+
+
+   Elliptic Curve Groups (ECDHE):  Indicates support for the
+      corresponding named curve, defined in either FIPS 186-4 [DSS] or
+      [RFC7748].  Values 0xFE00 through 0xFEFF are reserved for
+      Private Use [RFC8126].
+
+   Finite Field Groups (DHE):  Indicates support for the corresponding
+      finite field group, defined in [RFC7919].  Values 0x01FC through
+      0x01FF are reserved for Private Use.
+
+   Items in named_group_list are ordered according to the sender's
+   preferences (most preferred choice first).
+
+   As of TLS 1.3, servers are permitted to send the "supported_groups"
+   extension to the client.  Clients MUST NOT act upon any information
+   found in "supported_groups" prior to successful completion of the
+   handshake but MAY use the information learned from a successfully
+   completed handshake to change what groups they use in their
+   "key_share" extension in subsequent connections.  If the server has a
+   group it prefers to the ones in the "key_share" extension but is
+   still willing to accept the ClientHello, it SHOULD send
+   "supported_groups" to update the client's view of its preferences;
+   this extension SHOULD contain all groups the server supports,
+   regardless of whether they are currently supported by the client.
+
+4.2.8.  Key Share
+
+   The "key_share" extension contains the endpoint's cryptographic
+   parameters.
+
+   Clients MAY send an empty client_shares vector in order to request
+   group selection from the server, at the cost of an additional round
+   trip (see Section 4.1.4).
+
+      struct {
+          NamedGroup group;
+          opaque key_exchange<1..2^16-1>;
+      } KeyShareEntry;
+
+   group:  The named group for the key being exchanged.
+
+   key_exchange:  Key exchange information.  The contents of this field
+      are determined by the specified group and its corresponding
+      definition.  Finite Field Diffie-Hellman [DH76] parameters are
+      described in Section 4.2.8.1; Elliptic Curve Diffie-Hellman
+      parameters are described in Section 4.2.8.2.
+
+
+Rescorla                     Standards Track                   [Page 48]
+
+
+   In the ClientHello message, the "extension_data" field of this
+   extension contains a "KeyShareClientHello" value:
+
+      struct {
+          KeyShareEntry client_shares<0..2^16-1>;
+      } KeyShareClientHello;
+
+   client_shares:  A list of offered KeyShareEntry values in descending
+      order of client preference.
+
+   This vector MAY be empty if the client is requesting a
+   HelloRetryRequest.  Each KeyShareEntry value MUST correspond to a
+   group offered in the "supported_groups" extension and MUST appear in
+   the same order.  However, the values MAY be a non-contiguous subset
+   of the "supported_groups" extension and MAY omit the most preferred
+   groups.  Such a situation could arise if the most preferred groups
+   are new and unlikely to be supported in enough places to make
+   pregenerating key shares for them efficient.
+
+   Clients can offer as many KeyShareEntry values as the number of
+   supported groups it is offering, each representing a single set of
+   key exchange parameters.  For instance, a client might offer shares
+   for several elliptic curves or multiple FFDHE groups.  The
+   key_exchange values for each KeyShareEntry MUST be generated
+   independently.  Clients MUST NOT offer multiple KeyShareEntry values
+   for the same group.  Clients MUST NOT offer any KeyShareEntry values
+   for groups not listed in the client's "supported_groups" extension.
+   Servers MAY check for violations of these rules and abort the
+   handshake with an "illegal_parameter" alert if one is violated.
+
+   In a HelloRetryRequest message, the "extension_data" field of this
+   extension contains a KeyShareHelloRetryRequest value:
+
+      struct {
+          NamedGroup selected_group;
+      } KeyShareHelloRetryRequest;
+
+   selected_group:  The mutually supported group the server intends to
+      negotiate and is requesting a retried ClientHello/KeyShare for.
+
+   Upon receipt of this extension in a HelloRetryRequest, the client
+   MUST verify that (1) the selected_group field corresponds to a group
+   which was provided in the "supported_groups" extension in the
+   original ClientHello and (2) the selected_group field does not
+   correspond to a group which was provided in the "key_share" extension
+   in the original ClientHello.  If either of these checks fails, then
+   the client MUST abort the handshake with an "illegal_parameter"
+   alert.  Otherwise, when sending the new ClientHello, the client MUST
+
+
+Rescorla                     Standards Track                   [Page 49]
+
+
+   replace the original "key_share" extension with one containing only a
+   new KeyShareEntry for the group indicated in the selected_group field
+   of the triggering HelloRetryRequest.
+
+   In a ServerHello message, the "extension_data" field of this
+   extension contains a KeyShareServerHello value:
+
+      struct {
+          KeyShareEntry server_share;
+      } KeyShareServerHello;
+
+   server_share:  A single KeyShareEntry value that is in the same group
+      as one of the client's shares.
+
+   If using (EC)DHE key establishment, servers offer exactly one
+   KeyShareEntry in the ServerHello.  This value MUST be in the same
+   group as the KeyShareEntry value offered by the client that the
+   server has selected for the negotiated key exchange.  Servers
+   MUST NOT send a KeyShareEntry for any group not indicated in the
+   client's "supported_groups" extension and MUST NOT send a
+   KeyShareEntry when using the "psk_ke" PskKeyExchangeMode.  If using
+   (EC)DHE key establishment and a HelloRetryRequest containing a
+   "key_share" extension was received by the client, the client MUST
+   verify that the selected NamedGroup in the ServerHello is the same as
+   that in the HelloRetryRequest.  If this check fails, the client MUST
+   abort the handshake with an "illegal_parameter" alert.
+
+4.2.8.1.  Diffie-Hellman Parameters
+
+   Diffie-Hellman [DH76] parameters for both clients and servers are
+   encoded in the opaque key_exchange field of a KeyShareEntry in a
+   KeyShare structure.  The opaque value contains the Diffie-Hellman
+   public value (Y = g^X mod p) for the specified group (see [RFC7919]
+   for group definitions) encoded as a big-endian integer and padded to
+   the left with zeros to the size of p in bytes.
+
+   Note: For a given Diffie-Hellman group, the padding results in all
+   public keys having the same length.
+
+   Peers MUST validate each other's public key Y by ensuring that 1 < Y
+   < p-1.  This check ensures that the remote peer is properly behaved
+   and isn't forcing the local system into a small subgroup.
+
+
+Rescorla                     Standards Track                   [Page 50]
+
+
+4.2.8.2.  ECDHE Parameters
+
+   ECDHE parameters for both clients and servers are encoded in the
+   opaque key_exchange field of a KeyShareEntry in a KeyShare structure.
+
+   For secp256r1, secp384r1, and secp521r1, the contents are the
+   serialized value of the following struct:
+
+      struct {
+          uint8 legacy_form = 4;
+          opaque X[coordinate_length];
+          opaque Y[coordinate_length];
+      } UncompressedPointRepresentation;
+
+   X and Y, respectively, are the binary representations of the x and y
+   values in network byte order.  There are no internal length markers,
+   so each number representation occupies as many octets as implied by
+   the curve parameters.  For P-256, this means that each of X and Y use
+   32 octets, padded on the left by zeros if necessary.  For P-384, they
+   take 48 octets each.  For P-521, they take 66 octets each.
+
+   For the curves secp256r1, secp384r1, and secp521r1, peers MUST
+   validate each other's public value Q by ensuring that the point is a
+   valid point on the elliptic curve.  The appropriate validation
+   procedures are defined in Section 4.3.7 of [ECDSA] and alternatively
+   in Section 5.6.2.3 of [KEYAGREEMENT].  This process consists of three
+   steps: (1) verify that Q is not the point at infinity (O), (2) verify
+   that for Q = (x, y) both integers x and y are in the correct
+   interval, and (3) ensure that (x, y) is a correct solution to the
+   elliptic curve equation.  For these curves, implementors do not need
+   to verify membership in the correct subgroup.
+
+   For X25519 and X448, the contents of the public value are the byte
+   string inputs and outputs of the corresponding functions defined in
+   [RFC7748]: 32 bytes for X25519 and 56 bytes for X448.
+
+   Note: Versions of TLS prior to 1.3 permitted point format
+   negotiation; TLS 1.3 removes this feature in favor of a single point
+   format for each curve.
+
+4.2.9.  Pre-Shared Key Exchange Modes
+
+   In order to use PSKs, clients MUST also send a
+   "psk_key_exchange_modes" extension.  The semantics of this extension
+   are that the client only supports the use of PSKs with these modes,
+   which restricts both the use of PSKs offered in this ClientHello and
+   those which the server might supply via NewSessionTicket.
+
+
+Rescorla                     Standards Track                   [Page 51]
+
+
+   A client MUST provide a "psk_key_exchange_modes" extension if it
+   offers a "pre_shared_key" extension.  If clients offer
+   "pre_shared_key" without a "psk_key_exchange_modes" extension,
+   servers MUST abort the handshake.  Servers MUST NOT select a key
+   exchange mode that is not listed by the client.  This extension also
+   restricts the modes for use with PSK resumption.  Servers SHOULD NOT
+   send NewSessionTicket with tickets that are not compatible with the
+   advertised modes; however, if a server does so, the impact will just
+   be that the client's attempts at resumption fail.
+
+   The server MUST NOT send a "psk_key_exchange_modes" extension.
+
+      enum { psk_ke(0), psk_dhe_ke(1), (255) } PskKeyExchangeMode;
+
+      struct {
+          PskKeyExchangeMode ke_modes<1..255>;
+      } PskKeyExchangeModes;
+
+   psk_ke:  PSK-only key establishment.  In this mode, the server
+      MUST NOT supply a "key_share" value.
+
+   psk_dhe_ke:  PSK with (EC)DHE key establishment.  In this mode, the
+      client and server MUST supply "key_share" values as described in
+      Section 4.2.8.
+
+   Any future values that are allocated must ensure that the transmitted
+   protocol messages unambiguously identify which mode was selected by
+   the server; at present, this is indicated by the presence of the
+   "key_share" in the ServerHello.
+
+4.2.10.  Early Data Indication
+
+   When a PSK is used and early data is allowed for that PSK, the client
+   can send Application Data in its first flight of messages.  If the
+   client opts to do so, it MUST supply both the "pre_shared_key" and
+   "early_data" extensions.
+
+   The "extension_data" field of this extension contains an
+   "EarlyDataIndication" value.
+
+
+Rescorla                     Standards Track                   [Page 52]
+
+
+      struct {} Empty;
+
+      struct {
+          select (Handshake.msg_type) {
+              case new_session_ticket:   uint32 max_early_data_size;
+              case client_hello:         Empty;
+              case encrypted_extensions: Empty;
+          };
+      } EarlyDataIndication;
+
+   See Section 4.6.1 for details regarding the use of the
+   max_early_data_size field.
+
+   The parameters for the 0-RTT data (version, symmetric cipher suite,
+   Application-Layer Protocol Negotiation (ALPN) [RFC7301] protocol,
+   etc.) are those associated with the PSK in use.  For externally
+   provisioned PSKs, the associated values are those provisioned along
+   with the key.  For PSKs established via a NewSessionTicket message,
+   the associated values are those which were negotiated in the
+   connection which established the PSK.  The PSK used to encrypt the
+   early data MUST be the first PSK listed in the client's
+   "pre_shared_key" extension.
+
+   For PSKs provisioned via NewSessionTicket, a server MUST validate
+   that the ticket age for the selected PSK identity (computed by
+   subtracting ticket_age_add from PskIdentity.obfuscated_ticket_age
+   modulo 2^32) is within a small tolerance of the time since the ticket
+   was issued (see Section 8).  If it is not, the server SHOULD proceed
+   with the handshake but reject 0-RTT, and SHOULD NOT take any other
+   action that assumes that this ClientHello is fresh.
+
+   0-RTT messages sent in the first flight have the same (encrypted)
+   content types as messages of the same type sent in other flights
+   (handshake and application_data) but are protected under different
+   keys.  After receiving the server's Finished message, if the server
+   has accepted early data, an EndOfEarlyData message will be sent to
+   indicate the key change.  This message will be encrypted with the
+   0-RTT traffic keys.
+
+
+Rescorla                     Standards Track                   [Page 53]
+
+
+   A server which receives an "early_data" extension MUST behave in one
+   of three ways:
+
+   -  Ignore the extension and return a regular 1-RTT response.  The
+      server then skips past early data by attempting to deprotect
+      received records using the handshake traffic key, discarding
+      records which fail deprotection (up to the configured
+      max_early_data_size).  Once a record is deprotected successfully,
+      it is treated as the start of the client's second flight and the
+      server proceeds as with an ordinary 1-RTT handshake.
+
+   -  Request that the client send another ClientHello by responding
+      with a HelloRetryRequest.  A client MUST NOT include the
+      "early_data" extension in its followup ClientHello.  The server
+      then ignores early data by skipping all records with an external
+      content type of "application_data" (indicating that they are
+      encrypted), up to the configured max_early_data_size.
+
+   -  Return its own "early_data" extension in EncryptedExtensions,
+      indicating that it intends to process the early data.  It is not
+      possible for the server to accept only a subset of the early data
+      messages.  Even though the server sends a message accepting early
+      data, the actual early data itself may already be in flight by the
+      time the server generates this message.
+
+   In order to accept early data, the server MUST have accepted a PSK
+   cipher suite and selected the first key offered in the client's
+   "pre_shared_key" extension.  In addition, it MUST verify that the
+   following values are the same as those associated with the
+   selected PSK:
+
+   -  The TLS version number
+
+   -  The selected cipher suite
+
+   -  The selected ALPN [RFC7301] protocol, if any
+
+   These requirements are a superset of those needed to perform a 1-RTT
+   handshake using the PSK in question.  For externally established
+   PSKs, the associated values are those provisioned along with the key.
+   For PSKs established via a NewSessionTicket message, the associated
+   values are those negotiated in the connection during which the ticket
+   was established.
+
+   Future extensions MUST define their interaction with 0-RTT.
+
+
+Rescorla                     Standards Track                   [Page 54]
+
+
+   If any of these checks fail, the server MUST NOT respond with the
+   extension and must discard all the first-flight data using one of the
+   first two mechanisms listed above (thus falling back to 1-RTT or
+   2-RTT).  If the client attempts a 0-RTT handshake but the server
+   rejects it, the server will generally not have the 0-RTT record
+   protection keys and must instead use trial decryption (either with
+   the 1-RTT handshake keys or by looking for a cleartext ClientHello in
+   the case of a HelloRetryRequest) to find the first non-0-RTT message.
+
+   If the server chooses to accept the "early_data" extension, then it
+   MUST comply with the same error-handling requirements specified for
+   all records when processing early data records.  Specifically, if the
+   server fails to decrypt a 0-RTT record following an accepted
+   "early_data" extension, it MUST terminate the connection with a
+   "bad_record_mac" alert as per Section 5.2.
+
+   If the server rejects the "early_data" extension, the client
+   application MAY opt to retransmit the Application Data previously
+   sent in early data once the handshake has been completed.  Note that
+   automatic retransmission of early data could result in incorrect
+   assumptions regarding the status of the connection.  For instance,
+   when the negotiated connection selects a different ALPN protocol from
+   what was used for the early data, an application might need to
+   construct different messages.  Similarly, if early data assumes
+   anything about the connection state, it might be sent in error after
+   the handshake completes.
+
+   A TLS implementation SHOULD NOT automatically resend early data;
+   applications are in a better position to decide when retransmission
+   is appropriate.  A TLS implementation MUST NOT automatically resend
+   early data unless the negotiated connection selects the same ALPN
+   protocol.
+
+4.2.11.  Pre-Shared Key Extension
+
+   The "pre_shared_key" extension is used to negotiate the identity of
+   the pre-shared key to be used with a given handshake in association
+   with PSK key establishment.
+
+
+Rescorla                     Standards Track                   [Page 55]
+
+
+   The "extension_data" field of this extension contains a
+   "PreSharedKeyExtension" value:
+
+      struct {
+          opaque identity<1..2^16-1>;
+          uint32 obfuscated_ticket_age;
+      } PskIdentity;
+
+      opaque PskBinderEntry<32..255>;
+
+      struct {
+          PskIdentity identities<7..2^16-1>;
+          PskBinderEntry binders<33..2^16-1>;
+      } OfferedPsks;
+
+      struct {
+          select (Handshake.msg_type) {
+              case client_hello: OfferedPsks;
+              case server_hello: uint16 selected_identity;
+          };
+      } PreSharedKeyExtension;
+
+   identity:  A label for a key.  For instance, a ticket (as defined in
+      Appendix B.3.4) or a label for a pre-shared key established
+      externally.
+
+   obfuscated_ticket_age:  An obfuscated version of the age of the key.
+      Section 4.2.11.1 describes how to form this value for identities
+      established via the NewSessionTicket message.  For identities
+      established externally, an obfuscated_ticket_age of 0 SHOULD be
+      used, and servers MUST ignore the value.
+
+   identities:  A list of the identities that the client is willing to
+      negotiate with the server.  If sent alongside the "early_data"
+      extension (see Section 4.2.10), the first identity is the one used
+      for 0-RTT data.
+
+   binders:  A series of HMAC values, one for each value in the
+      identities list and in the same order, computed as described
+      below.
+
+   selected_identity:  The server's chosen identity expressed as a
+      (0-based) index into the identities in the client's list.
+
+   Each PSK is associated with a single Hash algorithm.  For PSKs
+   established via the ticket mechanism (Section 4.6.1), this is the KDF
+   Hash algorithm on the connection where the ticket was established.
+   For externally established PSKs, the Hash algorithm MUST be set when
+
+
+Rescorla                     Standards Track                   [Page 56]
+
+
+   the PSK is established or default to SHA-256 if no such algorithm is
+   defined.  The server MUST ensure that it selects a compatible PSK
+   (if any) and cipher suite.
+
+   In TLS versions prior to TLS 1.3, the Server Name Identification
+   (SNI) value was intended to be associated with the session (Section 3
+   of [RFC6066]), with the server being required to enforce that the SNI
+   value associated with the session matches the one specified in the
+   resumption handshake.  However, in reality the implementations were
+   not consistent on which of two supplied SNI values they would use,
+   leading to the consistency requirement being de facto enforced by the
+   clients.  In TLS 1.3, the SNI value is always explicitly specified in
+   the resumption handshake, and there is no need for the server to
+   associate an SNI value with the ticket.  Clients, however, SHOULD
+   store the SNI with the PSK to fulfill the requirements of
+   Section 4.6.1.
+
+   Implementor's note: When session resumption is the primary use case
+   of PSKs, the most straightforward way to implement the PSK/cipher
+   suite matching requirements is to negotiate the cipher suite first
+   and then exclude any incompatible PSKs.  Any unknown PSKs (e.g., ones
+   not in the PSK database or encrypted with an unknown key) SHOULD
+   simply be ignored.  If no acceptable PSKs are found, the server
+   SHOULD perform a non-PSK handshake if possible.  If backward
+   compatibility is important, client-provided, externally established
+   PSKs SHOULD influence cipher suite selection.
+
+   Prior to accepting PSK key establishment, the server MUST validate
+   the corresponding binder value (see Section 4.2.11.2 below).  If this
+   value is not present or does not validate, the server MUST abort the
+   handshake.  Servers SHOULD NOT attempt to validate multiple binders;
+   rather, they SHOULD select a single PSK and validate solely the
+   binder that corresponds to that PSK.  See Section 8.2 and
+   Appendix E.6 for the security rationale for this requirement.  In
+   order to accept PSK key establishment, the server sends a
+   "pre_shared_key" extension indicating the selected identity.
+
+   Clients MUST verify that the server's selected_identity is within the
+   range supplied by the client, that the server selected a cipher suite
+   indicating a Hash associated with the PSK, and that a server
+   "key_share" extension is present if required by the ClientHello
+   "psk_key_exchange_modes" extension.  If these values are not
+   consistent, the client MUST abort the handshake with an
+   "illegal_parameter" alert.
+
+
+Rescorla                     Standards Track                   [Page 57]
+
+
+   If the server supplies an "early_data" extension, the client MUST
