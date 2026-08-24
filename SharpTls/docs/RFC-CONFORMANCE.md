@@ -3,7 +3,7 @@
 Status: **IN PROGRESS.**
 
 - Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (15 of 153).
+- Sampled, not exhaustive: RFC 9114 (17 of 116 client MUSTs), RFC 9000 (15 of 153).
 - Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
 - Constants only: RFC 9002. Untouched: RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
@@ -183,7 +183,7 @@ Still unaudited within RFC 9001: CRYPTO stream ordering and the §5.6 0-RTT key 
 ### RFC 9114 (HTTP/3) — spot-checked, NOT exhaustive
 
 The ten pinned RFC 9114 extracts contain **139 MUST occurrences, 116 of them client-relevant**
-after removing server-only sentences. **14 were checked directly.** The rest are unaudited. This
+after removing server-only sentences. **17 were checked directly.** The rest are unaudited. This
 section is a high-confidence sample, not a clean bill, and the ratio is stated so it cannot be
 mistaken for one.
 
@@ -203,6 +203,9 @@ mistaken for one.
 | 7.2.8 | Reserved frame types / settings ignored on receive | `Quic/TlsQuicHttp3Frames.cs:45`, `:93` | COMPLIANT |
 | 10.8 | Frame length MUST exactly match its contents | `Quic/TlsQuicHttp3Frames.cs:324` | COMPLIANT |
 | 4.1 | After sending a request a client MUST close the stream for sending | `Http3Connection.cs:450` | COMPLIANT |
+| 6.2 | "Recipients of unknown stream types MUST either abort reading ... or discard incoming data" | `Quic/TlsQuicHttp3Streams.cs:394`, `:420` | COMPLIANT, both legal answers implemented |
+| 6.2.1 | Closing a critical stream is H3_CLOSED_CRITICAL_STREAM | `Quic/TlsQuicHttp3Streams.cs:481` | COMPLIANT |
+| 4.3.1 | The request pseudo-header fields | `Quic/TlsQuicHttp3Request.cs:477-480` | COMPLIANT |
 
 **Inbound validation is present, which was the thing worth checking.** A client that validates
 only what it sends is the easy mistake: `ValidateReceivedField` applies RFC 9114 §4.2's rules to
@@ -370,7 +373,7 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
   keys.
 - RFC 9002 — the Appendix A/B constants are verified above. The loss-detection and
   congestion-control algorithms that use them are unchecked.
-- RFC 9114 — 102 of 116 client-relevant MUSTs remain unchecked. The 14 sampled were all
+- RFC 9114 — 99 of 116 client-relevant MUSTs remain unchecked. The 17 sampled were all
   compliant, which raises confidence but proves nothing about the rest. §6 stream mapping, §7
   per-frame rules and §8 error codes are the largest untouched blocks.
 - RFC 9204 — surveyed structurally only. No MUST was checked: not the static table indices, the
@@ -386,15 +389,15 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 57 — every row in the verdict tables above, counted directly rather than
-estimated (54 + 1 + 2). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
-report is NOT, because it is an open question rather than a verdict. Confirmed: 54 compliant, 1 defect (already fixed), 2 MISSING (key
+Findings raised: 60 — every row in the verdict tables above, counted directly rather than
+estimated (57 + 1 + 2). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
+report is NOT, because it is an open question rather than a verdict. Confirmed: 57 compliant, 1 defect (already fixed), 2 MISSING (key
 update, AEAD packet counting). No UNRESOLVED remain: the one that existed was settled by
 reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
 Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Five near-misses against 54 confirmations is the
+as absent while the code implemented it. Five near-misses against 57 confirmations is the
 number a reader should weigh when deciding how much to trust a MISSING verdict here.
 
 The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
