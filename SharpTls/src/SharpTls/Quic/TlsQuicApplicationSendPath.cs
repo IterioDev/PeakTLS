@@ -582,6 +582,12 @@ internal sealed partial class TlsQuicConnection
         // the pacer's credit on an empty pass and, worse, would arm a pacing deadline for a
         // datagram that does not exist. It also keeps every ACK-only pass off this path
         // entirely, which is s7.7 lines 353-355 and B.2 lines 507-509 - see the block above.
+        // RFC 9000 s19.16's frames, moved from the connection-ID ledger onto the queue this
+        // gate then drains. Here rather than in the frame handler that owed them, because the
+        // queue belongs to the stream set and the stream set does not exist until the peer's
+        // transport parameters have arrived.
+        FlushRetireConnectionIds();
+
         if (_streams is { } streams && streams.HasPendingFrames && SendGateAdmits(now))
         {
             // RFC 9000 s14.2: "All QUIC packets that are not sent in a PMTU probe SHOULD be
@@ -703,6 +709,18 @@ internal sealed partial class TlsQuicConnection
     private bool ProtectOneMoreApplicationPacket()
     {
         ApplicationPacketsProtectedWithCurrentKeys++;
+
+        // RFC 9001 s6.6 BINDS THE LIMIT TO SENDING, AND THIS IS THE SENDING EDGE. The check
+        // used to run once per RECEIVE - TlsQuicConnection.ApplyKeyUpdateIfNeeded, called from
+        // the packet-receive path - which is the wrong edge for a rule that reads "endpoints
+        // MUST count the number of encrypted packets for each set of keys" and caps what may be
+        // ENCRYPTED. A send burst between two receives could pass the confidentiality limit
+        // with no check in between. Unreachable in practice at 2^23 packets, but a guard on the
+        // wrong edge is a guard that is right by luck.
+        //
+        // AFTER THE INCREMENT AND BEFORE THE PHASE IS READ, so the update this may perform is
+        // the one whose phase this packet then carries.
+        ApplyKeyUpdateIfNeeded();
         return _keys.WriteKeyPhase;
     }
 }

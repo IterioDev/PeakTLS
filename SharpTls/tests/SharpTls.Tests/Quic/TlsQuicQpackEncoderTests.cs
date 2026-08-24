@@ -43,7 +43,7 @@ public sealed class TlsQuicQpackEncoderTests
             Encoding.ASCII.GetBytes(value),
             out _));
 
-        Assert.Equal(expected, Encode([(name, value)], huffman: false, preferNameReference: true));
+        Assert.Equal(expected, Encode([(name, value)], huffman: TlsQuicQpackHuffmanPolicy.Never, preferNameReference: true));
     }
 
     // The brief this task arrived with called B.1 "one 16-byte vector". It is fifteen:
@@ -83,7 +83,7 @@ public sealed class TlsQuicQpackEncoderTests
     [Fact]
     public void AFullMatchOnNameAndValueEmitsAnIndexedFieldLine()
     {
-        Assert.Equal(new byte[] { 0x00, 0x00, 0xC1 }, Encode([(":path", "/")], false, true));
+        Assert.Equal(new byte[] { 0x00, 0x00, 0xC1 }, Encode([(":path", "/")], TlsQuicQpackHuffmanPolicy.Never, true));
     }
 
     // Still s4.5.2, but at a row whose index needs the continuation chain: 62 fits in six
@@ -105,7 +105,7 @@ public sealed class TlsQuicQpackEncoderTests
     public void ANameOnlyMatchEmitsALiteralWithNameReference()
     {
         byte[] expected = [0x00, 0x00, 0x50, 0x0B, .. Encoding.ASCII.GetBytes("example.com")];
-        Assert.Equal(expected, Encode([(":authority", "example.com")], false, true));
+        Assert.Equal(expected, Encode([(":authority", "example.com")], TlsQuicQpackHuffmanPolicy.Never, true));
     }
 
     // s4.5.6 Figure 17: `0 0 1 N H NameLen(3+)` then the name, then `H ValueLength(7+)` then
@@ -121,7 +121,7 @@ public sealed class TlsQuicQpackEncoderTests
             0x27, 0x01, .. Encoding.ASCII.GetBytes("x-custom"),
             0x02, .. Encoding.ASCII.GetBytes("ab"),
         ];
-        Assert.Equal(expected, Encode([("x-custom", "ab")], false, true));
+        Assert.Equal(expected, Encode([("x-custom", "ab")], TlsQuicQpackHuffmanPolicy.Never, true));
     }
 
     // A name short enough to sit inside the 3-bit prefix, so the continuation octet in the
@@ -131,7 +131,7 @@ public sealed class TlsQuicQpackEncoderTests
     public void AShortLiteralNameFitsInsideTheThreeBitPrefix()
     {
         byte[] expected = [0x00, 0x00, 0x23, .. Encoding.ASCII.GetBytes("a-b"), 0x01, (byte)'v'];
-        Assert.Equal(expected, Encode([("a-b", "v")], false, true));
+        Assert.Equal(expected, Encode([("a-b", "v")], TlsQuicQpackHuffmanPolicy.Never, true));
     }
 
     // The s4.5.4-versus-s4.5.6 knob the plan's task C1 owns. Same field, both settings, and
@@ -139,8 +139,8 @@ public sealed class TlsQuicQpackEncoderTests
     [Fact]
     public void PreferNameReferenceSelectsBetweenSection454AndSection456()
     {
-        byte[] withReference = Encode([(":authority", "example.com")], false, preferNameReference: true);
-        byte[] withoutReference = Encode([(":authority", "example.com")], false, preferNameReference: false);
+        byte[] withReference = Encode([(":authority", "example.com")], TlsQuicQpackHuffmanPolicy.Never, preferNameReference: true);
+        byte[] withoutReference = Encode([(":authority", "example.com")], TlsQuicQpackHuffmanPolicy.Never, preferNameReference: false);
 
         Assert.NotEqual(withReference, withoutReference);
         Assert.Equal(0x50, withReference[2]);          // s4.5.4, '01' pattern with T = 1
@@ -148,7 +148,7 @@ public sealed class TlsQuicQpackEncoderTests
 
         // A full name-and-value match is s4.5.2 EITHER WAY - the knob only reaches the
         // name-reference decision, and this pins that it does not leak further.
-        Assert.Equal(Encode([(":path", "/")], false, true), Encode([(":path", "/")], false, false));
+        Assert.Equal(Encode([(":path", "/")], TlsQuicQpackHuffmanPolicy.Never, true), Encode([(":path", "/")], TlsQuicQpackHuffmanPolicy.Never, false));
     }
 
     // The Huffman flag, same header encoded both ways in one test. `example.com` Huffman-codes
@@ -157,8 +157,8 @@ public sealed class TlsQuicQpackEncoderTests
     [Fact]
     public void TheHuffmanFlagIsAParameterAndChangesTheBytes()
     {
-        byte[] plain = Encode([(":authority", "example.com")], huffman: false, preferNameReference: true);
-        byte[] coded = Encode([(":authority", "example.com")], huffman: true, preferNameReference: true);
+        byte[] plain = Encode([(":authority", "example.com")], huffman: TlsQuicQpackHuffmanPolicy.Never, preferNameReference: true);
+        byte[] coded = Encode([(":authority", "example.com")], huffman: TlsQuicQpackHuffmanPolicy.Always, preferNameReference: true);
 
         Assert.NotEqual(plain, coded);
         Assert.Equal(0x0B, plain[3]);
@@ -178,16 +178,16 @@ public sealed class TlsQuicQpackEncoderTests
         // And it is UNCONDITIONAL, not "when it comes out shorter": `zz` Huffman-codes to no
         // fewer octets than it started with, and the flag still applies. A size heuristic
         // would make the wire bytes depend on the header value.
-        byte[] longer = Encode([("x-a", "zz")], huffman: true, preferNameReference: true);
+        byte[] longer = Encode([("x-a", "zz")], huffman: TlsQuicQpackHuffmanPolicy.Always, preferNameReference: true);
         Assert.Equal(0x08, longer[2] & 0x08);
     }
 
     // Both Huffman settings decode back to the same field, through task C8's decoder rather
     // than back through the encoder.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void BothHuffmanSettingsReadBackToTheSameField(bool huffman)
+    [InlineData(TlsQuicQpackHuffmanPolicy.Never)]
+    [InlineData(TlsQuicQpackHuffmanPolicy.Always)]
+    public void BothHuffmanSettingsReadBackToTheSameField(TlsQuicQpackHuffmanPolicy huffman)
     {
         byte[] encoded = Encode([(":authority", "example.com")], huffman, true);
         Assert.Equal([(":authority", "example.com")], Decode(encoded));
@@ -199,15 +199,15 @@ public sealed class TlsQuicQpackEncoderTests
     [Fact]
     public void AnEmptyValueIsAValueAndMatchesTheEmptyValuedRow()
     {
-        Assert.Equal(new byte[] { 0x00, 0x00, 0xC0 }, Encode([(":authority", "")], false, true));
+        Assert.Equal(new byte[] { 0x00, 0x00, 0xC0 }, Encode([(":authority", "")], TlsQuicQpackHuffmanPolicy.Never, true));
 
         // The contrast: a NON-empty value at the same name falls through to s4.5.4, so the
         // empty case above is not just "everything at :authority is 0xC0".
-        Assert.Equal(0x50, Encode([(":authority", "x")], false, true)[2]);
+        Assert.Equal(0x50, Encode([(":authority", "x")], TlsQuicQpackHuffmanPolicy.Never, true)[2]);
 
         // And a zero-length literal value, where the name is not in the table at all, is a
         // declared length of zero rather than an omitted string.
-        byte[] literal = Encode([("x-a", "")], false, true);
+        byte[] literal = Encode([("x-a", "")], TlsQuicQpackHuffmanPolicy.Never, true);
         Assert.Equal([0x00, 0x00, 0x23, (byte)'x', (byte)'-', (byte)'a', 0x00], literal);
     }
 
@@ -231,7 +231,14 @@ public sealed class TlsQuicQpackEncoderTests
             {
                 foreach (bool prefer in new[] { true, false })
                 {
-                    foreach (bool huffman in new[] { true, false })
+                    // All three, not two: ShorterOfTheTwo is the shipped default and the
+                    // only one of the three whose output depends on the string.
+                    foreach (var huffman in new[]
+                    {
+                        TlsQuicQpackHuffmanPolicy.Always,
+                        TlsQuicQpackHuffmanPolicy.Never,
+                        TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo,
+                    })
                     {
                         AssertStaticShape(Encode([(name, value)], huffman, prefer));
                         cases++;
@@ -242,13 +249,15 @@ public sealed class TlsQuicQpackEncoderTests
 
         foreach (bool prefer in new[] { true, false })
         {
-            AssertStaticShape(Encode([("x", "y")], false, prefer));
+            AssertStaticShape(Encode([("x", "y")], TlsQuicQpackHuffmanPolicy.Never, prefer));
             cases++;
         }
 
-        // 99 rows x 2 values x 2 knobs x 2 knobs, plus the two no-match cases.
-        Assert.Equal((99 * 2 * 2 * 2) + 2, cases);
-        Assert.Equal(794, cases);
+        // 99 rows x 2 values x 3 Huffman policies x 2 name-reference knobs, plus the two
+        // no-match cases. THE MIDDLE 3 WAS A 2: TlsQuicQpackHuffmanPolicy replaced a bool, and
+        // ShorterOfTheTwo is a third dimension value rather than an alias for one of the
+        // others - it is the only one of the three whose output depends on the string.
+        Assert.Equal((99 * 2 * 3 * 2) + 2, cases);
     }
 
     // Every static row survives a trip out through the encoder and back through the decoder,
@@ -256,11 +265,11 @@ public sealed class TlsQuicQpackEncoderTests
     // proves nothing about the table's contents - see TlsQuicQpackStaticTableTests for that -
     // but it does prove the representations agree end to end on all 99 rows.
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public void EveryStaticRowRoundTripsThroughTheDecoder(bool huffman, bool preferNameReference)
+    [InlineData(TlsQuicQpackHuffmanPolicy.Never, false)]
+    [InlineData(TlsQuicQpackHuffmanPolicy.Never, true)]
+    [InlineData(TlsQuicQpackHuffmanPolicy.Always, false)]
+    [InlineData(TlsQuicQpackHuffmanPolicy.Always, true)]
+    public void EveryStaticRowRoundTripsThroughTheDecoder(TlsQuicQpackHuffmanPolicy huffman, bool preferNameReference)
     {
         for (int i = 0; i < TlsQuicQpackStaticTable.Count; i++)
         {
@@ -283,7 +292,7 @@ public sealed class TlsQuicQpackEncoderTests
         foreach (string value in new[] { "", "a", "example.com", new string('z', 200) })
         {
             byte[] data = Encoding.ASCII.GetBytes(value);
-            byte[] viaEncoder = Encode([(":path", value)], huffman: false, preferNameReference: true);
+            byte[] viaEncoder = Encode([(":path", value)], huffman: TlsQuicQpackHuffmanPolicy.Never, preferNameReference: true);
             Assert.Equal(0x51, viaEncoder[2]);
 
             byte[] viaPrimitive = new byte[viaEncoder.Length];
@@ -310,7 +319,7 @@ public sealed class TlsQuicQpackEncoderTests
     [InlineData("x-custom", "ab")]
     public void ADestinationOneOctetShortFailsWithoutWriting(string name, string value)
     {
-        byte[] full = Encode([(name, value)], false, true);
+        byte[] full = Encode([(name, value)], TlsQuicQpackHuffmanPolicy.Never, true);
         int lineLength = full.Length - TlsQuicQpackEncoder.FieldSectionPrefixLength;
 
         for (int size = 0; size < lineLength; size++)
@@ -319,7 +328,7 @@ public sealed class TlsQuicQpackEncoderTests
             Assert.False(TlsQuicQpackEncoder.TryEncodeFieldLine(
                 Encoding.ASCII.GetBytes(name),
                 Encoding.ASCII.GetBytes(value),
-                huffman: false,
+                huffman: TlsQuicQpackHuffmanPolicy.Never,
                 preferNameReference: true,
                 destination,
                 out int written));
@@ -330,7 +339,7 @@ public sealed class TlsQuicQpackEncoderTests
         Assert.True(TlsQuicQpackEncoder.TryEncodeFieldLine(
             Encoding.ASCII.GetBytes(name),
             Encoding.ASCII.GetBytes(value),
-            huffman: false,
+            huffman: TlsQuicQpackHuffmanPolicy.Never,
             preferNameReference: true,
             exact,
             out int exactWritten));
@@ -375,10 +384,10 @@ public sealed class TlsQuicQpackEncoderTests
             out int found));
         Assert.Equal(index, found);
 
-        return Encode([(name, value)], false, true)[TlsQuicQpackEncoder.FieldSectionPrefixLength..];
+        return Encode([(name, value)], TlsQuicQpackHuffmanPolicy.Never, true)[TlsQuicQpackEncoder.FieldSectionPrefixLength..];
     }
 
-    internal static byte[] Encode((string Name, string Value)[] fields, bool huffman, bool preferNameReference)
+    internal static byte[] Encode((string Name, string Value)[] fields, TlsQuicQpackHuffmanPolicy huffman, bool preferNameReference)
     {
         byte[] destination = new byte[8192];
         Assert.True(TlsQuicQpackEncoder.TryEncodeFieldSectionPrefix(destination, out int total));

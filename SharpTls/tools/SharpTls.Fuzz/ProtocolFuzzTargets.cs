@@ -3629,8 +3629,8 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         // Encoder output, both of s4.1.2's string encodings. s4.5's static arm
         // is the one a corpus of noise can already reach, so these are here for
         // the Huffman half rather than for the representations.
-        seeds.Add(BuildQpackEncodedSection(huffman: false));
-        seeds.Add(BuildQpackEncodedSection(huffman: true));
+        seeds.Add(BuildQpackEncodedSection(huffman: TlsQuicQpackHuffmanPolicy.Never));
+        seeds.Add(BuildQpackEncodedSection(huffman: TlsQuicQpackHuffmanPolicy.Always));
 
         // One seed per s4.5 representation, built the way the axis 2 probes are,
         // so a mutation walk starts adjacent to every arm and not only to the
@@ -3712,7 +3712,7 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         seeds.Add(bomb);
     }
 
-    private static byte[] BuildQpackEncodedSection(bool huffman)
+    private static byte[] BuildQpackEncodedSection(TlsQuicQpackHuffmanPolicy huffman)
     {
         var buffer = new byte[512];
         if (!TlsQuicQpackEncoder.TryEncodeFieldSectionPrefix(buffer, out int written))
@@ -4316,7 +4316,7 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         var complete = new List<byte>();
         TlsQuicHttp3Frames.Write(
             complete, (ulong)TlsQuicHttp3FrameType.Headers,
-            BuildHttp3HeaderSection("200", huffman: false));
+            BuildHttp3HeaderSection("200", huffman: TlsQuicQpackHuffmanPolicy.Never));
         TlsQuicHttp3Frames.Write(
             complete, (ulong)TlsQuicHttp3FrameType.Data, "hello world"u8);
         TlsQuicHttp3Frames.Write(
@@ -4326,10 +4326,10 @@ internal sealed class ProtocolFuzzTargets : IDisposable
         var interim = new List<byte>();
         TlsQuicHttp3Frames.Write(
             interim, (ulong)TlsQuicHttp3FrameType.Headers,
-            BuildHttp3HeaderSection("103", huffman: true));
+            BuildHttp3HeaderSection("103", huffman: TlsQuicQpackHuffmanPolicy.Always));
         TlsQuicHttp3Frames.Write(
             interim, (ulong)TlsQuicHttp3FrameType.Headers,
-            BuildHttp3HeaderSection("200", huffman: true));
+            BuildHttp3HeaderSection("200", huffman: TlsQuicQpackHuffmanPolicy.Always));
         TlsQuicHttp3Frames.Write(
             interim, (ulong)TlsQuicHttp3FrameType.Data, "second"u8);
 
@@ -4396,7 +4396,7 @@ internal sealed class ProtocolFuzzTargets : IDisposable
 
         var pushPromise = new List<byte>();
         var promise = new List<byte> { 0x00 };
-        promise.AddRange(BuildHttp3HeaderSection("200", huffman: false));
+        promise.AddRange(BuildHttp3HeaderSection("200", huffman: TlsQuicQpackHuffmanPolicy.Never));
         TlsQuicHttp3Frames.Write(
             pushPromise, (ulong)TlsQuicHttp3FrameType.PushPromise, CollectionsToSpan(promise));
 
@@ -4430,7 +4430,8 @@ internal sealed class ProtocolFuzzTargets : IDisposable
 
     private static ReadOnlySpan<byte> CollectionsToSpan(List<byte> value) => value.ToArray();
 
-    private static byte[] BuildHttp3HeaderSection(string status, bool huffman)
+    private static byte[] BuildHttp3HeaderSection(
+        string status, TlsQuicQpackHuffmanPolicy huffman)
     {
         var buffer = new byte[512];
         if (!TlsQuicQpackEncoder.TryEncodeFieldSectionPrefix(buffer, out int written))
@@ -4453,12 +4454,15 @@ internal sealed class ProtocolFuzzTargets : IDisposable
             throw new InvalidOperationException("The QPACK field section prefix did not encode.");
         }
         written += EncodeHttp3Field(
-            "x-trailer"u8, "done"u8, huffman: false, buffer.AsSpan(written));
+            "x-trailer"u8, "done"u8, huffman: TlsQuicQpackHuffmanPolicy.Never, buffer.AsSpan(written));
         return buffer[..written];
     }
 
     private static int EncodeHttp3Field(
-        ReadOnlySpan<byte> name, ReadOnlySpan<byte> value, bool huffman, Span<byte> destination)
+        ReadOnlySpan<byte> name,
+        ReadOnlySpan<byte> value,
+        TlsQuicQpackHuffmanPolicy huffman,
+        Span<byte> destination)
     {
         if (!TlsQuicQpackEncoder.TryEncodeFieldLine(
                 name, value, huffman, preferNameReference: true, destination, out int written))
@@ -4480,7 +4484,7 @@ internal sealed class ProtocolFuzzTargets : IDisposable
             var frame = new List<byte>();
             ReadOnlySpan<byte> payload = frameType switch
             {
-                (ulong)TlsQuicHttp3FrameType.Headers => BuildHttp3HeaderSection("404", false),
+                (ulong)TlsQuicHttp3FrameType.Headers => BuildHttp3HeaderSection("404", TlsQuicQpackHuffmanPolicy.Never),
                 (ulong)TlsQuicHttp3FrameType.Data => "body"u8,
                 (ulong)TlsQuicHttp3FrameType.Settings => [0x06, 0x40, 0x00],
                 (ulong)TlsQuicHttp3FrameType.PushPromise => [0x00, 0x00, 0x00],

@@ -152,7 +152,7 @@ public sealed class TlsHttp3Options
         [.. SpecDefaults.PseudoHeaderOrder.Select(header => (TlsHttp3PseudoHeader)header)];
 
     /// <summary>Gets or sets whether QPACK string literals are Huffman-coded.</summary>
-    public bool QpackHuffmanStringLiterals { get; set; } =
+    public SharpTls.Quic.TlsQuicQpackHuffmanPolicy QpackHuffmanStringLiterals { get; set; } =
         SpecDefaults.QpackHuffmanStringLiterals;
 
     /// <summary>Gets or sets how a QPACK field line names a static-table header.</summary>

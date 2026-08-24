@@ -175,7 +175,7 @@ public sealed class TlsQuicHttp3RequestTests
     {
         var huffman = Encode(CaptureGet(), new TlsQuicHttp3Spec());
         var plain = Encode(
-            CaptureGet(), new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = false });
+            CaptureGet(), new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = TlsQuicQpackHuffmanPolicy.Never });
 
         Assert.NotEqual(huffman, plain);
 
@@ -195,7 +195,7 @@ public sealed class TlsQuicHttp3RequestTests
 
         var plain = Assert.Single(
             ReadFrames(
-                Encode(CaptureGet(), new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = false })));
+                Encode(CaptureGet(), new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = TlsQuicQpackHuffmanPolicy.Never })));
         Assert.True(plain.Payload.AsSpan().IndexOf(authority) >= 0);
 
         var huffman = Assert.Single(ReadFrames(Encode(CaptureGet(), new TlsQuicHttp3Spec())));
@@ -673,7 +673,7 @@ public sealed class TlsQuicHttp3RequestTests
                 ReadFrames(
                     Encode(
                         request,
-                        new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = false })))
+                        new TlsQuicHttp3Spec { QpackHuffmanStringLiterals = TlsQuicQpackHuffmanPolicy.Never })))
                 .Payload);
         Assert.Equal(("cookie", large), lines[^1]);
     }
@@ -2509,7 +2509,7 @@ public sealed class TlsQuicHttp3RequestTests
                 TlsQuicQpackEncoder.TryEncodeFieldLine(
                     Encoding.UTF8.GetBytes(name),
                     Encoding.UTF8.GetBytes(value),
-                    huffman: true,
+                    huffman: TlsQuicQpackHuffmanPolicy.Always,
                     preferNameReference: true,
                     buffer.AsSpan(offset),
                     out int count));

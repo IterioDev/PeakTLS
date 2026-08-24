@@ -2216,7 +2216,7 @@ public sealed partial class TlsQuicConnectionTests
                     && TlsQuicQpackEncoder.TryEncodeFieldLine(
                         Encoding.ASCII.GetBytes(name),
                         Encoding.ASCII.GetBytes(value),
-                        huffman: true,
+                        huffman: TlsQuicQpackHuffmanPolicy.Always,
                         preferNameReference: true,
                         span[written..],
                         out var count))
@@ -2247,7 +2247,7 @@ public sealed partial class TlsQuicConnectionTests
         Assert.True(TlsQuicQpackEncoder.TryEncodeFieldLine(
             Encoding.ASCII.GetBytes(name),
             Encoding.ASCII.GetBytes(value),
-            huffman: true,
+            huffman: TlsQuicQpackHuffmanPolicy.Always,
             preferNameReference: true,
             destination,
             out var written));
@@ -2904,7 +2904,7 @@ public sealed class TlsQuicHttp3MsQuicLoopbackTests
         var section = new byte[1024];
         Assert.True(TlsQuicQpackEncoder.TryEncodeFieldSectionPrefix(section, out var written));
         Assert.True(TlsQuicQpackEncoder.TryEncodeFieldLine(
-            ":status"u8, "200"u8, huffman: true, preferNameReference: true,
+            ":status"u8, "200"u8, huffman: TlsQuicQpackHuffmanPolicy.Always, preferNameReference: true,
             section.AsSpan(written), out var count));
         written += count;
 

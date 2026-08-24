@@ -609,6 +609,10 @@ T: public enum SharpTls.Quic.TlsQuicProxyError : System.Int32
 T: public sealed class SharpTls.Quic.TlsQuicProxyException : System.IO.IOException, System.Runtime.Serialization.ISerializable
   C: public SharpTls.Quic.TlsQuicProxyException(SharpTls.Quic.TlsQuicProxyError error, System.String message)
   P: public SharpTls.Quic.TlsQuicProxyError Error { get; }
+T: public enum SharpTls.Quic.TlsQuicQpackHuffmanPolicy : System.Int32
+  F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy Always = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.Always
+  F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy Never = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.Never
+  F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy ShorterOfTheTwo = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo
 T: public enum SharpTls.Quic.TlsQuicSecretDirection : System.Int32
   F: public const SharpTls.Quic.TlsQuicSecretDirection Read = SharpTls.Quic.TlsQuicSecretDirection.Read
   F: public const SharpTls.Quic.TlsQuicSecretDirection Write = SharpTls.Quic.TlsQuicSecretDirection.Write

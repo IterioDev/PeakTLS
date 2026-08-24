@@ -99,6 +99,15 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
     // s13.2.1 binds this endpoint to acknowledge 1-RTT packets "within its advertised
     // max_ack_delay", so the number the ACK timer waits and the number on the wire must be the
     // same number, and the profile is where that number is written.
+    // RFC 9000 s18.2's active_connection_id_limit (0x0e) EXACTLY AS THIS CLIENT ADVERTISES IT.
+    // s5.1.1 makes this the number the PEER may not exceed and therefore the number this
+    // endpoint enforces, so reading it from anywhere but the profile would be enforcing a limit
+    // that was never sent - the divergence TlsQuicStreams.cs's block comment forbids.
+    internal ulong? AdvertisedActiveConnectionIdLimit =>
+        _configuration.ClientHello.Spec.QuicTransportParameters
+            ?.Get((ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit)
+            ?.GetVariableInteger();
+
     internal ulong? AdvertisedMaxAckDelay =>
         _configuration.ClientHello.Spec.QuicTransportParameters
             ?.Get((ulong)TlsQuicTransportParameterId.MaxAckDelay)

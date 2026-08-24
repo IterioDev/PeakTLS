@@ -434,7 +434,10 @@ public sealed class TlsQuicHttp3SpecTests
         // the field initialiser happened to be.
         var spec = new TlsQuicHttp3Spec();
 
-        Assert.True(spec.QpackHuffmanStringLiterals);
+        // ShorterOfTheTwo rather than the old `true`: the placeholder moved to the policy
+        // every deployed QPACK encoder implements. See the property's own remarks.
+        Assert.Equal(
+            TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo, spec.QpackHuffmanStringLiterals);
         Assert.Equal(TlsQuicQpackNameMatchPolicy.NameReference, spec.QpackNameMatchPolicy);
         Assert.False(spec.SendReservedFramesOnRequestStreams);
         Assert.Equal(4, spec.PseudoHeaderOrder.Length);
@@ -446,14 +449,14 @@ public sealed class TlsQuicHttp3SpecTests
         // A knob that only ever holds its default is indistinguishable from a constant.
         var spec = new TlsQuicHttp3Spec
         {
-            QpackHuffmanStringLiterals = false,
+            QpackHuffmanStringLiterals = TlsQuicQpackHuffmanPolicy.Never,
             QpackNameMatchPolicy = TlsQuicQpackNameMatchPolicy.LiteralName,
             SendReservedFramesOnRequestStreams = true,
             PseudoHeaderOrder =
                 [TlsQuicHttp3PseudoHeader.Path, TlsQuicHttp3PseudoHeader.Method],
         };
 
-        Assert.False(spec.QpackHuffmanStringLiterals);
+        Assert.Equal(TlsQuicQpackHuffmanPolicy.Never, spec.QpackHuffmanStringLiterals);
         Assert.Equal(TlsQuicQpackNameMatchPolicy.LiteralName, spec.QpackNameMatchPolicy);
         Assert.True(spec.SendReservedFramesOnRequestStreams);
         Assert.Equal(TlsQuicHttp3PseudoHeader.Path, spec.PseudoHeaderOrder[0]);

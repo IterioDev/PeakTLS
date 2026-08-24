@@ -397,9 +397,9 @@ public sealed partial class TlsQuicConnectionTests
     // exactly two string literals - :method GET and :scheme https are full static matches and
     // carry none - so a scan counting lines would report a different denominator.
     [Theory]
-    [InlineData(true, "H set on 2 of 2 string literals")]
-    [InlineData(false, "H set on 0 of 2 string literals")]
-    public void TheHuffmanRowCountsStringLiteralsAndNotFieldLines(bool huffman, string expected)
+    [InlineData(TlsQuicQpackHuffmanPolicy.Always, "H set on 2 of 2 string literals")]
+    [InlineData(TlsQuicQpackHuffmanPolicy.Never, "H set on 0 of 2 string literals")]
+    public void TheHuffmanRowCountsStringLiteralsAndNotFieldLines(TlsQuicQpackHuffmanPolicy huffman, string expected)
     {
         var readout = TlsQuicHttp3FingerprintReadout.Describe(
             RequestOnlyRecording(

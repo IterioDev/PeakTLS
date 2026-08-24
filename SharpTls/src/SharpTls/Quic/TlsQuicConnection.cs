@@ -2125,6 +2125,20 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 ReceiveDatagramFrame(frame, ref protocolFailure);
                                 break;
 
+                            case TlsQuicFrameType.NewConnectionId:
+                                // s19.15, and until this arm existed the frame was parsed in
+                                // full and then dropped into `default:` below. See
+                                // TlsQuicConnectionIds.cs for what that cost.
+                                if (!ReceiveNewConnectionId(
+                                        frame,
+                                        out var connectionIdError,
+                                        out var connectionIdReason))
+                                {
+                                    protocolFailure ??= connectionIdReason;
+                                    ProtocolFailureCode ??= connectionIdError;
+                                }
+                                break;
+
                             case TlsQuicFrameType.RetireConnectionId:
                                 // s19.16, and for this client every path through it ends in
                                 // the same place - but for two different reasons, which is why

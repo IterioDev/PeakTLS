@@ -314,8 +314,14 @@ public sealed class Http3QuicOptionsTests
     {
         var options = new TlsSessionOptions();
         var baseline = new TlsQuicHttp3Spec();
-        options.Http3.QpackHuffmanStringLiterals =
-            flipped != baseline.QpackHuffmanStringLiterals;
+        // Three-valued now, so "flipped" picks a member that is not the default rather than
+        // negating a bool. Always and Never are both away from the ShorterOfTheTwo default,
+        // and using both keeps the theory's two rows genuinely distinct.
+        var huffman = flipped
+            ? TlsQuicQpackHuffmanPolicy.Always
+            : TlsQuicQpackHuffmanPolicy.Never;
+        Assert.NotEqual(baseline.QpackHuffmanStringLiterals, huffman);
+        options.Http3.QpackHuffmanStringLiterals = huffman;
         options.Http3.QpackNameMatchPolicy = flipped
             ? TlsQpackNameMatchPolicy.LiteralName
             : TlsQpackNameMatchPolicy.NameReference;
@@ -324,9 +330,7 @@ public sealed class Http3QuicOptionsTests
             [.. options.Http3.UnidirectionalStreamOpenOrder.Reverse()];
 
         var spec = options.Snapshot().Quic.Http3Spec;
-        Assert.Equal(
-            flipped != baseline.QpackHuffmanStringLiterals,
-            spec.QpackHuffmanStringLiterals);
+        Assert.Equal(huffman, spec.QpackHuffmanStringLiterals);
         Assert.Equal(
             flipped ? TlsQuicQpackNameMatchPolicy.LiteralName
                 : TlsQuicQpackNameMatchPolicy.NameReference,

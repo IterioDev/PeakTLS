@@ -180,7 +180,7 @@ internal static class TlsQuicQpackEncoder
     internal static bool TryEncodeFieldLine(
         ReadOnlySpan<byte> name,
         ReadOnlySpan<byte> value,
-        bool huffman,
+        TlsQuicQpackHuffmanPolicy huffman,
         bool preferNameReference,
         Span<byte> destination,
         out int written)
@@ -251,12 +251,28 @@ internal static class TlsQuicQpackEncoder
         ReadOnlySpan<byte> data,
         int prefixBits,
         byte precedingBits,
-        bool huffman,
+        TlsQuicQpackHuffmanPolicy huffman,
         Span<byte> destination,
         out int written)
     {
         written = 0;
-        if (!huffman)
+
+        // THE LENGTH IS COMPUTED BEFORE THE DECISION, because under ShorterOfTheTwo it IS the
+        // decision. GetEncodedLength walks the string without emitting anything, so the cost of
+        // asking is one pass over bytes that are about to be walked again either way.
+        int length = TlsQuicQpackHuffman.GetEncodedLength(data);
+
+        // s4.1.2 leaves the choice to the encoder and every deployed one resolves it the same
+        // way: strictly shorter wins, ties go to the literal. An empty string takes the literal
+        // branch here too - 0 < 0 is false - which is what nghttp2 emits for one.
+        var useHuffman = huffman switch
+        {
+            TlsQuicQpackHuffmanPolicy.Always => true,
+            TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo => length < data.Length,
+            _ => false,
+        };
+
+        if (!useHuffman)
         {
             return TlsQuicQpackPrimitives.TryEncodeStringLiteral(
                 data,
@@ -266,8 +282,6 @@ internal static class TlsQuicQpackEncoder
                 destination,
                 out written);
         }
-
-        int length = TlsQuicQpackHuffman.GetEncodedLength(data);
 
         // H is the top bit of the N-bit window, so it rides in with `precedingBits` and the
         // length integer gets N-1 bits - the same split TryEncodeStringLiteral uses.

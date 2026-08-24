@@ -42,6 +42,36 @@ public enum TlsQuicEndpointRole
     Server,
 }
 
+/// <summary>When the QPACK encoder Huffman-codes a string literal.</summary>
+/// <remarks>
+/// <para>RFC 9204 section 4.1.2's H bit is per string, and the choice is observable: two
+/// encoders given the same header list produce different bytes. That makes this fingerprint
+/// surface rather than a compression setting.</para>
+/// <para>WHY THE THIRD MEMBER HAD TO EXIST. This was a <see langword="bool"/>, and the two
+/// values it could take are the two policies no real encoder uses. Chrome and nghttp2 both
+/// emit whichever form is SHORTER for each string - the RFC leaves the choice open and every
+/// deployed HPACK/QPACK encoder resolves it the same way - so a library whose purpose is
+/// imitating them could express every policy except theirs. The in-source argument for the
+/// bool was that "a size-dependent choice would make the wire bytes depend on the header value
+/// ... a deterministic flag is reproducible; a heuristic is a leak", and it has it backwards
+/// for this library: the heuristic is the behaviour being replicated, and reproducibility is a
+/// property of a test harness rather than of the wire.</para>
+/// </remarks>
+public enum TlsQuicQpackHuffmanPolicy
+{
+    /// <summary>Never Huffman-code; every string literal goes out as its own octets.</summary>
+    Never,
+
+    /// <summary>Always Huffman-code, even when the coded form is longer.</summary>
+    Always,
+
+    /// <summary>Huffman-code a string only when the coded form is strictly shorter.</summary>
+    /// <remarks>TIES GO TO THE LITERAL, which is what <c>nghttp2</c> and Chromium do: the
+    /// comparison is <c>huffmanLength &lt; data.Length</c>, so a string that codes to exactly
+    /// its own length is emitted uncoded.</remarks>
+    ShorterOfTheTwo,
+}
+
 /// <summary>What this endpoint writes into RFC 9000 section 17.4's latency spin bit.</summary>
 /// <remarks>
 /// <para>EVERY MEMBER IS THE SPIN BIT DISABLED, and all three are conformant. s17.4: "Each

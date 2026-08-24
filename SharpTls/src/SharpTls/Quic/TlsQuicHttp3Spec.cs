@@ -566,16 +566,20 @@ internal sealed class TlsQuicHttp3Spec
         }
     }
 
-    /// <summary>Gets whether the QPACK encoder Huffman-codes the string literals it
+    /// <summary>Gets when the QPACK encoder Huffman-codes the string literals it
     /// emits.</summary>
     /// <remarks>
-    /// <para>PLACEHOLDER DEFAULT of <see langword="true"/>, and the "per string" freedom RFC
-    /// 9204 s4.1.2's H bit gives is deliberately NOT modelled: one flag for the whole
-    /// connection is the smallest thing that expresses the dimension, and a per-string
-    /// predicate would be a policy interface with one implementation. The capture cannot see
-    /// this at all - the fingerprint string carries no QPACK bytes - so the default is a
-    /// declared placeholder for task C12's not-yet-known column, settled only by a packet
-    /// capture.</para>
+    /// <para>STILL A DECLARED PLACEHOLDER, BUT NO LONGER AN UNREALISTIC ONE. The capture cannot
+    /// see this at all - the fingerprint string carries no QPACK bytes - so only a packet
+    /// capture settles it. What changed is which way the placeholder points: this was a
+    /// <see langword="bool"/> defaulting to <see langword="true"/>, and RFC 9204 s4.1.2's H bit
+    /// is per string, so the two values it could take were the two policies no deployed encoder
+    /// uses. Chrome and nghttp2 both emit whichever form is shorter, and
+    /// <see cref="TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo"/> is now the default for that
+    /// reason.</para>
+    /// <para>IT IS NOT A RARE DIFFERENCE. Huffman loses on high-entropy octets - bearer tokens,
+    /// session cookies, base64 - so the two policies part company on the first authenticated
+    /// request rather than on some edge case.</para>
     /// <para>Read by <see cref="TlsQuicHttp3Request.TryEncode"/>, which hands it to
     /// <see cref="TlsQuicQpackEncoder.TryEncodeFieldLine"/> as that method's <c>huffman</c>
     /// argument. Witnessed by TlsQuicHttp3RequestTests.TurningHuffmanOffChangesTheBytes and
@@ -583,7 +587,8 @@ internal sealed class TlsQuicHttp3Spec
     /// the second of which reads which of the two representations came out rather than
     /// inferring it from an inequality.</para>
     /// </remarks>
-    internal bool QpackHuffmanStringLiterals { get; init; } = true;
+    internal TlsQuicQpackHuffmanPolicy QpackHuffmanStringLiterals { get; init; } =
+        TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo;
 
     /// <summary>Gets which representation the QPACK encoder prefers when a header's name
     /// matches a static entry but its value does not.</summary>

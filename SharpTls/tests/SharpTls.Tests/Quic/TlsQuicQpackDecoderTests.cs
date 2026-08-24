@@ -364,7 +364,7 @@ public sealed class TlsQuicQpackDecoderTests
     {
         byte[] source = TlsQuicQpackEncoderTests.Encode(
             [(":authority", "example.com")],
-            huffman: true,
+            huffman: TlsQuicQpackHuffmanPolicy.Always,
             preferNameReference: true);
 
         Assert.True(source.Length < 10 + 11 + 32);

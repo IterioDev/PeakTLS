@@ -219,7 +219,7 @@ TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.get -> b
 TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.set -> void
 TlsClient.TlsHttp3Options.PseudoHeaderOrder.get -> System.Collections.Generic.IList<TlsClient.TlsHttp3PseudoHeader>!
 TlsClient.TlsHttp3Options.PseudoHeaderOrder.set -> void
-TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.get -> bool
+TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.get -> SharpTls.Quic.TlsQuicQpackHuffmanPolicy
 TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.set -> void
 TlsClient.TlsHttp3Options.QpackNameMatchPolicy.get -> TlsClient.TlsQpackNameMatchPolicy
 TlsClient.TlsHttp3Options.QpackNameMatchPolicy.set -> void

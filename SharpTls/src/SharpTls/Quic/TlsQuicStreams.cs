@@ -616,6 +616,8 @@ internal sealed class TlsQuicStream
     private ulong _receiveLimit;
     private ulong _largestReceivedOffset;
     private ulong _creditedToConnection;
+
+    private bool _receiveCompleteReported;
     private bool _maximumStreamDataOwed;
 
     internal TlsQuicStream(
@@ -912,6 +914,17 @@ internal sealed class TlsQuicStream
         var delivered = (ulong)_delivered.Count;
         _set.CreditConnectionWindow(delivered - _creditedToConnection);
         _creditedToConnection = delivered;
+
+        // RFC 9000 s4.6's OTHER credit, and this is the one place that can know it is due. A
+        // stream is finished for receive purposes when its final size is established AND every
+        // byte up to it has reached the application - the same "delivered, not received"
+        // distinction this method already turns on. Reported once; _finalSize cannot move
+        // afterwards, because a second FIN at a different offset is a FINAL_SIZE_ERROR.
+        if (!_receiveCompleteReported && _finalSize is { } finalSize && delivered >= finalSize)
+        {
+            _receiveCompleteReported = true;
+            _set.OnStreamReceiveComplete(this);
+        }
 
         // Outstanding credit still above the threshold, so nothing is owed. A window of 0
         // takes this branch for every input - 0 - 0 is not below 0 / 2 - which is right: an
@@ -1328,6 +1341,102 @@ internal sealed class TlsQuicStreamSet
 
     /// <summary>Gets whether anything is queued for the next 1-RTT packet.</summary>
     internal bool HasPendingFrames => _pending.Count > 0 || _repairs.Count > 0;
+
+    /// <summary>Queues one connection-scoped 1-RTT frame onto the same pending list the
+    /// flow-control grants use.</summary>
+    /// <remarks>
+    /// <para>THE STREAM SET OWNS THE ONLY 1-RTT FRAME QUEUE IN THIS ASSEMBLY, which is why a
+    /// connection-scoped frame comes through here rather than getting a second one. Everything
+    /// that queue already does - the datagram budget in TakePendingFrames, coalescing behind an
+    /// ACK, and s13.3 repair on loss - is machinery a private list on the connection would have
+    /// to grow again and would grow worse.</para>
+    /// <para>Used by RETIRE_CONNECTION_ID (RFC 9000 s19.16). Both it and MAX_STREAMS below
+    /// arrive only after the handshake, by which point this set exists.</para>
+    /// </remarks>
+    /// <param name="frame">The frame to send on the next 1-RTT packet that has room.</param>
+    internal void QueueConnectionFrame(in TlsQuicFrame frame) => _pending.Add(frame);
+
+    /// <summary>Reports that a stream has received everything it ever will, so a peer-initiated one can be credited back under RFC 9000 s4.6.</summary>
+    /// <param name="stream">The stream whose receive side is finished.</param>
+    internal void OnStreamReceiveComplete(TlsQuicStream stream)
+    {
+        // ponytail: linear scan over the peer-initiated list. Plain h3 opens three of them and
+        // the list is never pruned, so this is three comparisons once per stream; make it a
+        // HashSet if server push or WebTransport ever puts real numbers through here.
+        if (!_peerInitiated.Contains(stream))
+        {
+            return;
+        }
+
+        CreditPeerStream(TlsQuicStreamId.DirectionOf(stream.Id));
+    }
+
+    /// <summary>
+    /// RFC 9000 s4.6: credits the peer one more stream of <paramref name="direction"/>, and
+    /// queues MAX_STREAMS when enough have accumulated to be worth a frame.
+    /// </summary>
+    /// <remarks>
+    /// <para>CUMULATIVE, NOT A LIVE COUNT. s19.11's Maximum Streams is "a count of the
+    /// cumulative number of streams of the corresponding type that can be opened over the
+    /// lifetime of the connection", so the grant is the initial limit plus the number of peer
+    /// streams that have finished - which is why nothing has to be removed from
+    /// <c>_streams</c> for this to be correct.</para>
+    /// <para>THE THRESHOLD IS THE SAME SHAPE THE DATA GRANTS USE - a fraction of the window
+    /// rather than one frame per stream - so a peer that opens and closes streams steadily gets
+    /// grants at a rate proportional to the limit rather than one per close. Like
+    /// <c>TlsQuicLocalFlowControlSpec.ReceiveWindowUpdateDivisor</c>, the fraction is this
+    /// library's choice and no capture bounds it.</para>
+    /// <para>ADVERTISED LIMIT ZERO MEANS NO GRANT, EVER. A limit that was never advertised is
+    /// zero under s18.2 - see TlsQuicLocalFlowControlSpec.AsAdvertisedBy - and raising it from
+    /// this side would hand the peer a budget the ClientHello said it did not have.</para>
+    /// </remarks>
+    /// <param name="direction">The direction of the stream that finished.</param>
+    internal void CreditPeerStream(TlsQuicStreamDirection direction)
+    {
+        var index = direction == TlsQuicStreamDirection.Unidirectional ? 1 : 0;
+        var initial = LocalFlowControl.PeerStreamLimitFor(direction);
+        if (initial == 0)
+        {
+            return;
+        }
+
+        _peerStreamsFinished[index]++;
+        var granted = _peerStreamGranted[index] == 0 ? initial : _peerStreamGranted[index];
+        var wanted = initial + _peerStreamsFinished[index];
+
+        // s19.11's Maximum Streams "MUST NOT exceed 2^60", and a grant above that is a
+        // FRAME_ENCODING_ERROR at the peer rather than generosity.
+        if (wanted > MaximumStreamsCeiling)
+        {
+            wanted = MaximumStreamsCeiling;
+        }
+
+        if (wanted - granted < Math.Max(1UL, initial / StreamCreditUpdateDivisor))
+        {
+            return;
+        }
+
+        _peerStreamGranted[index] = wanted;
+        _pending.Add(new TlsQuicFrame
+        {
+            RawType = (ulong)(direction == TlsQuicStreamDirection.Unidirectional
+                ? TlsQuicFrameType.MaxStreams | (TlsQuicFrameType)1
+                : TlsQuicFrameType.MaxStreams),
+            MaximumStreams = wanted,
+        });
+    }
+
+    /// <summary>RFC 9000 s19.11: "This value cannot exceed 2^60, as it is not possible to
+    /// encode stream IDs larger than 2^62-1."</summary>
+    private const ulong MaximumStreamsCeiling = 1UL << 60;
+
+    /// <summary>How much of the advertised stream limit has to come free before MAX_STREAMS is
+    /// worth a frame. Declared, not measured - see <see cref="CreditPeerStream"/>.</summary>
+    private const ulong StreamCreditUpdateDivisor = 2;
+
+    private readonly ulong[] _peerStreamsFinished = new ulong[2];
+
+    private readonly ulong[] _peerStreamGranted = new ulong[2];
 
     /// <summary>The RFC 9000 s13.3 repairs owed on 1-RTT frames and not yet taken.</summary>
     /// <remarks>BORROWED AND MUTABLE, because <c>TlsQuicConnection.QueueRepair</c> is the only
