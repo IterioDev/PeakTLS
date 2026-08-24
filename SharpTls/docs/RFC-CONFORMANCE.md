@@ -3,7 +3,7 @@
 Status: **IN PROGRESS.**
 
 - Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (12 of 153).
+- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (15 of 153).
 - Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
 - Untouched: RFC 9002, RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
@@ -35,8 +35,8 @@ The audit is deliberately run in two directions, because neither finds the other
 
 ## Method note: absence of a keyword is not absence of enforcement
 
-Three findings were nearly filed in error across the first two passes, every one because a grep
-shaped around the *words* a rule might use returned nothing while the rule was implemented:
+Five findings were nearly filed in error, every one because a grep shaped around the *words* a
+rule might use returned nothing while the rule was implemented:
 
 - `signature_algorithms_cert` looked absent when only one file was searched. It is implemented.
 - The RFC 8446 §4.2.8 key-share ordering rule looked unenforced because the code expresses it
@@ -44,6 +44,10 @@ shaped around the *words* a rule might use returned nothing while the rule was i
 - The RFC 9001 packet-protection labels (`quic key`, `quic iv`, `quic hp`) looked absent to a
   search for those literal strings, because they are composed at runtime from a
   version-dependent prefix and a suffix.
+- The RFC 9000 §18.2 `active_connection_id_limit` floor check was missed by two searches before
+  a third found it.
+- The RFC 9000 §12.4 empty-payload check survived NINE search patterns and was found only by
+  reading the receive path. It lives in a returned tuple, not a thrown error or a named guard.
 
 Both would have been false positives in a report whose whole value is being trustworthy. A
 MISSING verdict in this document therefore requires the failed search patterns to be named, and
@@ -250,8 +254,8 @@ the urgency and incremental defaults match §4, was NOT determined.
 
 ### RFC 9000 (QUIC transport) — sampled, NOT exhaustive
 
-The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **12 were checked
-directly.** 141 remain unchecked. This is a sample chosen for interop risk, not coverage.
+The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **15 were checked
+directly.** 138 remain unchecked. This is a sample chosen for interop risk, not coverage.
 
 | § | Requirement | Location | Verdict |
 |---|---|---|---|
@@ -267,27 +271,28 @@ directly.** 141 remain unchecked. This is a sample chosen for interop risk, not 
 | 17.2.1 | Version Negotiation connection ID echo checks | `Quic/TlsQuicConnection.cs:206-207` | COMPLIANT, mutation-tested |
 | 19.7 | "A client MUST treat receipt of a NEW_TOKEN frame with an empty Token field as a connection error" | `Quic/TlsQuicConnectionFrames.cs:379` | COMPLIANT, tested |
 | 19.19 | CONNECTION_CLOSE types 0x1c and 0x1d are distinct forms | `Quic/TlsQuicConnection.cs:250` | COMPLIANT, mutation-tested |
+| 12.4 | "An endpoint MUST treat receipt of a packet containing no frames as a connection error of type PROTOCOL_VIOLATION" | `Quic/TlsQuicPacketReceiver.cs:727` | COMPLIANT |
+| 12.4 | "An endpoint MUST treat receipt of a frame in a packet type that is not permitted as a connection error of type PROTOCOL_VIOLATION" | `Quic/TlsQuicPacketReceiver.cs:751` | COMPLIANT |
+| 17.2 | Non-zero reserved bits are a connection error | `Quic/TlsQuicPacketReceiver.cs:689` | COMPLIANT |
 
 **Seven of the twelve carry named killing mutants**, recorded in the mutation ledgers inside the
 source files themselves. That is stronger evidence than an audit read can produce: a ledger row
 naming the test that kills a specific deletion shows the rule is not merely present but load
 bearing. Retry handling and Version Negotiation are the best-evidenced areas in the codebase.
 
-#### UNRESOLVED — empty-payload packet rejection
+#### RESOLVED — empty-payload packet rejection IS implemented
 
-RFC 9000 §12.4: *"An endpoint MUST treat receipt of a packet containing no frames as a
-connection error of type PROTOCOL_VIOLATION."*
+Previously recorded UNRESOLVED. Reading the packet receive path settled it:
+`Quic/TlsQuicPacketReceiver.cs:727` returns
+`(TlsQuicTransportError.ProtocolViolation, "Packet contained no frames.")`, which is exactly
+RFC 9000 §12.4. The same method also enforces two neighbouring §12.4 MUSTs — a frame in a packet
+type that does not permit it (`:751`) and non-zero reserved bits (`:689`), both PROTOCOL_VIOLATION.
 
-Searched: `ProtocolViolation` across `Quic/` (hits, none on this rule), `at least one frame`,
-`contains no frames`, `empty payload`, `frameCount`, `frames.Count == 0`, `!frames.Any`,
-`IsEmpty` in the receiver and frame reader, and `s12.4` / `section 12.4` in comments. No check
-located.
-
-Recorded as **UNRESOLVED rather than MISSING on purpose.** Four rules in this audit have already
-looked absent to exactly this style of search and turned out to be implemented under a different
-spelling. The receive path is large and this reader has a demonstrated false-positive rate on it,
-so the honest verdict is that the check was not found, not that it does not exist. Confirming
-either way needs a reading of the packet receive path rather than another grep.
+**This was the fifth near-miss, and the only one that survived a grep sweep.** Nine search
+patterns failed to find it because the check lives in a returned tuple rather than a thrown
+error or a named guard. It was found only by reading the receive path, which is what the
+UNRESOLVED verdict said would be required. Recording it as MISSING would have put a false
+defect into a report whose entire value is being trustworthy.
 
 Everything else in RFC 9000 — frame formats in detail, variable-length integer widths, packet
 number encoding and duplicate suppression, stream state machines, flow control accounting,
@@ -305,7 +310,7 @@ address validation, ACK generation policy, error-code selection — is unchecked
 
 Nothing below has been examined. Each is a gap in this document, not a clean result.
 
-- RFC 9000 — 141 of 153 client-relevant MUSTs unchecked. The 12 sampled were all compliant and
+- RFC 9000 — 138 of 153 client-relevant MUSTs unchecked. The 15 sampled were all compliant and
   seven were mutation-tested, which raises confidence in the areas touched and says nothing
   about the rest. Largest remaining gap.
 - RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
@@ -328,13 +333,14 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 46 — every row in the verdict tables above, counted directly rather than
-estimated (42 + 1 + 2 + 1). Confirmed: 42 compliant, 1 defect (already fixed), 2 MISSING (key
-update, AEAD packet counting), 1 UNRESOLVED (empty-payload packet rejection). The five rows in the smaller-specs table are NOT counted here: they record
+Findings raised: 48 — every row in the verdict tables above, counted directly rather than
+estimated (45 + 1 + 2). Confirmed: 45 compliant, 1 defect (already fixed), 2 MISSING (key
+update, AEAD packet counting). No UNRESOLVED remain: the one that existed was settled by
+reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
-Dropped as false positives before entry: 3, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Three near-misses against 32 confirmations is the
+Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
+as absent while the code implemented it. Five near-misses against 45 confirmations is the
 number a reader should weigh when deciding how much to trust a MISSING verdict here.
 
 The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
