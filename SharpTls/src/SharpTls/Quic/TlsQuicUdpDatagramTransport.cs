@@ -6,8 +6,21 @@ namespace SharpTls.Quic;
 /// <summary>Sends and receives QUIC datagrams directly over a UDP socket.</summary>
 public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
 {
-    // RFC 9000 s18.2: 65527 is the maximum permitted UDP payload.
+    // RFC 9000 s18.2: 65527 is the maximum permitted UDP payload, and it is reachable only
+    // over IPv6. This is the protocol ceiling, NOT what every socket accepts - see
+    // MaximumFor.
     internal const int MaximumUdpPayload = 65527;
+
+    // 65535 - 20 (IPv4 header) - 8 (UDP header). An IPv4 socket refuses anything larger with
+    // WSAEMSGSIZE / SocketError.MessageSize, so advertising the 65527 IPv6 figure on an IPv4
+    // transport overstates the ceiling by 20 bytes and turns a caller's legal-looking datagram
+    // into a socket exception. Measured, not assumed: an IPv4 SendTo of 65507 succeeds and
+    // 65508 fails with MessageSize (10040).
+    internal const int MaximumIPv4UdpPayload = 65507;
+
+    /// <summary>The largest UDP payload the given family's sockets actually accept.</summary>
+    internal static int MaximumFor(AddressFamily family) =>
+        family == AddressFamily.InterNetworkV6 ? MaximumUdpPayload : MaximumIPv4UdpPayload;
 
     private readonly Socket _socket;
     private readonly IPEndPoint _receiveTemplate;
@@ -42,7 +55,7 @@ public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
     }
 
     /// <inheritdoc />
-    public int MaxDatagramPayloadSize => MaximumUdpPayload;
+    public int MaxDatagramPayloadSize => MaximumFor(_socket.AddressFamily);
 
     // Sets the IPv4 Don't Fragment bit, which RFC 9000 s14 requires where the platform
     // supports it. IPv6 routers do not fragment, so the flag does not apply there.

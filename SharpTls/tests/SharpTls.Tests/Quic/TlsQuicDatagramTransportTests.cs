@@ -72,11 +72,15 @@ public sealed class TlsQuicDatagramTransportTests
     [Fact]
     public async Task DirectTransportCeilingIsTheMaximumUdpPayload()
     {
-        // RFC 9000 s18.2 names 65527 as the maximum permitted UDP payload.
+        // RFC 9000 s18.2 names 65527 as the maximum permitted UDP payload, but that figure is
+        // only reachable over IPv6. An IPv4 datagram carries a 20-byte IP header and an 8-byte
+        // UDP header inside the same 65535 total, so its ceiling is 65507 and the socket
+        // refuses 65508 with SocketError.MessageSize. This assertion used to read 65527 for an
+        // IPv4 transport, which encoded a 20-byte overstatement as the expected behaviour.
         await using var transport =
             TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetwork);
 
-        Assert.Equal(65527, transport.MaxDatagramPayloadSize);
+        Assert.Equal(65507, transport.MaxDatagramPayloadSize);
     }
 
     [Fact]
@@ -85,6 +89,7 @@ public sealed class TlsQuicDatagramTransportTests
         await using var transport =
             TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetworkV6);
 
+        // IPv6 is where the RFC 9000 s18.2 figure is actually reachable.
         Assert.Equal(65527, transport.MaxDatagramPayloadSize);
     }
 
@@ -299,8 +304,11 @@ public sealed class TlsQuicDatagramTransportTests
             new TlsQuicSocks5Options { ProxyEndPoint = relay.ProxyEndPoint },
             CancellationToken.None);
 
-        // RFC 9000 s18.2 ceiling minus the 10-byte RFC 1928 s7 IPv4 header.
-        Assert.Equal(65527 - 10, transport.MaxDatagramPayloadSize);
+        // The relay socket's own family ceiling minus the 10-byte RFC 1928 s7 IPv4 header.
+        // FakeSocks5Relay listens on IPv4, so the ceiling is 65507 rather than the RFC 9000
+        // s18.2 figure of 65527 - the header comes off what the socket accepts, not off the
+        // protocol maximum.
+        Assert.Equal(65507 - 10, transport.MaxDatagramPayloadSize);
     }
 
     [Fact]
@@ -357,7 +365,7 @@ public sealed class TlsQuicDatagramTransportTests
             CancellationToken.None);
 
         Assert.Equal(
-            TlsQuicUdpDatagramTransport.MaximumUdpPayload
+            TlsQuicUdpDatagramTransport.MaximumFor(relay.ProxyEndPoint.AddressFamily)
                 - TlsQuicSocks5Protocol.HeaderSizeFor(relay.ProxyEndPoint.AddressFamily),
             transport.MaxDatagramPayloadSize);
         Assert.Null(relay.BackgroundException);

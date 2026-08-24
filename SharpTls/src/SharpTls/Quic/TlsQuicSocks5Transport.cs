@@ -47,7 +47,11 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
     }
 
     /// <inheritdoc />
-    public int MaxDatagramPayloadSize => TlsQuicUdpDatagramTransport.MaximumUdpPayload - _headerSize;
+    // The relay socket's own family decides the ceiling, and the SOCKS5 header eats into it:
+    // every datagram this transport sends is header + payload on the wire, so a payload sized
+    // against the bare maximum produces an oversized datagram and SocketError.MessageSize.
+    public int MaxDatagramPayloadSize =>
+        TlsQuicUdpDatagramTransport.MaximumFor(_udp.AddressFamily) - _headerSize;
 
     /// <summary>Connects to a SOCKS5 proxy and establishes a UDP association for relaying
     /// QUIC datagrams.</summary>
