@@ -119,6 +119,36 @@ internal static class TlsQuicPacketHeader
     // RFC 9000 s17.2.5: Retry Integrity Tag is 128 bits.
     private const int RetryIntegrityTagLength = 16;
 
+    /// <summary>RFC 9369 section 5's long-header type values, indexed by
+    /// <see cref="TlsQuicLongPacketType"/>'s RFC 9000 value.</summary>
+    /// <remarks>
+    /// <para>s5: "Initial: 0b01, 0-RTT: 0b10, Handshake: 0b11, Retry: 0b00." RFC 9000 s17.2
+    /// numbers the same four 0b00, 0b01, 0b10, 0b11 in that order, so v2 is v1 + 1 modulo 4 -
+    /// but it is written out as a table rather than as arithmetic, because the arithmetic is a
+    /// coincidence of the two lists and not a rule either RFC states.</para>
+    /// <para>WHY VERSION 2 IS REMAPPED AT ALL, and it is worth knowing before touching this:
+    /// s5's own reason is that the remap makes a v2 packet unusable by a middlebox that hard
+    /// codes v1's numbering, which is the ossification the version exists to break.</para>
+    /// </remarks>
+    private static ReadOnlySpan<byte> Version2LongPacketTypes => [0b01, 0b10, 0b11, 0b00];
+
+    /// <summary>Maps a first byte's two type bits to a packet type, in this version's
+    /// numbering.</summary>
+    /// <remarks>ANY VERSION THAT IS NOT 2 IS READ AS VERSION 1's NUMBERING, including 0. That
+    /// is right for both cases it covers: an unknown version cannot be decoded further than
+    /// this anyway, and version 0 is a Version Negotiation packet, whose s17.2.1 "Unused" field
+    /// occupies these bits and carries no meaning at all.</remarks>
+    private static TlsQuicLongPacketType DecodeLongPacketType(byte typeBits, uint version) =>
+        version == (uint)TlsQuicVersion.Version2
+            ? (TlsQuicLongPacketType)Version2LongPacketTypes.IndexOf(typeBits)
+            : (TlsQuicLongPacketType)typeBits;
+
+    /// <summary>The inverse: the two type bits this version writes for a packet type.</summary>
+    private static byte EncodeLongPacketType(TlsQuicLongPacketType type, uint version) =>
+        version == (uint)TlsQuicVersion.Version2
+            ? Version2LongPacketTypes[(int)type]
+            : (byte)type;
+
     private const byte HeaderFormBit = 0x80;
     private const byte FixedBitMask = 0x40;
     private const byte LongPacketTypeMask = 0x30;
@@ -169,7 +199,10 @@ internal static class TlsQuicPacketHeader
             return false;
         }
 
-        var type = (TlsQuicLongPacketType)((firstByte & LongPacketTypeMask) >> LongPacketTypeShift);
+        // THE TYPE BITS ARE READ HERE AND DECODED BELOW, once the version is known. They used
+        // to be cast straight to TlsQuicLongPacketType, unconditionally in RFC 9000's
+        // numbering - which mistypes every RFC 9369 long header, because s5 remaps all four.
+        var typeBits = (byte)((firstByte & LongPacketTypeMask) >> LongPacketTypeShift);
 
         var offset = 1;
         if (datagram.Length < offset + 4)
@@ -178,6 +211,8 @@ internal static class TlsQuicPacketHeader
         }
         var version = BinaryPrimitives.ReadUInt32BigEndian(span[offset..]);
         offset += 4;
+
+        var type = DecodeLongPacketType(typeBits, version);
 
         if (!TryReadConnectionId(datagram, ref offset, MaximumConnectionIdLength, out var destinationConnectionId))
         {
@@ -307,7 +342,10 @@ internal static class TlsQuicPacketHeader
         // deterministic.
         var lowBits = header.Type == TlsQuicLongPacketType.Retry ? 0 : header.PacketNumberLength - 1;
         destination[offset++] = (byte)(
-            HeaderFormBit | FixedBitMask | ((byte)header.Type << LongPacketTypeShift) | lowBits);
+            HeaderFormBit
+            | FixedBitMask
+            | (EncodeLongPacketType(header.Type, header.Version) << LongPacketTypeShift)
+            | lowBits);
 
         BinaryPrimitives.WriteUInt32BigEndian(destination[offset..], header.Version);
         offset += 4;

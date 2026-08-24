@@ -165,16 +165,35 @@ internal static class TlsQuicRetry
     private static ReadOnlySpan<byte> GetKey(TlsQuicVersion version) => version switch
     {
         TlsQuicVersion.Version1 => Version1Key,
-        TlsQuicVersion.Version2 => throw new NotSupportedException(
-            "QUIC v2 (RFC 9369) Retry integrity constants are not yet implemented."),
+        TlsQuicVersion.Version2 => throw new NotSupportedException(RetryVersion2Message),
         _ => throw new ArgumentOutOfRangeException(nameof(version), version, "Unknown QUIC version."),
     };
+
+    /// <summary>
+    /// Why version 2 Retry is the one part of RFC 9369 this library does not do.
+    /// </summary>
+    /// <remarks>
+    /// EVERYTHING ELSE ABOUT v2 NOW WORKS: TlsQuicSecrets derives with s3.2's salt and the
+    /// "quicv2 " label prefix, and TlsQuicPacketHeader reads and writes s5's remapped long
+    /// header types. What is missing is two literals - s3.3.1's Retry integrity key and nonce -
+    /// and they are missing for a reason rather than by oversight. Every other constant in this
+    /// tree was transcribed from an extract under docs/superpowers/specs/reference-captures/,
+    /// and there is no RFC 9369 extract there to transcribe these from. A sixteen-byte key
+    /// recalled rather than copied fails in exactly one way: silently, against a real v2 server
+    /// only, in a code path no offline test can reach. So it throws with this message instead,
+    /// and adding the extract is the whole of the remaining work.
+    /// </remarks>
+    private const string RetryVersion2Message =
+        "QUIC v2 (RFC 9369 s3.3.1) Retry integrity constants are not implemented: this library "
+        + "transcribes constants from a cited RFC extract and none is present for RFC 9369. "
+        + "Everything else about version 2 - s3.2's salt and labels, s5's long header type "
+        + "remap - is implemented, so only a Retry packet on a version 2 connection reaches "
+        + "this.";
 
     private static ReadOnlySpan<byte> GetNonce(TlsQuicVersion version) => version switch
     {
         TlsQuicVersion.Version1 => Version1Nonce,
-        TlsQuicVersion.Version2 => throw new NotSupportedException(
-            "QUIC v2 (RFC 9369) Retry integrity constants are not yet implemented."),
+        TlsQuicVersion.Version2 => throw new NotSupportedException(RetryVersion2Message),
         _ => throw new ArgumentOutOfRangeException(nameof(version), version, "Unknown QUIC version."),
     };
 }
