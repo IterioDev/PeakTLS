@@ -1,0 +1,124 @@
+# Client-side MUST conformance audit
+
+Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) is done. Every other
+RFC in scope is not yet audited and is listed as such below. Do not read this document as a
+clean bill for anything it does not name.
+
+## What this audits, and what it does not
+
+Scope is **client-side MUST / MUST NOT / REQUIRED / SHALL only**. SHOULD and RECOMMENDED are
+out. Server-side duties are out — this is a client library. Where the library knowingly breaks
+a rule to impersonate a real client, that is recorded rather than hidden: a caller needs to
+know which rules are broken on purpose.
+
+RFCs in scope: 9000, 9001, 9002, 9114, 9204, 9221, 9297, 9368, 9369, 8446, 8701, 9218, and the
+three HTTP-semantics sections of 9110 that HTTP/3 inherits. RFC 7541 is out of scope (HPACK is
+HTTP/2) except as the Huffman table QPACK reuses.
+
+**Normative text is quoted only from the pinned extracts in
+`docs/superpowers/specs/reference-captures/`, never from memory.** Where a rule falls outside
+the pinned sections, the finding says so instead of quoting it. This is the same rule the test
+suite already follows — `TlsQuicClientHelloProfileFactoryTests` parses the HTTP/3 ALPN token out
+of the RFC 9114 extract rather than typing it.
+
+The audit is deliberately run in two directions, because neither finds the other's defects:
+
+- **spec-driven** — enumerate the RFC's MUSTs, then locate each one. Finds requirements
+  implemented *nowhere*.
+- **code-driven** — read the implementation, then check it against the extract. Finds
+  requirements implemented *wrongly*.
+
+## Method note: absence of a keyword is not absence of enforcement
+
+Two findings were nearly filed in error during the RFC 8446 pass, both because a grep shaped
+around the *words* a rule might use returned nothing:
+
+- `signature_algorithms_cert` looked absent when only one file was searched. It is implemented.
+- The RFC 8446 §4.2.8 key-share ordering rule looked unenforced because the code expresses it
+  as a monotonic `Array.IndexOf` cursor rather than anything matching `subset` or `Contains`.
+
+Both would have been false positives in a report whose whole value is being trustworthy. A
+MISSING verdict in this document therefore requires the failed search patterns to be named, and
+a reader should treat any MISSING without them as unverified.
+
+## Findings
+
+### RFC 8446 (TLS 1.3) — ClientHello and extension layer
+
+Pinned extracts: `rfc8446-section4.1.2-client-hello.txt`,
+`rfc8446-section4.1.4-hello-retry-request.txt`, `rfc8446-section4.2-extensions.txt`,
+`rfc8446-section9.2-mandatory-to-implement-extensions.txt`,
+`rfc8446-appendixD.4-middlebox-compatibility-mode.txt`.
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 9.2 | The seven mandatory-to-implement extensions | `ClientHelloBuilder.cs:262`, `ClientHelloEncoder.cs:289` | COMPLIANT |
+| 4.1.2 | `legacy_version` is 0x0303 | `Protocol/TlsConstants.cs:5`, written `ClientHelloEncoder.cs:244` | COMPLIANT |
+| 4.1.2 | `legacy_compression_methods` is a single zero byte | `ClientHelloEncoder.cs:248` | COMPLIANT |
+| 4.2.8 | "Clients MUST NOT offer multiple KeyShareEntry values for the same group" | `ClientHelloBuilder.cs:562` | COMPLIANT |
+| 4.2.8 | "Clients MUST NOT offer any KeyShareEntry values for groups not listed in the client's `supported_groups` extension" | `ClientHelloBuilder.cs:567` | COMPLIANT |
+| 4.2.8 | "Each KeyShareEntry value MUST correspond to a group offered in the `supported_groups` extension and MUST appear in the same order" | `ClientHelloBuilder.cs:568` | COMPLIANT |
+| D.4 / RFC 9001 §8.4 | Empty `legacy_session_id` over QUIC | `TlsQuicClientHelloProfileFactory.cs` | WAS DIVERGENT, FIXED |
+
+Notes on the interesting rows:
+
+**§9.2** — all seven are implementable, including `signature_algorithms_cert` and the
+HelloRetryRequest `cookie` echo (`ClientHelloEncoder.cs:623`). `cookie` is correctly not
+configurable in an initial ClientHello, since it only exists as a server-provided value in HRR.
+
+**§4.2.8** — all three client MUSTs are enforced together in one loop. The ordering rule is a
+strictly-increasing index into `_supportedGroups`, which is exactly "same-order subset". The
+extract's own sentence is quoted in the source comment.
+
+**D.4** — this is the one real defect the audit has found so far, and it was already fixed in
+commit `7b5c663` before this document existed. Every QUIC ClientHello carried a 32-byte
+`legacy_session_id`; RFC 9001 §8.4 requires it empty because QUIC has no TLS compatibility
+mode. BoringSSL peers — Google, Cloudflare, every Spotify host — answered CRYPTO_ERROR with
+alert 47 (`illegal_parameter`) before any request. Severity would have been BLOCKS-INTEROP.
+Cause: `WithSessionId(null)` means *unspecified*, and the encoder then filled 32 random bytes
+for TLS 1.3 compatibility mode — correct over TCP, illegal over QUIC. Now forced empty in the
+QUIC factory and pinned by
+`TlsQuicClientHelloProfileFactoryTests.TheSessionIdIsEmptyBecauseQuicHasNoCompatibilityMode`.
+
+### Deliberate divergences (impersonation, not defects)
+
+| Rule | What the library does | Why |
+|---|---|---|
+| Duplicate `signature_algorithms` entries | Emits 0x0805 twice behind `AllowDuplicateSignatureAlgorithms()` | The captured Spotify iOS client does. RFC 8446 §4.2.3 has no MUST forbidding it, and JA4 hashes the list, so the repeat is invisible to JA4 and visible to JA3 — which is the point. Opt-in, off by default. |
+| GREASE values in five namespaces | Sends reserved GREASE codepoints per RFC 8701 | Required to look like a real client. RFC 8701 reserves the values but mandates no selection policy, so the choice of value is a fingerprint decision and not a conformance question. |
+| Vendor QUIC transport parameter `0xff080808` | Emitted last, outside the rotation | Observed in 4 of 4 proxy captures of the target client. Unknown transport parameters MUST be ignored by peers, so this is legal. |
+
+## Not yet audited
+
+Nothing below has been examined. Each is a gap in this document, not a clean result.
+
+- RFC 9000 — transport. Wire encoding (§12, §14, §16, §18, §19, packet formats) and lifecycle
+  (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20).
+- RFC 9001 — beyond the `legacy_session_id` rule above: Initial secret derivation and HKDF
+  labels, header protection, AEAD nonce construction, key update, CRYPTO stream ordering.
+  Specifically unverified: whether the Initial secret uses HKDF-**Extract** rather than
+  extract-then-expand, and whether Initial secrets stay pinned to the original DCID.
+- RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
+  match exactly (a wrong constant is both a correctness and a fingerprint issue).
+- RFC 9114 — HTTP/3 framing, stream mapping, SETTINGS, pseudo-headers, error handling.
+- RFC 9204 — QPACK. Open question: is the dynamic table implemented, partial, or absent, and
+  if absent does the client advertise a capacity consistent with that.
+- RFC 8446 — everything outside the five pinned sections. The pinned set covers the ClientHello
+  and extension layer only; the record layer, key schedule, and certificate handling are not
+  pinned and so were not audited.
+- RFC 8701, 9218, 9221, 9297, 9368, 9369 — GREASE value sets, priorities, QUIC and HTTP
+  datagrams, version negotiation and QUIC v2.
+
+## Attrition
+
+Findings raised: 8. Confirmed: 7 compliant, 1 defect (already fixed). Dropped as false
+positives before entry: 2, both caught by widening a search that had returned nothing.
+
+## Relationship to other documents
+
+`docs/superpowers/specs/2026-08-17-a2-rfc-conformance-audit.md` audits whether the **extracts
+quote the RFCs correctly**. It does not audit the code, and the two should not be confused.
+
+`TlsClient-main/docs/HTTP3-EVALUATION.md` has a "what is still missing" section predating this
+audit. Where the two disagree, neither is authoritative yet — this document has not reached
+HTTP/3 .
