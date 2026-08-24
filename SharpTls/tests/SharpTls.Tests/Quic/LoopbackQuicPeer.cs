@@ -355,9 +355,13 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
         _isHandshakeComplete = isHandshakeComplete;
         _notifyHandshakePacketSent = notifyHandshakePacketSent;
 
+        // FROM THE SPEC, NOT A LITERAL. RFC 9369's version 2 changes the Initial salt, the
+        // key-derivation labels and the long-header type numbering all at once, so a harness
+        // pinned to version 1 can only ever prove version 1 works. Both sides read the same
+        // property, which is what lets one test run a whole handshake in version 2.
         _receiver = new TlsQuicPacketReceiver(
-            (uint)TlsQuicVersion.Version1, receiverConnectionIdLength);
-        _keys = new TlsQuicKeySet(_receiver, TlsQuicVersion.Version1);
+            (uint)spec.Version, receiverConnectionIdLength);
+        _keys = new TlsQuicKeySet(_receiver, spec.Version);
     }
 
     /// <summary>The client side. It chooses both connection IDs, so its Initial keys are
@@ -1254,7 +1258,7 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
                 $"LoopbackQuicPeer sends long header packets only, so it cannot carry {level} "
                     + "CRYPTO data. See this type's remarks."),
         },
-        Version = (uint)TlsQuicVersion.Version1,
+        Version = (uint)_spec.Version,
         DestinationConnectionId = _destinationConnectionId,
         SourceConnectionId = _sourceConnectionId,
         Token = default,

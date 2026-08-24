@@ -197,7 +197,18 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     // space that "0-RTT (Section 17.2.3) and 1-RTT (Section 17.3.1) packets" share.
     private const int PacketNumberSpaceCount = 3;
 
-    private readonly uint _version;
+    private uint _version;
+
+    /// <summary>The QUIC version this receiver accepts long headers for.</summary>
+    /// <remarks>SETTABLE FOR RFC 9368 s2.3 AND FOR NOTHING ELSE. The connection moves it once,
+    /// when the server answers the first flight in a compatible version the client offered; see
+    /// <c>TlsQuicConnection.TryAdoptNegotiatedVersion</c>. Every other packet with an unexpected
+    /// version is still discarded, which is what the long-header walk below does with it.</remarks>
+    internal uint Version
+    {
+        get => _version;
+        set => _version = value;
+    }
     private readonly int _destinationConnectionIdLength;
     private readonly ReadKeys?[] _keys = new ReadKeys?[4];
     private readonly ulong[] _largestReceived = new ulong[PacketNumberSpaceCount];

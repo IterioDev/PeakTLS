@@ -112,6 +112,17 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
     // set to 0." So advertising it obliges the RECEIVE path to stop discarding them, which is
     // what TlsQuicPacketReceiver.AcceptGreasedQuicBit is wired from. Before that wiring, a
     // profile could advertise 0x2ab2 and then drop every packet the peer greased in reply.
+    // RFC 9368 s3's version_information (0x11), AS THIS CLIENT ADVERTISES IT - the raw body,
+    // because both fields are wanted and the decode belongs to one place
+    // (TlsQuicTransportParameters.TryDecodeVersionInformation). Same one-source rule as the
+    // accessors around it: s2.3 lets the server choose only from the Available Versions the
+    // CLIENT sent, so the list this endpoint will accept a switch to is the list it actually
+    // put on the wire and not a second copy of it.
+    internal ReadOnlyMemory<byte>? AdvertisedVersionInformation =>
+        _configuration.ClientHello.Spec.QuicTransportParameters
+            ?.Get((ulong)TlsQuicTransportParameterId.VersionInformation)
+            ?.Value;
+
     internal bool AdvertisedGreaseQuicBit =>
         _configuration.ClientHello.Spec.QuicTransportParameters
             ?.Get((ulong)TlsQuicTransportParameterId.GreaseQuicBit) is not null;

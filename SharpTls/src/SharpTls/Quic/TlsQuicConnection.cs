@@ -901,10 +901,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// four rows are 1, 2, 4 and 8 bytes.</remarks>
     internal const int MaximumVarintWidth = 8;
 
-    // A4-minimal is version 1 only. RFC 9369 defines a second version this project targets
-    // and both the receiver and the key set take it as a parameter for that reason; the
-    // connection has no version-negotiation state to choose from yet, which is task 9b's.
-    private const TlsQuicVersion Version = TlsQuicVersion.Version1;
+    // THE VERSION IS STATE NOW, NOT A CONSTANT, AND THIS COMMENT USED TO SAY WHY IT WAS NOT:
+    // "the connection has no version-negotiation state to choose from yet". It has some. The
+    // field, what may move it, and what may not are in TlsQuicConnectionVersions.cs; the
+    // receiver and the key set have always taken the version as a parameter, which is what made
+    // the change small.
 
     // WHAT BOUNDS RETENTION, AND THE ONLY THING THAT BOUNDS THE APPLICATION SPACE.
     //
@@ -1169,9 +1170,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // short header's Destination Connection ID field no length prefix and a 1-RTT packet
         // from the server carries our Source Connection ID there. Getting it from the spec
         // rather than from a constant is the whole reason it is a parameter one layer down.
+        _version = options.Spec.Version;
         _receiver = new TlsQuicPacketReceiver(
-            (uint)Version, options.Spec.SourceConnectionIdLength);
-        _keys = new TlsQuicKeySet(_receiver, Version);
+            (uint)_version, options.Spec.SourceConnectionIdLength);
+        _keys = new TlsQuicKeySet(_receiver, _version);
 
         // RFC 8899's search range, from the spec's two knobs. MAX_PLPMTU is also bounded by
         // what the transport can carry at all - s5.1.2 makes it "less than or equal to the
@@ -1748,6 +1750,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // before this line a profile could make that promise and then discard every packet the
         // peer greased in reply.
         _receiver.AcceptGreasedQuicBit = _client.AdvertisedGreaseQuicBit;
+
+        // RFC 9368 s2.3's Available Versions, read from the profile for the same reason: the
+        // server may choose only from what the CLIENT sent, so the set this connection will
+        // accept a switch to is the set it actually put on the wire.
+        ReadOfferedVersions();
 
         _acks.OnLocalAckParameters(
             (int)(_client.AdvertisedAckDelayExponent ?? (ulong)_options.AckDelayExponent),
@@ -2468,6 +2475,22 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return true;
         }
 
+        // RFC 9368 s2.3, AND THIS IS THE ONLY PLACE THE SIGNAL EXISTS. "The server sends its
+        // first flight using the negotiated version", so the version field of an incoming long
+        // header is what says a compatible negotiation happened - long before the server's own
+        // version_information arrives inside its EncryptedExtensions. Below this line the
+        // receiver would discard the packet as an unknown version and the connection would time
+        // out with nothing to say why.
+        //
+        // TryAdoptNegotiatedVersion IS THE ONE THAT REFUSES, not this call site: it takes a
+        // version only when the client offered it, only when this library implements it, and
+        // only once. An unauthenticated header cannot move the connection anywhere the
+        // ClientHello did not already agree to go.
+        if (longHeader.Version != (uint)_version)
+        {
+            TryAdoptNegotiatedVersion(longHeader.Version);
+        }
+
         packetSourceConnectionId = longHeader.SourceConnectionId.ToArray();
 
         // RFC 9000 s7.2, the whole sentence past the line wrap at lines 58-61 of the extract:
@@ -2613,7 +2636,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // the version we are already speaking, which is self-contradictory on its face: a
         // server that supports our version does not answer with Version Negotiation. s6.2 says
         // to discard it rather than reason about it.
-        if (negotiation.SupportedVersions.Contains((uint)Version))
+        if (negotiation.SupportedVersions.Contains((uint)_version))
         {
             IgnoredVersionNegotiationPackets++;
             return;
@@ -2622,7 +2645,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         OfferedVersions = negotiation.SupportedVersions;
         throw new InvalidOperationException(
             "The server sent a Version Negotiation packet (RFC 9000 s17.2.1): it does not "
-                + $"support QUIC version 0x{(uint)Version:x8}. It offers "
+                + $"support QUIC version 0x{(uint)_version:x8}. It offers "
                 + $"[{string.Join(", ", negotiation.SupportedVersions.Select(v => $"0x{v:x8}"))}]. "
                 + "A4-minimal reports rather than negotiates - selecting one of these means a "
                 + "fresh connection attempt built for that version, because every key here was "
@@ -2659,7 +2682,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // connection would be a version negotiation nobody performed - so a Retry that
         // announces version 2 while carrying a tag computed with version 1's constants
         // verifies perfectly well. Only this check can reject it.
-        if (retry.Version != (uint)Version)
+        if (retry.Version != (uint)_version)
         {
             IgnoredRetryPackets++;
             return;
@@ -2711,7 +2734,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // reason OriginalDestinationConnectionId is retained separately.
         var withoutTag = packet[..(packet.Length - retry.RetryIntegrityTag.Length)];
         if (!TlsQuicRetry.TryVerify(
-                Version,
+                _version,
                 OriginalDestinationConnectionId.Span,
                 withoutTag.Span,
                 retry.RetryIntegrityTag.Span))
@@ -2944,6 +2967,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             await ValidateConnectionIdsUnderSection73(peer.Parameters, cancellationToken)
                 .ConfigureAwait(false);
+
+            // RFC 9368 s4's consistency check, beside s7.3's for the same reason both are here:
+            // one event carries the peer's parameters and neither check wants to be the reason
+            // the other was forgotten.
+            if (!ValidateServerVersionInformation(
+                    peer.Parameters, out var versionError, out var versionReason))
+            {
+                await CloseAsync(versionError, versionReason, cancellationToken)
+                    .ConfigureAwait(false);
+                throw new InvalidOperationException(versionReason);
+            }
 
             // RFC 9114 s6.2's three-unidirectional-stream MUST, checked HERE rather than where
             // task 14e will open the streams, because there it is already too late to fail
@@ -5412,7 +5446,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             _ => throw new NotSupportedException(
                 $"This connection builds no long header packet for {level} data."),
         },
-        Version = (uint)Version,
+        Version = (uint)_version,
         DestinationConnectionId = _destinationConnectionId,
         SourceConnectionId = _sourceConnectionId,
 

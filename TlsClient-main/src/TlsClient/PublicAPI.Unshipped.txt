@@ -329,6 +329,8 @@ TlsClient.TlsQuicOptions.TlsQuicOptions() -> void
 TlsClient.TlsQuicOptions.Token.get -> System.ReadOnlyMemory<byte>
 TlsClient.TlsQuicOptions.Token.set -> void
 TlsClient.TlsQuicOptions.TransportParameters.get -> TlsClient.TlsQuicTransportParameterOptions!
+TlsClient.TlsQuicOptions.Version.get -> SharpTls.Quic.TlsQuicVersion
+TlsClient.TlsQuicOptions.Version.set -> void
 TlsClient.TlsQuicProbeContents
 TlsClient.TlsQuicProbeContents.Ping = 0 -> TlsClient.TlsQuicProbeContents
 TlsClient.TlsQuicProbeContents.PingWithPadding = 1 -> TlsClient.TlsQuicProbeContents

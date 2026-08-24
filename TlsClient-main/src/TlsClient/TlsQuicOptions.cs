@@ -284,6 +284,25 @@ public sealed class TlsQuicOptions
     public TlsQuicSpinBitPolicy SpinBit { get; set; } = (TlsQuicSpinBitPolicy)SpecDefaults.SpinBit;
 
     /// <summary>
+    /// Gets or sets the QUIC version this client's first flight uses — RFC 9368 section 3's
+    /// Chosen Version. The default is <see cref="TlsQuicVersion.Version1"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE VERSION MAY STILL MOVE AFTER THIS. RFC 9368 section 2.3 lets the server answer
+    /// the first flight in any version the client listed as AVAILABLE, and this client adopts
+    /// it when it does. Setting this only decides where the connection starts.</para>
+    /// <para>WHAT THE CLIENT OFFERS IS A TRANSPORT PARAMETER, NOT THIS. The Available Versions
+    /// list lives in <c>version_information</c> (0x11) inside
+    /// <see cref="TransportParameters"/>, because it is a captured wire field like any other. A
+    /// profile that sends no such parameter cannot negotiate at all - which is the correct
+    /// reading of a capture that does not carry one, and is the shipped Spotify preset's case.
+    /// </para>
+    /// <para>VERSION 2 IS SPEAKABLE BUT NOT COMPLETE: RFC 9369's Retry integrity constants are
+    /// not transcribed, so a Retry on a version 2 connection throws.</para>
+    /// </remarks>
+    public TlsQuicVersion Version { get; set; } = SpecDefaults.Version;
+
+    /// <summary>
     /// Gets or sets whether this client draws RFC 9000 section 17.2's QUIC Bit per 1-RTT packet
     /// when the peer has advertised RFC 9287's <c>grease_quic_bit</c>. Off by default.
     /// </summary>
@@ -498,6 +517,7 @@ public sealed class TlsQuicOptions
             PathMtuDiscovery = PathMtuDiscovery,
             SpinBit = (SharpTls.Quic.TlsQuicSpinBitPolicy)SpinBit,
             GreaseQuicBit = GreaseQuicBit,
+            Version = Version,
             InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
             InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
             InitialFrameOrder =

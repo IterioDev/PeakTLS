@@ -1063,7 +1063,9 @@ public sealed partial class TlsQuicConnectionTests
         ReadOnlyMemory<byte> sourceConnectionId,
         int? ackDelayExponent = null,
         ulong? maxIdleTimeoutMilliseconds = null,
-        ulong? maxDatagramFrameSize = null)
+        ulong? maxDatagramFrameSize = null,
+        uint[]? availableVersions = null,
+        uint chosenVersion = (uint)TlsQuicVersion.Version1)
     {
         var parameters = new List<TlsQuicTransportParameter>
         {
@@ -1106,6 +1108,17 @@ public sealed partial class TlsQuicConnectionTests
         {
             parameters.Add(TlsQuicTransportParameter.VariableInteger(
                 TlsQuicTransportParameterId.MaxIdleTimeout, idle));
+        }
+
+        // RFC 9368 s3's version_information, ABSENT BY DEFAULT - which is the state a capture
+        // that carries no such parameter puts a connection in, and the state in which s2.3
+        // forbids the server choosing any version at all. A test that wants compatible version
+        // negotiation says so by listing what this ClientHello offers.
+        if (availableVersions is { Length: > 0 } versions)
+        {
+            parameters.Add(new TlsQuicTransportParameter(
+                (ulong)TlsQuicTransportParameterId.VersionInformation,
+                TlsQuicTransportParameterSpec.EncodeVersionInformation(chosenVersion, versions)));
         }
 
         return new CustomTlsQuicClient(new CustomTlsQuicClientOptions

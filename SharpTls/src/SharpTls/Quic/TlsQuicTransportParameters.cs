@@ -328,6 +328,46 @@ public sealed class TlsQuicTransportParameters
         }
     }
 
+    /// <summary>
+    /// Reads RFC 9368 section 3's <c>version_information</c> body into its Chosen Version and
+    /// its Available Versions.
+    /// </summary>
+    /// <remarks>TRY-SHAPED AND SHARED WITH THE VALIDATOR'S RULES BUT NOT ITS THROW. The
+    /// validator below runs on a parameter list as it is parsed and rejects a malformed body
+    /// outright; this runs on a body already in hand - our own ClientHello's, or a peer's that
+    /// has already been through that validator - and answers false rather than throwing so the
+    /// caller can name the connection error RFC 9368 s4 asks for.</remarks>
+    /// <param name="value">The parameter's value bytes.</param>
+    /// <param name="chosenVersion">The Chosen Version field.</param>
+    /// <param name="availableVersions">The Available Versions list, in the order sent.</param>
+    /// <returns>Whether the body is well formed.</returns>
+    internal static bool TryDecodeVersionInformation(
+        ReadOnlySpan<byte> value,
+        out uint chosenVersion,
+        out uint[] availableVersions)
+    {
+        chosenVersion = 0;
+        availableVersions = [];
+
+        // s3 Figure 2: a 32-bit Chosen Version then one or more 32-bit Available Versions, so
+        // the shortest legal body is eight bytes and every legal body is a multiple of four.
+        if (value.Length < 8 || (value.Length & 3) != 0)
+        {
+            return false;
+        }
+
+        chosenVersion = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(value);
+        var versions = new uint[(value.Length / 4) - 1];
+        for (var index = 0; index < versions.Length; index++)
+        {
+            versions[index] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(
+                value[(4 * (index + 1))..]);
+        }
+
+        availableVersions = versions;
+        return true;
+    }
+
     private static void ValidateVersionInformation(TlsQuicTransportParameter parameter)
     {
         var value = parameter.ValueSpan;

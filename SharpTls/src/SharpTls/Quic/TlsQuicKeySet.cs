@@ -125,7 +125,7 @@ internal sealed class TlsQuicKeySet : IDisposable
     private const int LevelCount = 4;
 
     private readonly TlsQuicPacketReceiver _receiver;
-    private readonly TlsQuicVersion _version;
+    private TlsQuicVersion _version;
     private readonly WriteKeys?[] _write = new WriteKeys?[LevelCount];
     private readonly bool[] _discarded = new bool[LevelCount];
     private bool _disposed;
@@ -296,6 +296,42 @@ internal sealed class TlsQuicKeySet : IDisposable
         return _discarded[(int)level]
             ? TlsQuicKeyLevelState.Discarded
             : TlsQuicKeyLevelState.NeverInstalled;
+    }
+
+    /// <summary>
+    /// RFC 9368 section 2.3: moves this key set to the version the server chose, before the
+    /// Initial keys are re-derived under it.
+    /// </summary>
+    /// <remarks>
+    /// <para>INITIAL ONLY, AND THE GUARD IS THE POINT. RFC 9369 section 3.1 changes the Initial
+    /// SALT with the version; the Handshake and Application secrets come from the TLS exchange
+    /// and their labels change too (section 3.2's "quicv2 " prefix). Moving the version after
+    /// any of those is installed would leave keys derived under one version being used under
+    /// another, silently - so it is refused instead. Compatible version negotiation completes
+    /// during the first flight, long before Handshake keys exist, so the guard costs
+    /// nothing legitimate.</para>
+    /// <para>The caller re-derives immediately: see
+    /// <c>TlsQuicConnection.TryAdoptNegotiatedVersion</c>.</para>
+    /// </remarks>
+    /// <param name="version">The negotiated version.</param>
+    /// <exception cref="InvalidOperationException">Keys above Initial are already installed.
+    /// </exception>
+    internal void AdoptVersion(TlsQuicVersion version)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_write[(int)TlsQuicEncryptionLevel.Handshake] is not null
+            || _write[(int)TlsQuicEncryptionLevel.Application] is not null
+            || _write[(int)TlsQuicEncryptionLevel.EarlyData] is not null)
+        {
+            throw new InvalidOperationException(
+                "RFC 9368 s2.3's version change happens during the first flight. This key set "
+                    + "already holds secrets derived under the previous version, and RFC 9369 "
+                    + "s3.2 changes the derivation labels with the version, so moving it now "
+                    + "would use keys from one version under another.");
+        }
+
+        _version = version;
     }
 
     /// <summary>

@@ -365,27 +365,71 @@ public sealed class LoopbackQuicPeerTests
     // nothing about the number. Every other knob is TlsQuicConnectionSpec's default.
     private static TlsQuicConnectionSpec Spec() => new() { PaddingTarget = 1200 };
 
+    private static TlsQuicConnectionSpec Spec(TlsQuicVersion version) =>
+        new() { PaddingTarget = 1200, Version = version };
+
+    [Theory]
+    [InlineData(TlsQuicVersion.Version1)]
+    [InlineData(TlsQuicVersion.Version2)]
+    public async Task AWholeHandshakeCompletesInEitherVersion(TlsQuicVersion version)
+    {
+        // THE ONLY TEST THAT PROVES VERSION 2 IS MORE THAN A CODEC. RFC 9369 changes three
+        // things at once - s3.1's Initial salt, s3.2's "quicv2 " derivation labels, and s5's
+        // long-header type numbering - and each of them is checkable on its own by a unit test
+        // that would still pass if the other two were wrong. A handshake that completes is the
+        // assertion that they agree with each other AND with a peer reading them back.
+        //
+        // THE VERSION 1 ROW IS NOT REDUNDANT. It is what says a failure in the version 2 row is
+        // about the version rather than about this harness having been broken by the change
+        // that parameterised it.
+        using var cancellation = Timeout();
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        await using var client = Client(pki, forceHelloRetryRequest: false);
+        await using var server = Server(credential);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var clientPeer = ClientPeer(
+            clientTransport, serverTransport, client, Spec(version));
+        await using var serverPeer = ServerPeer(
+            serverTransport, clientTransport, server, Spec(version));
+
+        using var start = client.StartHandshake();
+        await LoopbackQuicPeer.RunHandshakeAsync(
+            clientPeer, serverPeer, start, SentAt, cancellationToken: cancellation.Token);
+
+        Assert.True(client.IsHandshakeComplete);
+        Assert.True(server.IsHandshakeComplete);
+
+        // ON THE WIRE, so the row cannot pass by both sides quietly agreeing on version 1.
+        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
+            clientTransport.Sent[0], out var header, out _));
+        Assert.Equal((uint)version, header.Version);
+        Assert.Equal(TlsQuicLongPacketType.Initial, header.Type);
+    }
+
     private static LoopbackQuicPeer ClientPeer(
         InMemoryDatagramTransport transport,
         InMemoryDatagramTransport peer,
-        CustomTlsQuicClient client) =>
+        CustomTlsQuicClient client,
+        TlsQuicConnectionSpec? spec = null) =>
         LoopbackQuicPeer.ForClient(
             transport,
             peer.LocalEndPoint,
             client,
             ChosenDestinationConnectionId,
             ClientSourceConnectionId,
-            Spec());
+            spec ?? Spec());
 
     private static LoopbackQuicPeer ServerPeer(
         InMemoryDatagramTransport transport,
         InMemoryDatagramTransport peer,
-        CustomTlsQuicServer server) =>
+        CustomTlsQuicServer server,
+        TlsQuicConnectionSpec? spec = null) =>
         LoopbackQuicPeer.ForServer(
             transport,
             peer.LocalEndPoint,
             server,
-            Spec());
+            spec ?? Spec());
 
     private static TlsServerCertificate Credential(TestPki pki) =>
         new(pki.Leaf, (RSA)pki.LeafKey, [pki.Root]);

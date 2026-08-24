@@ -419,6 +419,27 @@ internal sealed class TlsQuicConnectionSpec
     /// than an outlier. The knob exists because a client that draws instead cannot otherwise be
     /// imitated - the value used to be a `false` literal in the send path with no property at
     /// all.</remarks>
+    /// <summary>
+    /// Gets the QUIC version this client's first flight uses - RFC 9368 section 3's Chosen
+    /// Version. The default is <see cref="TlsQuicVersion.Version1"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE VERSION MAY STILL MOVE AFTER THIS, and this property does not decide that.
+    /// RFC 9368 section 2.3 lets the server answer the first flight in any version the client
+    /// listed as available, and this client adopts it when it does. What this sets is where the
+    /// connection STARTS.</para>
+    /// <para>WHAT THE CLIENT OFFERS IS A TRANSPORT PARAMETER, NOT THIS. The Available Versions
+    /// list lives in <c>version_information</c> (0x11) inside
+    /// <c>TlsQuicTransportParameterSpec.Parameters</c>, because it is a captured wire field
+    /// like any other - see <c>TlsQuicTransportParameterSpec.DrawnVersionInformation</c>. A
+    /// profile that sends no such parameter cannot negotiate at all, which is the correct
+    /// reading of a capture that does not carry one.</para>
+    /// <para>VERSION 2 IS SPEAKABLE BUT NOT COMPLETE: RFC 9369's Retry integrity constants are
+    /// not transcribed, so a Retry on a version 2 connection throws. See
+    /// <c>TlsQuicRetry</c>.</para>
+    /// </remarks>
+    public TlsQuicVersion Version { get; init; } = TlsQuicVersion.Version1;
+
     public TlsQuicSpinBitPolicy SpinBit { get; init; } = TlsQuicSpinBitPolicy.Zero;
 
     /// <summary>
