@@ -1873,9 +1873,9 @@
   "text": "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR.",
   "bucket": "streams",
   "checked": true,
-  "verdict": "COMPLIANT",
-  "confidence": "subsystem",
-  "evidence": "TlsQuicStreams StreamLimitError/FinalSizeError/StreamStateError sites"
+  "verdict": "MISSING",
+  "confidence": "verified",
+  "evidence": "TlsQuicConnection.cs:1791 default arm, self-declared; finding 6"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
@@ -3726,7 +3726,9 @@
   "text": "A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push ID than the client has advertised as a connection error of H3_ID_ERROR.",
   "bucket": "push",
   "checked": true,
-  "confidence": "verified"
+  "confidence": "verified",
+  "verdict": "MISSING",
+  "evidence": "TlsQuicHttp3Request.cs default arm; finding 7"
  },
  {
   "src": "rfc9114-section7-framing-layer.txt",
@@ -3790,7 +3792,9 @@
   "text": "A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED.",
   "bucket": "push",
   "checked": true,
-  "confidence": "verified"
+  "confidence": "verified",
+  "verdict": "MISSING",
+  "evidence": "TlsQuicHttp3Streams.cs:716 accepts it on the control stream; finding 3"
  },
  {
   "src": "rfc9114-section7-framing-layer.txt",

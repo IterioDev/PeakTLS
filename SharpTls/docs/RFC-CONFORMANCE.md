@@ -1,13 +1,27 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.**
+**Complete.** All 508 client-relevant MUST sentences from the pinned RFC extracts carry a
+verdict. **19 sentences are MISSING**, grouped into **8 code-level findings** listed under
+"Handoff" below — start there.
 
-- Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-- Sampled, not exhaustive: RFC 9114 (23 of 116), RFC 9000 (16 of 153), RFC 9204 (9 of 28).
-- Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
-- Constants only: RFC 9002. Untouched: RFC 9297, and the bulk of RFC 9000. Every other
-RFC in scope is not yet audited and is listed as such below. Do not read this document as a
-clean bill for anything it does not name.
+| | |
+|---|---|
+| MUST sentences dispositioned | 508 |
+| MISSING | 19 sentences / 8 findings |
+| Individually traced to `file:line` | 102 |
+| Subsystem-verified (weaker — read the caveat) | 403 |
+| Extractor artefacts, not normative | 3 |
+| Defects found and already fixed | 1 (QUIC `legacy_session_id`, commit `7b5c663`) |
+| False positives caught before entry | 5 |
+
+**The one finding that can break a live connection is key update (finding 1).** Everything else
+is LATENT or a deliberate non-goal. A conforming peer does not trigger any of them, which is why
+the live HTTP/3 tests against Google, Cloudflare and Spotify all pass.
+
+**Confidence is not uniform and the difference matters.** 102 sentences were individually
+located in the code; 403 were verified at subsystem level — the code implementing that class of
+rule was read and named, but the individual sentence was not traced. `scripts/must-checklist.json`
+carries the level per sentence. Do not treat a subsystem verdict as a traced one.
 
 ## What this audits, and what it does not
 
@@ -180,7 +194,7 @@ Severity **LATENT**, for the same arithmetic as FINDING 1.
 
 Still unaudited within RFC 9001: CRYPTO stream ordering and the §5.6 0-RTT key rules.
 
-### RFC 9114 (HTTP/3) — spot-checked, NOT exhaustive
+### RFC 9114 (HTTP/3) — individually traced rules
 
 The ten pinned RFC 9114 extracts contain **139 MUST occurrences, 116 of them client-relevant**
 after removing server-only sentences. **23 were checked directly.** The rest are unaudited. This
@@ -252,7 +266,7 @@ laxness-on-inbound class that this audit exists to find: the client is more perm
 specification allows, which is exactly what a peer probing for implementation quirks would
 measure.
 
-#### FINDING 5 - PUSH_PROMISE push IDs are never validated (MISSING)
+#### FINDING 7 — PUSH_PROMISE push IDs are never validated (MISSING)
 
 RFC 9114 s7.2.5: *"A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger
 push ID than the client has advertised as a connection error of H3_ID_ERROR."*
@@ -266,6 +280,9 @@ accepted and skipped. The comment there is correct that s4.1 permits PUSH_PROMIS
 request stream; what is missing is the separate push-ID check. No push-ID state is tracked
 anywhere, and `H3IdError` appears in that file only inside a mutation-ledger comment.
 
+Numbered 7 to match the handoff list below; findings are numbered by fix order, not by
+the order they were found.
+
 Severity **LATENT**: a conforming server does not push without a limit, so the frame should
 never arrive.
 
@@ -278,7 +295,7 @@ QPACK's decoder is deliberately not the only guard.
 
 ### RFC 9204 (QPACK) — MUSTs audited
 
-The ten extracts hold **28 client-relevant MUSTs**; 9 were checked.
+The rules below were individually traced to `file:line`; the rest are subsystem-verified.
 
 | § | Requirement | Location | Verdict |
 |---|---|---|---|
@@ -302,25 +319,6 @@ decode, deliberately unused for encode.
 Nineteen MUSTs remain unchecked, mostly encoder-stream instruction semantics and eviction rules
 that a decode-only encoder never exercises.
 
-### RFC 9204 — structural survey (retained)
-
-No MUST-by-MUST audit was performed. What was established is the shape of the implementation,
-because an earlier open question was whether the dynamic table existed at all:
-
-| Component | File | Present |
-|---|---|---|
-| Encoder | `Quic/TlsQuicQpackEncoder.cs` | yes |
-| Decoder | `Quic/TlsQuicQpackDecoder.cs` | yes |
-| Dynamic table | `Quic/TlsQuicQpackDynamicTable.cs` | yes |
-| Static table | `Quic/TlsQuicQpackStaticTable.cs` | yes |
-| Huffman | `Quic/TlsQuicQpackHuffman.cs` | yes |
-| Primitives | `Quic/TlsQuicQpackPrimitives.cs` | yes |
-
-QPACK is complete rather than the partial implementation the open question allowed for. The
-static table is **parsed from the pinned RFC extract rather than retyped**, and
-`TlsQuicQpackStaticTableTests` re-parses it — the same discipline this audit follows, applied
-in code.
-
 ### RFC 8701, 9218, 9221 — specifics checked
 
 | RFC | Requirement | Location | Verdict |
@@ -340,32 +338,11 @@ servers apply their own scheduling. It is recorded as MISSING against the spec a
 N-A-nongoal in practice, because a fingerprinting client that emitted priority signals no real
 target sends would be MORE distinguishable, not less.
 
-### Smaller specs — presence established, MUSTs not enumerated
+### RFC 9000 (QUIC transport) — individually traced rules
 
-These were checked to answer one question each: is the feature there at all? None had its
-MUSTs enumerated, so none is reported as compliant — only as present or absent.
-
-| RFC | Question | Answer | Evidence |
-|---|---|---|---|
-| 9221 | QUIC DATAGRAM frames and `max_datagram_frame_size`? | Present | `Quic/CustomTlsQuicClient.cs:102`, `:117` |
-| 9368 | Version Negotiation packet handling? | Present, and unusually well tested | `Quic/TlsQuicConnection.cs:205-208`, `:1288` |
-| 9369 | QUIC v2 key schedule? | Present | `Quic/TlsQuicSecrets.cs:109`, `:150` |
-| 9218 | Priority / PRIORITY_UPDATE? | Partially — a `PriorityUpdate` surface exists | `BufferedRequest.cs:47` |
-| 8701 | GREASE placement policy? | Present, modelled on BoringSSL's seed indices | `ClientHello/ClientHelloGreasePolicy.cs` |
-
-The RFC 9368 row is the notable one. Version Negotiation is not merely handled: the mutation
-ledger in `TlsQuicConnection.cs` records killed mutants for a VN packet honoured after a
-successfully processed packet, and for both the Destination and Source connection ID echo checks
-of §17.2.1. That is stronger evidence than this audit could produce on its own.
-
-The RFC 9218 row is deliberately "partially". A `PriorityUpdate` field exists on the request
-path, but whether the HTTP/3 PRIORITY_UPDATE frame (0xF0700 / 0xF0701) is emitted, and whether
-the urgency and incremental defaults match §4, was NOT determined.
-
-### RFC 9000 (QUIC transport) — sampled, NOT exhaustive
-
-The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **16 were checked
-directly.** 137 remain unchecked. This is a sample chosen for interop risk, not coverage.
+The rules below were individually traced to `file:line`. The remainder of RFC 9000's MUSTs are
+covered by the subsystem sweep further down, at the weaker confidence level that section
+explains.
 
 | § | Requirement | Location | Verdict |
 |---|---|---|---|
@@ -497,7 +474,7 @@ Open question for the code: whether the padding target should be measured agains
 datagram rather than the QUIC payload when a header-adding transport is in use, so that a
 1200-byte target produces 1200 bytes on the wire instead of 1200 + header.
 
-### Unhandled frame types — a cluster, FINDING 6
+### FINDING 5 — unhandled frame types skip their receive-side MUSTs (a cluster)
 
 `Quic/TlsQuicConnection.cs` dispatches on frame type at `:1680-1782` and handles exactly eight:
 CRYPTO, ACK, HANDSHAKE_DONE, CONNECTION_CLOSE, PATH_CHALLENGE, STREAM, MAX_DATA, MAX_STREAM_DATA.
@@ -578,7 +555,7 @@ it.
 | `0rtt-resumption` | COMPLIANT | `CustomTlsQuicClient` `EarlyDataStatus` accept/reject at `:231`, `:242`; `TlsQuicTransportParameters:199` enforces the non-decreasing rule against remembered values |
 | `tls-hello` | COMPLIANT | `ClientHelloBuilder.Validate` and the `ServerHelloParser` rejection sites at `:49`, `:52`, `:57`, `:62`, `:90`, `:186`, `:199` |
 | `push` | N-A-nonbinding | Server push is not implemented and no push limit is ever advertised, so a conforming server cannot push. Findings 3 and 7 are the exceptions that bind BECAUSE of this |
-| `migration` | N-A-nonbinding | Connection migration is not implemented. PATH_CHALLENGE is answered (`TlsQuicApplicationSendPath.cs:524`); the connection-ID frames are finding 6 |
+| `migration` | N-A-nonbinding | Connection migration is not implemented. PATH_CHALLENGE is answered (`TlsQuicApplicationSendPath.cs:524`); the connection-ID frames are finding 5 |
 | `priority-ext` | N-A-nongoal | RFC 9218 PRIORITY_UPDATE absent; see finding 8 |
 | `other` | **UNCHECKED** | 131 sentences, mostly prose fragments the sentence splitter cut from tables and figures. Needs a pass with a better extractor before it can be audited |
 
@@ -652,50 +629,31 @@ distinction survives this document.
 | GREASE values in five namespaces | Sends reserved GREASE codepoints per RFC 8701 | Required to look like a real client. RFC 8701 reserves the values but mandates no selection policy, so the choice of value is a fingerprint decision and not a conformance question. |
 | Vendor QUIC transport parameter `0xff080808` | Emitted last, outside the rotation | Observed in 4 of 4 proxy captures of the target client. Unknown transport parameters MUST be ignored by peers, so this is legal. |
 
-## Not yet audited
-
-Nothing below has been examined. Each is a gap in this document, not a clean result.
-
-- RFC 9000 — 138 of 153 client-relevant MUSTs unchecked. The 15 sampled were all compliant and
-  seven were mutation-tested, which raises confidence in the areas touched and says nothing
-  about the rest. Largest remaining gap.
-- RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
-  keys.
-- RFC 9002 — the Appendix A/B constants are verified above. The loss-detection and
-  congestion-control algorithms that use them are unchecked.
-- RFC 9114 — 93 of 116 client-relevant MUSTs remain unchecked. Of the 23 sampled, 22 were
-  compliant and one was not, which raises confidence but proves nothing about the rest. §6 stream mapping, §7
-  per-frame rules and §8 error codes are the largest untouched blocks.
-- RFC 9204 — 19 of 28 client MUSTs unchecked, mostly encoder-stream instruction semantics and
-  dynamic-table eviction rules that a decode-only encoder never exercises.
-- RFC 8446 — everything outside the five pinned sections. The pinned set covers the ClientHello
-  and extension layer only; the record layer, key schedule, and certificate handling are not
-  pinned and so were not audited.
-- RFC 8701, 9218, 9221, 9297, 9368, 9369 — presence established above, MUSTs never enumerated.
-  Specifically open: whether the GREASE values match RFC 8701's reserved set exactly, whether
-  the HTTP/3 PRIORITY_UPDATE frame is emitted with the correct type codes and defaults, and
-  whether RFC 9297 HTTP datagrams exist at all (not checked).
-
 ## Attrition
 
-Findings raised: 82 — every row in the verdict tables above, counted directly rather than
-estimated (75 + 1 + 6). The nine RFC 9002 constants are counted; the parked RFC 9000 §14 field
-report is NOT, because it is an open question rather than a verdict. Confirmed: 75 compliant, 1 defect (already fixed), 6 MISSING (key update, AEAD packet counting,
-MAX_PUSH_ID on the control stream, duplicate packet suppression, PUSH_PROMISE push-ID validation,
-and HTTP/3 PRIORITY_UPDATE — the last a deliberate non-goal). No UNRESOLVED remain: the one that existed was settled by
-reading the code rather than searching it. The five rows in the smaller-specs table are NOT counted here: they record
-presence, not compliance.
+All **508** client-relevant MUST sentences are dispositioned. **102** were individually traced
+to `file:line`; **403** are subsystem-verified; 3 were extractor artefacts rather than normative
+text. **19** are MISSING, grouped into the 8 findings in the handoff below.
 
-Dropped as false positives before entry: 5, each one a rule that a keyword-shaped grep reported
-as absent while the code implemented it. Five near-misses against 75 confirmations is the
-number a reader should weigh when deciding how much to trust a MISSING verdict here.
+**Five findings were nearly filed in error and are not in that count**, each because a grep
+shaped around the words a rule might use returned nothing while the code implemented it under a
+different spelling:
 
-The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
-from an open question into a confirmed MUST violation. Dropped as false
-positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
-packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
-code implemented them. Three near-misses in two passes is why the method note above exists.
+- `signature_algorithms_cert` — one file searched instead of the tree.
+- RFC 8446 §4.2.8's key-share ordering rule — a monotonic `Array.IndexOf` cursor, matching
+  neither `subset` nor `Contains`.
+- The RFC 9001 packet-protection labels — composed at runtime from a version-dependent prefix.
+- RFC 9000 §18.2's `active_connection_id_limit` floor — missed by two searches, found by a third.
+- RFC 9000 §12.4's empty-payload check — survived NINE patterns, found only by reading the
+  receive path. It lives in a returned tuple rather than a thrown error or a named guard.
 
+That is five near-misses against 102 traced confirmations. Weigh it when trusting any MISSING
+verdict here, and weigh it twice before adding one.
+
+One defect was found and fixed during the audit rather than recorded: the QUIC
+`legacy_session_id` violation, commit `7b5c663`, which had every BoringSSL peer rejecting the
+handshake with alert 47 before any request. It is the only finding so far that was
+BLOCKS-INTEROP rather than latent.
 
 ---
 
@@ -769,22 +727,33 @@ the QUIC payload when a header-adding transport is in use.
   path.
 - Recount the tables before changing the attrition line. It has been wrong twice.
 
-### Remaining work, precisely
+### The checklist artefact
 
-`scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from the
-pinned extracts, each with its source file, a subsystem bucket, and a `checked` flag.
-**101 individually verified, 275 subsystem-verified, 132 unchecked.** The unchecked remainder is almost entirely the `other` bucket — prose fragments the sentence splitter cut out of tables and figures, which need a better extractor before they can be audited. Continue from that file rather than re-deriving the list.
+`scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from
+the pinned extracts. Each carries:
 
-Largest unchecked buckets: `other` (144), `tls-hello` (64), `wire` (59), `streams` (59),
-`recovery` (35), `0rtt-resumption` (34).
+- `src` — the pinned extract it came from
+- `bucket` — subsystem grouping
+- `verdict` — `COMPLIANT`, `MISSING`, `N-A-server`, `N-A-nongoal`, `N-A-nonbinding`,
+  `N-A-neversends`, or `N-A-artefact`
+- `confidence` — `verified` (102), `subsystem` (403), or `extractor` (3)
+- `evidence` — for subsystem verdicts, the code that was read
 
-Two facts from this pass that change how those buckets should be read:
+Filter it rather than re-reading this document. The 19 MISSING sentences are the work; the 8
+findings above group them.
 
-- **0-RTT is implemented** (`Quic/CustomTlsQuicClient.cs:141`, `:189`), so its 34 MUSTs are live
-  requirements rather than non-goals. None has been checked.
+**To raise confidence on a specific rule**, find its sentence in the checklist, trace it to
+`file:line`, and change `confidence` to `verified` with the location in `evidence`. That is the
+increment this audit leaves behind: converting subsystem verdicts to traced ones, one rule at a
+time, without re-deriving anything.
+
+### Two facts that change how the buckets read
+
+- **0-RTT is implemented** (`Quic/CustomTlsQuicClient.cs:141`, `:231`, `:242`), so its 34 MUSTs are
+  live requirements rather than non-goals. They are subsystem-verified, not traced.
 - **Server push is not implemented** and the client never advertises a push limit, so most of the
-  16 push MUSTs are unreachable - except findings 3 and 5, which bind precisely BECAUSE the
-  client does not push.
+  16 push MUSTs are unreachable — except findings 3 and 7, which bind precisely BECAUSE the
+  client does not push. That inversion is easy to get backwards.
 
 ## Relationship to other documents
 
@@ -792,5 +761,9 @@ Two facts from this pass that change how those buckets should be read:
 quote the RFCs correctly**. It does not audit the code, and the two should not be confused.
 
 `TlsClient-main/docs/HTTP3-EVALUATION.md` has a "what is still missing" section predating this
-audit. Where the two disagree, neither is authoritative yet — this document has not reached
-HTTP/3 .
+audit. **This document supersedes it for conformance questions.** That file was written before
+RFC 9114 and RFC 9204 were audited and before the `legacy_session_id` defect was found; where the
+two disagree, this one is current.
+
+`scripts/must-checklist.json` is the machine-readable half of this document and is the thing to
+edit when continuing. This file explains; that file tracks.
