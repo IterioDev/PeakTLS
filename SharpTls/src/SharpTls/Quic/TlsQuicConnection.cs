@@ -989,6 +989,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // TlsQuicDatagramBuilder.BuildInitialFlight hands back one array per datagram.
     private readonly byte[] _sendBuffer = new byte[DatagramBufferSize];
 
+    // Reused by the 1-RTT packing loop so measuring the frames already in hand allocates once
+    // per connection rather than once per datagram. See TlsQuicFrames.MeasureFrame.
+    private readonly List<byte> _frameMeasureScratch = new(64);
+
     // Indexed by TlsQuicEncryptionLevel. RFC 9000 s12.3's three packet number spaces are
     // Initial, Handshake and Application; EarlyData shares Application's and is unused here
     // because A4-minimal sends no 0-RTT.
@@ -1250,6 +1254,41 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// also what it advertised as <c>initial_source_connection_id</c>, because the factory
     /// was handed these exact bytes.</summary>
     internal ReadOnlyMemory<byte> SourceConnectionId => _sourceConnectionId;
+
+    /// <summary>Gets the largest UDP payload this connection will put on the wire - RFC 8899
+    /// s5.1.3's PLPMTU, and RFC 9000 s14.2's "maximum datagram size".</summary>
+    /// <remarks>RFC 9000 s14.2: "In the absence of these mechanisms, QUIC endpoints SHOULD NOT
+    /// send datagrams larger than the smallest allowed maximum datagram size." Until path MTU
+    /// discovery has confirmed anything larger this is the spec's BasePathMtu, which defaults
+    /// to that smallest allowed size.</remarks>
+    internal int CurrentMaxDatagramSize => _options.Spec.BasePathMtu;
+
+    /// <summary>Gets the QUIC payload one datagram may carry: the path MTU less what the
+    /// transport prepends, and never more than the transport can carry at all.</summary>
+    /// <remarks>
+    /// <para>THE SUBTRACTION IS THE WHOLE POINT OF THIS PROPERTY. RFC 9000 s14.2 measures the
+    /// maximum datagram size as the UDP payload, which for an encapsulating transport is
+    /// header + QUIC datagram. A SOCKS5 relay writes an RFC 1928 section 7 header - 32 bytes
+    /// for a domain-form destination - so a QUIC datagram built to exactly 1472 leaves the
+    /// interface at 1504 and a DF-set socket refuses it with SocketError.MessageSize. The
+    /// transport reports the cost through ITlsQuicDatagramTransport.DatagramOverhead and this
+    /// is where it is charged.</para>
+    /// <para>s14.2 sanctions exactly this: "A QUIC implementation MAY be more conservative in
+    /// computing the maximum datagram size to allow for unknown tunnel overheads or IP header
+    /// options/extensions." The overhead here is not unknown - the transport states it - which
+    /// makes this the accurate figure rather than a conservative one.</para>
+    /// </remarks>
+    internal int DatagramPayloadBudget => Math.Min(
+        CurrentMaxDatagramSize - _options.Transport.DatagramOverhead,
+        _options.Transport.MaxDatagramPayloadSize);
+
+    // The bytes a 1-RTT packet spends on framing before any frame: s17.3.1's first byte, the
+    // Destination Connection ID, the packet number, and s5.3's AEAD tag. Computed from THIS
+    // connection's actual lengths rather than from the widest legal ones, because it is
+    // subtracted from a per-datagram budget and the spec fixes both figures.
+    private int OneRttPacketOverhead =>
+        1 + _destinationConnectionId.Length + _options.Spec.PacketNumberEncodedLength
+        + TlsQuicPacketBuilder.AuthenticationTagLength;
 
     /// <summary>Gets how many RFC 9001 s6 key updates this connection has applied, in either
     /// direction.</summary>

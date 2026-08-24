@@ -278,6 +278,8 @@ TlsClient.TlsQuicOptions.AckRangeLimit.get -> int
 TlsClient.TlsQuicOptions.AckRangeLimit.set -> void
 TlsClient.TlsQuicOptions.AlpnProtocols.get -> System.Collections.Generic.IList<string!>!
 TlsClient.TlsQuicOptions.AlpnProtocols.set -> void
+TlsClient.TlsQuicOptions.BasePathMtu.get -> int
+TlsClient.TlsQuicOptions.BasePathMtu.set -> void
 TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.get -> bool
 TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.set -> void
 TlsClient.TlsQuicOptions.ConfigureClientHello.get -> System.Action<SharpTls.ClientHelloBuilder!>?
@@ -301,6 +303,8 @@ TlsClient.TlsQuicOptions.InitialPacketNumber.get -> ulong
 TlsClient.TlsQuicOptions.InitialPacketNumber.set -> void
 TlsClient.TlsQuicOptions.InitialRttRange.get -> (System.TimeSpan Minimum, System.TimeSpan Maximum)?
 TlsClient.TlsQuicOptions.InitialRttRange.set -> void
+TlsClient.TlsQuicOptions.MaximumPathMtu.get -> int
+TlsClient.TlsQuicOptions.MaximumPathMtu.set -> void
 TlsClient.TlsQuicOptions.PacketNumberEncodedLength.get -> int
 TlsClient.TlsQuicOptions.PacketNumberEncodedLength.set -> void
 TlsClient.TlsQuicOptions.PaddingTarget.get -> int

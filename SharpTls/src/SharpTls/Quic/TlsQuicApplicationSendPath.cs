@@ -573,7 +573,26 @@ internal sealed partial class TlsQuicConnection
         // entirely, which is s7.7 lines 353-355 and B.2 lines 507-509 - see the block above.
         if (_streams is { } streams && streams.HasPendingFrames && SendGateAdmits(now))
         {
-            frames.AddRange(streams.TakePendingFrames());
+            // RFC 9000 s14.2: "All QUIC packets that are not sent in a PMTU probe SHOULD be
+            // sized to fit within the maximum datagram size to avoid the datagram being
+            // fragmented or dropped." THIS LINE IS THAT SENTENCE. Until it existed the take
+            // was unbounded - `frames.AddRange(streams.TakePendingFrames())` - and a request
+            // body arrived as one STREAM frame in one datagram of whatever size the body
+            // happened to be. A 32 KB body produced a 32837-byte datagram, which a DF-set
+            // IPv4 socket refuses outright with SocketError.MessageSize.
+            //
+            // WHAT IS ALREADY IN `frames` IS CHARGED FOR, not assumed away: an ACK and a
+            // PATH_RESPONSE may precede the stream data, and both are measured with the same
+            // encoder that will write them rather than estimated.
+            streams.DatagramPayloadBudget = DatagramPayloadBudget;
+
+            var spent = OneRttPacketOverhead;
+            foreach (var already in frames)
+            {
+                spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
+            }
+
+            frames.AddRange(streams.TakePendingFrames(DatagramPayloadBudget - spent));
         }
 
         if (hasAck && !_options.Spec.AckLeadsInPacket)

@@ -1058,6 +1058,34 @@ internal sealed class TlsQuicStreamSet
     // corresponding limit"; TlsQuicStream carries the stream-scoped one. See Drain.
     private bool _dataBlockedSignalled;
 
+    // RFC 9000 s14.2's smallest allowed maximum datagram size, which s14.3 makes DPLPMTUD's
+    // BASE_PLPMTU. The floor a connection that has discovered nothing may still send at.
+    private const int DefaultDatagramPayloadBudget = 1200;
+
+    // The most one STREAM frame can cost on top of its data inside a 1-RTT datagram, summed
+    // from the widest legal form of every field rather than from the shape this client happens
+    // to send:
+    //
+    //   1  s17.3.1 short header first byte
+    //   20 Destination Connection ID, s17.3.1's maximum
+    //   4  packet number, s17.1's "encoded in 1 to 4 bytes"
+    //   1  s19.8 STREAM frame type
+    //   8  Stream ID varint, s16 Table 4's widest
+    //   8  Offset varint
+    //   8  Length varint
+    //   16 s5.3 AEAD tag
+    //
+    // OVERSHOOTING IS THE SAFE DIRECTION and is why the widest form is used throughout: this is
+    // subtracted from a budget, so a figure that is too large costs a few bytes of payload per
+    // datagram while one that is too small builds a datagram over the path MTU. The shipped
+    // presets use an 8-byte connection ID and a 1-byte packet number, so the real cost is
+    // around 40 and this reserves 66.
+    private const int OneRttStreamFrameOverheadBound = 1 + 20 + 4 + 1 + 8 + 8 + 8 + 16;
+
+    // Reused by TakePendingFrames so the packing loop allocates once per stream set rather
+    // than once per frame measured.
+    private readonly List<byte> _measureScratch = new(64);
+
     /// <param name="budget">The PEER's advertised RFC 9000 s18.2 limits, which bound what this
     /// endpoint may send.</param>
     /// <param name="local">OUR advertised s18.2 limits, which bound what the peer may send and
@@ -1074,6 +1102,20 @@ internal sealed class TlsQuicStreamSet
         LocalFlowControl = local ?? new TlsQuicLocalFlowControlSpec();
         _connectionReceiveLimit = LocalFlowControl.InitialMaxData;
     }
+
+    /// <summary>The bytes of QUIC payload one datagram may carry - the connection's current
+    /// path MTU less whatever the transport prepends. Bounds how much stream data one STREAM
+    /// frame is allowed to take.</summary>
+    /// <remarks>
+    /// <para>SETTABLE, BECAUSE IT MOVES. RFC 8899's search raises the PLPMTU as probes are
+    /// acknowledged and black hole detection drops it back, so this is a value the connection
+    /// pushes in rather than one this type derives once.</para>
+    /// <para>THE DEFAULT IS THE RFC's FLOOR AND NOT AN UNBOUNDED VALUE. A stream set that
+    /// nobody configured must not be the one that builds a 32-kilobyte datagram; 1200 is what
+    /// RFC 9000 s14.2 permits without any discovery at all, so the unconfigured case is the
+    /// conservative one.</para>
+    /// </remarks>
+    internal int DatagramPayloadBudget { get; set; } = DefaultDatagramPayloadBudget;
 
     /// <summary>Gets the s18.2 limits this endpoint advertised, which every receive-side
     /// refusal below is measured against.</summary>
@@ -1208,7 +1250,20 @@ internal sealed class TlsQuicStreamSet
             return;
         }
 
-        while (stream.TryTakeSendable(budget.Available, out var chunk, out var fin))
+        // RFC 8899 s4.4: "A PL is unable to send a packet (other than a probe packet) with a
+        // size larger than the current PLPMTU at the network layer. To avoid this, a PL MAY be
+        // designed to segment data blocks larger than the MPS into multiple datagrams." This
+        // take is that segmentation, and the cap is the MPS.
+        //
+        // TWO LIMITS, AND THEY ARE INDEPENDENT. The peer's flow-control credit says how many
+        // bytes it will ACCEPT; the datagram budget says how many will FIT on the path. Before
+        // the second one existed this loop took everything the first allowed - which for a
+        // request body under a generous initial_max_stream_data meant one STREAM frame of the
+        // whole body and one datagram to match.
+        var perFrame = (ulong)Math.Max(1, DatagramPayloadBudget - OneRttStreamFrameOverheadBound);
+
+        while (stream.TryTakeSendable(
+            Math.Min(budget.Available, perFrame), out var chunk, out var fin))
         {
             var rawType = (ulong)TlsQuicFrameType.Stream | TlsQuicStreamFrames.LengthBit;
             if (stream.SendOffset != 0)
@@ -1361,6 +1416,53 @@ internal sealed class TlsQuicStreamSet
     /// work against a peer counting on s2.2's "QUIC makes no guarantees about the order of
     /// delivery of data between streams" applying BETWEEN streams and not within
     /// one.</remarks>
+    /// <summary>Takes as many queued frames as fit in <paramref name="payloadBudget"/> bytes of
+    /// packet payload, leaving the rest queued in order for the next datagram.</summary>
+    /// <remarks>
+    /// <para>THE SEGMENTATION IN <see cref="Drain"/> IS NOT ENOUGH ON ITS OWN. That bounds each
+    /// STREAM frame to one datagram's worth; this bounds the NUMBER of them that go into one
+    /// datagram. A body chopped into ten conforming frames still makes one oversized datagram
+    /// if all ten are handed to the same packet.</para>
+    /// <para>AT LEAST ONE FRAME ALWAYS GOES, even if it does not fit. A budget smaller than a
+    /// single frame would otherwise return nothing forever while the queue stayed non-empty -
+    /// a stall, and a silent one. Taking it means the datagram is over budget, which the
+    /// transport will refuse loudly; that is the better failure and it cannot arise from the
+    /// segmentation above, which sizes frames against this same budget.</para>
+    /// <para>ORDER IS PRESERVED ACROSS THE SPLIT: repairs before new data, s13.3's
+    /// "prioritize retransmission of data over sending new data", and the remainder keeps its
+    /// place at the head of its own queue.</para>
+    /// </remarks>
+    internal IReadOnlyList<TlsQuicFrame> TakePendingFrames(int payloadBudget)
+    {
+        var taken = new List<TlsQuicFrame>();
+        var spent = 0;
+
+        // Repairs first, then new data. One loop over the two queues in that order, so a
+        // repair can never be left behind while newer data goes out ahead of it.
+        for (var source = 0; source < 2; source++)
+        {
+            var queue = source == 0 ? _repairs : _pending;
+            while (queue.Count > 0)
+            {
+                var size = TlsQuicFrames.MeasureFrame(_measureScratch, queue[0]);
+                if (taken.Count > 0 && spent + size > payloadBudget)
+                {
+                    return taken;
+                }
+
+                spent += size;
+                taken.Add(queue[0]);
+                queue.RemoveAt(0);
+                if (source == 0)
+                {
+                    RepairsSent++;
+                }
+            }
+        }
+
+        return taken;
+    }
+
     internal IReadOnlyList<TlsQuicFrame> TakePendingFrames()
     {
         if (_repairs.Count == 0)
@@ -1720,7 +1822,15 @@ internal sealed partial class TlsQuicConnection
     /// <exception cref="InvalidOperationException">The peer's transport parameters have not
     /// arrived.</exception>
     internal TlsQuicStreamSet Streams => _streams ??=
-        new TlsQuicStreamSet(PeerFlowControl, _options.Spec.LocalFlowControl);
+        new TlsQuicStreamSet(PeerFlowControl, _options.Spec.LocalFlowControl)
+        {
+            // SET AT CONSTRUCTION AND NOT ONLY AT SEND TIME. Drain runs when the application
+            // WRITES, which is before any datagram is built, so a set that learned its budget
+            // only in TryBuildApplicationPacket would already have carved the whole body into
+            // one frame by the time it was told. The send path refreshes it every pass because
+            // path MTU discovery moves it.
+            DatagramPayloadBudget = DatagramPayloadBudget,
+        };
 
     // The s19.8 dispatch arm's body, here rather than in TlsQuicConnection.cs's frame switch so
     // that the STREAM-specific prose lives beside the code it describes and that file spends 6

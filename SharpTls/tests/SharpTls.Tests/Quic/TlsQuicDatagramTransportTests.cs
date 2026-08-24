@@ -148,6 +148,59 @@ public sealed class TlsQuicDatagramTransportTests
     }
 
     [Fact]
+    public async Task ARelayedTransportChargesForItsOwnHeader()
+    {
+        // RFC 9000 s14.2 measures the maximum datagram size as "the total UDP payload size of a
+        // single UDP datagram", which for an encapsulating transport is header + QUIC datagram.
+        // A path budget that ignored the header would build a datagram that fits the path and
+        // put one 32 bytes over it on the wire - which is how "direct works, only the relay
+        // fails" arises from a defect that is not in the relay at all.
+        //
+        // 32 IS THE DOMAIN FORM FOR A REAL HOST, derived rather than asserted as a bare
+        // literal: RFC 1928 section 7 spends 2 bytes on RSV, 1 on FRAG and 1 on ATYP, then a
+        // 1-byte name length, the name itself, and 2 for the port. "gew1-spclient.spotify.com"
+        // is 25 characters, so 4 + 1 + 25 + 2 = 32.
+        await using var relay = FakeSocks5Relay.Start();
+        await using var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options
+            {
+                ProxyEndPoint = relay.ProxyEndPoint,
+                DestinationHost = "gew1-spclient.spotify.com",
+            },
+            CancellationToken.None);
+
+        Assert.Equal(4 + 1 + 25 + 2, ((ITlsQuicDatagramTransport)transport).DatagramOverhead);
+
+        // AND THE CEILING ALREADY SUBTRACTED IT, which is the invariant that keeps the two
+        // numbers from drifting apart: whatever this transport says it prepends is exactly what
+        // its payload ceiling gives up against the bare socket maximum.
+        Assert.Equal(
+            TlsQuicUdpDatagramTransport.MaximumIPv4UdpPayload
+                - ((ITlsQuicDatagramTransport)transport).DatagramOverhead,
+            transport.MaxDatagramPayloadSize);
+    }
+
+    [Fact]
+    public async Task APlainUdpTransportPrependsNothing()
+    {
+        // The other half, and the reason DatagramOverhead has a DEFAULT implementation at all:
+        // a transport that does not encapsulate must report zero without being made to write a
+        // member that says nothing about it. The plain UDP transport declares no override, so
+        // this reads the interface default - which is exactly what an out-of-tree transport
+        // written before the member existed will do.
+        //
+        // THROUGH THE INTERFACE, NOT THE CONCRETE TYPE, and that is not incidental: a C# default
+        // interface member is reachable only through the interface, so this line is also the
+        // evidence that every consumer of ITlsQuicDatagramTransport gets an answer.
+        await using ITlsQuicDatagramTransport transport =
+            TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetwork);
+
+        Assert.Equal(0, transport.DatagramOverhead);
+        Assert.Equal(
+            TlsQuicUdpDatagramTransport.MaximumIPv4UdpPayload, transport.MaxDatagramPayloadSize);
+    }
+
+    [Fact]
     public async Task RelayedTransportRoundTripsADatagram()
     {
         await using var relay = FakeSocks5Relay.Start();

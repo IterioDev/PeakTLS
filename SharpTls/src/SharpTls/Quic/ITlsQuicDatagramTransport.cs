@@ -30,6 +30,28 @@ public interface ITlsQuicDatagramTransport : IAsyncDisposable
     /// discovery operates below this value.</summary>
     int MaxDatagramPayloadSize { get; }
 
+    /// <summary>Gets the bytes this transport prepends to every datagram before it reaches
+    /// the network, which the path MTU has to carry alongside the QUIC payload.</summary>
+    /// <remarks>
+    /// <para>ZERO FOR A PLAIN UDP SOCKET, and non-zero for anything that encapsulates - a
+    /// SOCKS5 UDP relay writes an RFC 1928 section 7 header in front of the payload, so a
+    /// QUIC datagram built exactly to the path MTU leaves the interface that many bytes over
+    /// it. RFC 9000 s14.2 measures the maximum datagram size as "the total UDP payload size
+    /// of a single UDP datagram", which for a relayed transport is header + payload.</para>
+    /// <para>DISTINCT FROM <see cref="MaxDatagramPayloadSize"/> BECAUSE THE TWO ANSWER
+    /// DIFFERENT QUESTIONS. That property is a 64-kilobyte endpoint ceiling and never binds
+    /// in practice; this one is a per-datagram cost that has to come off a path budget of
+    /// around 1200-1500 bytes, where it is 2% of the total. Deriving one from the other would
+    /// require the transport to know the path MTU, which it does not.</para>
+    /// <para>A DEFAULT IMPLEMENTATION, so an existing transport outside this assembly keeps
+    /// compiling and keeps its previous behaviour: no encapsulation, nothing to subtract.
+    /// RFC 9000 s14.2's "A QUIC implementation MAY be more conservative in computing the
+    /// maximum datagram size to allow for unknown tunnel overheads" is the sentence a wrong
+    /// zero would be relying on, and it is a MAY - so a transport that does encapsulate is
+    /// expected to say so here rather than hope the peer's budget has slack.</para>
+    /// </remarks>
+    int DatagramOverhead => 0;
+
     /// <summary>Sends one datagram.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The payload exceeds
     /// <see cref="MaxDatagramPayloadSize"/>.</exception>

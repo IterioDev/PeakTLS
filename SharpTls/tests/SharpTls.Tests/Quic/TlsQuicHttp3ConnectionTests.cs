@@ -1406,6 +1406,73 @@ public sealed partial class TlsQuicConnectionTests
             harness.Http3.RequestStreamIds);
     }
 
+    // ------------------------------------------------------------------------
+    // RFC 9000 s14.2: no datagram exceeds the maximum datagram size.
+    // ------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(512)]
+    [InlineData(2048)]
+    [InlineData(8192)]
+    [InlineData(32768)]
+    public async Task NoDatagramExceedsThePathMtuHoweverLargeTheBody(int bodyBytes)
+    {
+        // s14.2: "All QUIC packets that are not sent in a PMTU probe SHOULD be sized to fit
+        // within the maximum datagram size to avoid the datagram being fragmented or dropped",
+        // and, in the absence of discovery, "QUIC endpoints SHOULD NOT send datagrams larger
+        // than the smallest allowed maximum datagram size" - 1200 bytes.
+        //
+        // THIS TEST EXISTS BECAUSE THE AUDIT DID NOT HAVE IT AND THE BUG WAS REAL. There was no
+        // ceiling on the send path at all: Drain moved an entire request body into one STREAM
+        // frame bounded only by the peer's flow-control credit, and the datagram builder packed
+        // it into one datagram bounded only by the 65527-byte send buffer. Measured before the
+        // fix, one datagram per row: 577, 2113, 8257 and 32837 bytes.
+        //
+        // AND IT IS A REAL FAILURE, NOT A LATENT ONE. RFC 9000 s14 requires the DF bit to be
+        // set - "In IPv4, the Don't Fragment (DF) bit MUST be set if possible" - and both
+        // shipped transports set it, so on a 1500-byte MTU every datagram over 1472 bytes is
+        // refused at the socket with SocketError.MessageSize. Verified against a live interface
+        // at exactly that boundary: 1472 sent, 1473 threw.
+        //
+        // THE ROWS STRADDLE THE THRESHOLD. 512 bytes fitted a single datagram before the fix
+        // and still does, so it is the control; the other three did not and now do not.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(
+            cancellation.Token, flowControl: FlowControlParameters(bidiRemote: 1024 * 1024));
+
+        var before = harness.ClientTransport.Sent.Count;
+        Assert.NotNull(harness.Http3.TryOpenRequest(
+            Request(method: "POST", body: PatternedBody(bodyBytes)), out var refusal, out _));
+        Assert.Equal(TlsQuicHttp3RequestRefusal.None, refusal);
+
+        await harness.DrainToPeerAsync(cancellation.Token);
+
+        var sent = harness.ClientTransport.Sent.Skip(before).ToArray();
+        Assert.NotEmpty(sent);
+
+        // THE CEILING IS THE CONNECTION'S OWN FIGURE, not a literal repeated here: reading it
+        // back means a spec whose BasePathMtu was raised still gets checked against what it
+        // asked for rather than against 1200.
+        var ceiling = harness.Connection.DatagramPayloadBudget;
+        foreach (var datagram in sent)
+        {
+            Assert.True(
+                datagram.Length <= ceiling,
+                $"a datagram of {datagram.Length} bytes exceeds the {ceiling}-byte budget");
+        }
+
+        // AND THE BODY STILL ARRIVES WHOLE. A ceiling that dropped the tail would pass every
+        // assertion above, which is the failure this line exists to catch.
+        var reassembled = new List<byte>();
+        foreach (var frame in harness.Peer.ReceivedStreamFrames)
+        {
+            reassembled.AddRange(frame.Data.ToArray());
+        }
+
+        var frames = ReadHttp3Frames(reassembled.ToArray());
+        Assert.Equal(bodyBytes, frames[^1].Payload.Length);
+    }
+
     // A BODY MANY TIMES THE SIZE OF ANY HEADERS FRAME, ARRIVING INTACT. 16 KiB is past the
     // one-byte and two-byte QUIC varint ceilings for the s7.1 Length (RFC 9000 s16 puts those
     // at 63 and 16383), so the frame writer's length encoding, the STREAM frame's own length
@@ -1427,7 +1494,13 @@ public sealed partial class TlsQuicConnectionTests
                 out _));
         Assert.Equal(TlsQuicHttp3RequestRefusal.None, refusal);
 
-        await harness.FlushAsync(cancellation.Token);
+        // DrainToPeerAsync AND NOT FlushAsync, WHICH IS THE CHANGE RFC 9000 s14.2 FORCED. Flush
+        // sends exactly one datagram and asserts one was built; that was enough while a 16 KiB
+        // body went out as a single 16473-byte datagram. It no longer does - the path MTU
+        // ceiling caps a datagram at 1200 bytes, so this body is about fifteen of them - and a
+        // one-datagram flush now leaves the FIN unsent. The paragraph below anticipated exactly
+        // this and is why nothing else in the test had to move.
+        await harness.DrainToPeerAsync(cancellation.Token);
 
         // REASSEMBLED FROM WHATEVER FRAMES IT TOOK. Nothing here assumes one STREAM frame - if
         // the send path ever splits a large body, this still reads the stream rather than the
@@ -1443,6 +1516,14 @@ public sealed partial class TlsQuicConnectionTests
         }
 
         Assert.True(fin);
+
+        // AND IT TOOK MORE THAN ONE FRAME, which is the RFC 9000 s14.2 ceiling showing through.
+        // Before it, this body was one STREAM frame in one 16473-byte datagram; the assertion
+        // above passed either way, so without this line the split could silently revert.
+        Assert.True(
+            harness.Peer.ReceivedStreamFrames.Count > 1,
+            $"expected the body to be split across datagrams, got "
+            + $"{harness.Peer.ReceivedStreamFrames.Count} frame(s)");
 
         var frames = ReadHttp3Frames(reassembled.ToArray());
         Assert.Equal(
@@ -1832,7 +1913,11 @@ public sealed partial class TlsQuicConnectionTests
         /// so that a send path which never runs dry fails rather than spins.</remarks>
         internal async ValueTask DrainToPeerAsync(CancellationToken cancellationToken)
         {
-            for (var datagram = 0; datagram < 128; datagram++)
+            // PASSES, NOT DATAGRAMS, SINCE THE s14.2 CEILING LANDED. A pass that the pacer
+            // defers builds nothing, so a bound counting datagrams would be spent by waiting
+            // rather than by sending. 512 passes is far more than the fifteen datagrams a
+            // 16 KiB body takes and still fails a send path that never runs dry.
+            for (var pass = 0; pass < 512; pass++)
             {
                 var built = await Connection.SendPendingAsync(cancellationToken);
 
@@ -1848,13 +1933,49 @@ public sealed partial class TlsQuicConnectionTests
 
                 }
 
-                if (!built)
+                if (built)
+                {
+                    continue;
+                }
+
+                // NOTHING WAS BUILT, WHICH IS NOT THE SAME AS NOTHING BEING LEFT. Since the
+                // RFC 9000 s14.2 datagram ceiling landed, a body larger than the initial
+                // congestion window goes out as many datagrams rather than one oversized one -
+                // 16 KiB is about fifteen - and RFC 9002 s7's "MUST NOT send ... in excess of
+                // the congestion window" then refuses the rest until something is acknowledged.
+                // Before the ceiling this could not arise: one datagram passed the gate while
+                // bytes_in_flight was zero and carried the whole body past the window.
+                //
+                // So the peer acknowledges and the client reads it, which is the round trip a
+                // real connection would make anyway. Only when a pass builds nothing AND the
+                // stream set has nothing queued is the drain actually finished.
+                if (!Connection.Streams.HasPendingFrames)
                 {
                     return;
                 }
+
+                // BOTH GATES BIND, IN SEQUENCE, AND EACH NEEDS A DIFFERENT THING. Measured at
+                // 16 KiB rather than assumed: waiting alone left refusedByWindow=501, and
+                // acknowledging alone left deferredByPacer=238. RFC 9002 s7.7's pacer opens on
+                // the CLOCK, which no amount of pumping moves; s7's congestion window opens on
+                // an ACKNOWLEDGMENT, which no amount of waiting produces.
+                //
+                // THE ACK MUST BE CUMULATIVE. SendAckAsync acknowledges one packet, which told
+                // the client the other twelve were lost: s13.3's repairs re-sent ranges the
+                // peer already had and the reassembly below read offset 5670 where it had
+                // reached 10206. SendCumulativeAckAsync acknowledges everything, which is the
+                // truth on a lossless in-memory transport.
+                await Peer.SendCumulativeAckAsync(cancellationToken);
+                await Connection.PumpOnceAsync(cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(1), cancellationToken);
             }
 
-            Assert.Fail("the connection still had frames to send after 128 datagrams");
+            Assert.Fail(
+                "the connection still had frames to send after 512 passes. "
+                + $"sent={ClientTransport.Sent.Count} "
+                + $"refusedByWindow={Connection.SendsRefusedByCongestionWindow} "
+                + $"deferredByPacer={Connection.SendsDeferredByPacer} "
+                + $"pending={Connection.Streams.HasPendingFrames}");
         }
 
         /// <summary>Has the peer send one RFC 9000 s19.10 MAX_STREAM_DATA raising

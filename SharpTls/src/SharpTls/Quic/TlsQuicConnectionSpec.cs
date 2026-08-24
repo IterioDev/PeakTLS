@@ -165,11 +165,31 @@ internal sealed class TlsQuicConnectionSpec
     // that source and connected to nothing.
     private const int MaximumUdpPayload = 65527;
 
+    // 1500 - 20 - 8. Not a constant of any RFC: it is the UDP payload that fits an untunnelled
+    // Ethernet frame, which is why it is the default ceiling for a search and NOT a floor
+    // anything relies on. A path with a smaller MTU is exactly what the search exists to find.
+    private const int EthernetMaximumUdpPayload = 1472;
+
     private readonly int _sourceConnectionIdLength;
     private readonly int _destinationConnectionIdLength = MinimumClientDestinationConnectionIdLength;
     private readonly ulong _initialPacketNumber;
     private readonly int _packetNumberEncodedLength = MaximumPacketNumberEncodedLength;
     private readonly int _paddingTarget = MinimumInitialDatagramSize;
+
+    // RFC 8899 s5.1.2's BASE_PLPMTU: "a configured size expected to work for most paths ...
+    // When using IPv4, there is no currently equivalent size specified, and a default
+    // BASE_PLPMTU of 1200 bytes is RECOMMENDED." RFC 9000 s14.3 ties it to QUIC's own floor:
+    // "Endpoints SHOULD set the initial value of BASE_PLPMTU ... to be consistent with QUIC's
+    // smallest allowed maximum datagram size."
+    private readonly int _basePathMtu = MinimumInitialDatagramSize;
+
+    // RFC 8899 s5.1.2's MAX_PLPMTU: "the largest size of PLPMTU. This has to be less than or
+    // equal to the maximum size of the PL packet that can be sent on the outgoing interface
+    // (constrained by the local interface MTU)." 1472 is 1500 - 20 (IPv4 header) - 8 (UDP
+    // header), the ordinary Ethernet ceiling, and it is also the figure
+    // TlsQuicTransportParameterSpec's Brave 151 preset advertises as max_udp_payload_size -
+    // so the search stops where the capture says the client it imitates expects to stop.
+    private readonly int _maximumPathMtu = EthernetMaximumUdpPayload;
     private readonly ImmutableArray<int> _initialCryptoFrameByteCounts = [];
     private readonly ImmutableArray<int> _initialCryptoFramesPerDatagram = [];
     private readonly ImmutableArray<TlsQuicFrameType> _initialFrameOrder =
@@ -332,6 +352,68 @@ internal sealed class TlsQuicConnectionSpec
             ArgumentOutOfRangeException.ThrowIfGreaterThan(
                 value, MaximumUdpPayload, nameof(PaddingTarget));
             _paddingTarget = value;
+        }
+    }
+
+    /// <summary>Gets the datagram size RFC 8899 s5.1.2 calls BASE_PLPMTU - the size every
+    /// datagram is bounded by before path MTU discovery has confirmed anything larger.</summary>
+    /// <remarks>
+    /// <para>THIS IS THE CEILING, WHERE <see cref="PaddingTarget"/> IS THE FLOOR, and they are
+    /// separate numbers that happen to share a default. PaddingTarget expands a datagram
+    /// carrying an Initial packet UP to 1200 because RFC 9000 s14.1 requires it; this bounds
+    /// every datagram DOWN, because s14.2 says "In the absence of these mechanisms, QUIC
+    /// endpoints SHOULD NOT send datagrams larger than the smallest allowed maximum datagram
+    /// size". Before this knob existed there was no ceiling at all: an outgoing datagram was
+    /// bounded only by the 65527-byte send buffer, and a 32 KB request body produced one
+    /// 32837-byte datagram that a DF-set IPv4 socket refuses with SocketError.MessageSize.
+    /// </para>
+    /// <para>RFC 8899 s5.1.2 recommends exactly this value - "a default BASE_PLPMTU of 1200
+    /// bytes is RECOMMENDED" - and RFC 9000 s14.3 makes MIN_PLPMTU the same as BASE_PLPMTU,
+    /// which is why the lower bound here is s14's own 1200 and not something smaller.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Below 1200 or above 65527.</exception>
+    public int BasePathMtu
+    {
+        get => _basePathMtu;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(
+                value, MinimumInitialDatagramSize, nameof(BasePathMtu));
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(
+                value, MaximumUdpPayload, nameof(BasePathMtu));
+            _basePathMtu = value;
+        }
+    }
+
+    /// <summary>Gets the largest datagram size path MTU discovery will search up to - RFC 8899
+    /// s5.1.2's MAX_PLPMTU.</summary>
+    /// <remarks>
+    /// <para>Defaults to 1472, which is 1500 - 20 - 8: the UDP payload that fits an
+    /// untunnelled Ethernet frame. It is also what the Brave 151 capture advertises as
+    /// max_udp_payload_size, so a search that stops here stops where the imitated client
+    /// expects to.</para>
+    /// <para>NOT THE SAME THING AS THE ADVERTISED PARAMETER, and deliberately not wired to it.
+    /// max_udp_payload_size tells the PEER what this endpoint will RECEIVE; this bounds what it
+    /// SENDS. The capture's own note is that "Advertised parameter and actual ceiling are
+    /// separate concerns and must not be wired together" - a client may advertise one figure
+    /// and send at another, and wiring them would make changing what we tell a server silently
+    /// change what we put on the wire.</para>
+    /// <para>THE PEER'S OWN max_udp_payload_size STILL BINDS, at run time and independently:
+    /// RFC 9000 s14 makes it "an additional limit on the maximum datagram size", so the
+    /// effective ceiling is the smaller of this knob, the peer's parameter and what the
+    /// transport can carry. This is the local half of that minimum.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Below 1200 or above 65527.</exception>
+    public int MaximumPathMtu
+    {
+        get => _maximumPathMtu;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(
+                value, MinimumInitialDatagramSize, nameof(MaximumPathMtu));
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(
+                value, MaximumUdpPayload, nameof(MaximumPathMtu));
+            _maximumPathMtu = value;
         }
     }
 

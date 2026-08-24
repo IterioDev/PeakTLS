@@ -647,6 +647,27 @@ internal static class TlsQuicFrames
         return true;
     }
 
+    /// <summary>The encoded length of one frame in bytes, measured by encoding it.</summary>
+    /// <remarks>
+    /// <para>MEASURED RATHER THAN CALCULATED, and that is the whole point. A second
+    /// implementation that added up field widths would be a duplicate of
+    /// <see cref="WriteFrame"/> that no test compares against it, and every varint in a QUIC
+    /// frame has four possible widths - so the two would agree on the common case and drift on
+    /// the boundary, which is exactly where a datagram budget is decided.</para>
+    /// <para>THE CALLER OWNS THE SCRATCH so the packing loop allocates once per datagram
+    /// rather than once per frame. It is cleared on entry, so a caller may hand the same list
+    /// to every call and read nothing into its contents afterwards.</para>
+    /// </remarks>
+    /// <param name="scratch">A working list the caller owns and reuses; cleared on entry.</param>
+    /// <param name="frame">The frame to measure.</param>
+    internal static int MeasureFrame(List<byte> scratch, in TlsQuicFrame frame)
+    {
+        ArgumentNullException.ThrowIfNull(scratch);
+        scratch.Clear();
+        WriteFrame(scratch, frame);
+        return scratch.Count;
+    }
+
     /// <summary>
     /// Reads RFC 9221 s4's DATAGRAM frame and DROPS ITS PAYLOAD, leaving
     /// <paramref name="frame"/> carrying nothing but its

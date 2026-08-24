@@ -548,6 +548,7 @@ T: public sealed class SharpTls.Quic.CustomTlsQuicServerOptions
 T: public interface SharpTls.Quic.ITlsQuicDatagramTransport : System.IAsyncDisposable
   M: public abstract System.Threading.Tasks.ValueTask SendAsync(System.Net.IPEndPoint destination, System.ReadOnlyMemory<System.Byte> payload, System.Threading.CancellationToken cancellationToken)
   M: public abstract System.Threading.Tasks.ValueTask<SharpTls.Quic.TlsQuicDatagramReceiveResult> ReceiveAsync(System.Memory<System.Byte> buffer, System.Threading.CancellationToken cancellationToken)
+  P: public System.Int32 DatagramOverhead { get; }
   P: public System.Int32 MaxDatagramPayloadSize { get; }
 T: public sealed class SharpTls.Quic.TlsQuicCryptoDataEvent : SharpTls.Quic.TlsQuicEvent
   P: public SharpTls.Quic.TlsQuicEncryptionLevel Level { get; }
@@ -622,6 +623,7 @@ T: public sealed class SharpTls.Quic.TlsQuicSocks5Transport : SharpTls.Quic.ITls
   M: public System.Threading.Tasks.ValueTask SendAsync(System.Net.IPEndPoint destination, System.ReadOnlyMemory<System.Byte> payload, System.Threading.CancellationToken cancellationToken)
   M: public System.Threading.Tasks.ValueTask<SharpTls.Quic.TlsQuicDatagramReceiveResult> ReceiveAsync(System.Memory<System.Byte> buffer, System.Threading.CancellationToken cancellationToken)
   M: public static System.Threading.Tasks.Task<SharpTls.Quic.ITlsQuicDatagramTransport> ConnectAsync(SharpTls.Quic.TlsQuicSocks5Options options, System.Threading.CancellationToken cancellationToken)
+  P: public System.Int32 DatagramOverhead { get; }
   P: public System.Int32 MaxDatagramPayloadSize { get; }
 T: public sealed class SharpTls.Quic.TlsQuicTrafficSecret : System.IDisposable
   M: public SharpTls.Quic.TlsQuicPacketProtectionKeys DerivePacketProtectionKeys(SharpTls.Quic.TlsQuicVersion version)

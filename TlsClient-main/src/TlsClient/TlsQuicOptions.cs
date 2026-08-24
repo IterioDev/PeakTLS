@@ -212,6 +212,12 @@ public sealed class TlsQuicOptions
     /// </summary>
     private const int InitialDatagramPaddingTarget = 1200;
 
+    /// <summary>
+    /// 1500 - 20 (IPv4 header) - 8 (UDP header): the UDP payload that fits an untunnelled
+    /// Ethernet frame, and the figure the captured presets advertise as max_udp_payload_size.
+    /// </summary>
+    private const int EthernetMaximumUdpPayload = 1472;
+
     /// <summary>Gets or sets the source connection ID length in bytes.</summary>
     public int SourceConnectionIdLength { get; set; } = SpecDefaults.SourceConnectionIdLength;
 
@@ -233,6 +239,34 @@ public sealed class TlsQuicOptions
     /// section 14.1's 1200-byte minimum.
     /// </summary>
     public int PaddingTarget { get; set; } = InitialDatagramPaddingTarget;
+
+    /// <summary>
+    /// Gets or sets the byte ceiling every outgoing datagram is bounded by before path MTU
+    /// discovery confirms anything larger - RFC 8899's BASE_PLPMTU. The default is RFC 9000
+    /// section 14.2's smallest allowed maximum datagram size, 1200 bytes.
+    /// </summary>
+    /// <remarks>
+    /// THE CEILING, WHERE <see cref="PaddingTarget"/> IS THE FLOOR. They share a default and
+    /// do opposite jobs: PaddingTarget expands an Initial datagram UP to 1200 because section
+    /// 14.1 requires it, this bounds every datagram DOWN because section 14.2 says an endpoint
+    /// without discovery "SHOULD NOT send datagrams larger than the smallest allowed maximum
+    /// datagram size". A request body larger than this is split across datagrams rather than
+    /// sent as one oversized one.
+    /// </remarks>
+    public int BasePathMtu { get; set; } = InitialDatagramPaddingTarget;
+
+    /// <summary>
+    /// Gets or sets the largest datagram size path MTU discovery will search up to - RFC 8899's
+    /// MAX_PLPMTU. The default is 1472, which is 1500 minus the 20-byte IPv4 and 8-byte UDP
+    /// headers.
+    /// </summary>
+    /// <remarks>
+    /// Lower this on a path with a smaller MTU - a VPN or a tunnelled proxy - so the search
+    /// does not spend probes on sizes the path cannot carry. It is NOT the advertised
+    /// <c>max_udp_payload_size</c>, which tells a server what this client will RECEIVE; the
+    /// two are deliberately separate, and the peer's own value still applies on top.
+    /// </remarks>
+    public int MaximumPathMtu { get; set; } = EthernetMaximumUdpPayload;
 
     /// <summary>
     /// Gets or sets the exact byte count of each CRYPTO frame in the Initial flight, in order.
@@ -364,6 +398,8 @@ public sealed class TlsQuicOptions
             PacketNumberEncodedLength = PacketNumberEncodedLength,
             Token = Token,
             PaddingTarget = PaddingTarget,
+            BasePathMtu = BasePathMtu,
+            MaximumPathMtu = MaximumPathMtu,
             InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
             InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
             InitialFrameOrder =

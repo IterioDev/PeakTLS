@@ -884,6 +884,50 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
     }
 
+    /// <summary>Acknowledges EVERY 1-RTT packet this peer has opened, as one contiguous
+    /// RFC 9000 s19.3 range from zero to the largest.</summary>
+    /// <remarks>
+    /// <para>THE DIFFERENCE FROM <see cref="SendAckAsync"/> IS THE FIRST ACK RANGE, and it
+    /// matters more than it looks. That method acknowledges ONE packet, which is what a test
+    /// wants when it is asserting on an ACK's shape. Handed to a client with a dozen packets in
+    /// flight, it says the other eleven were not received - so RFC 9002 s6.1's reordering
+    /// threshold declares them lost and s13.3's repairs re-send ranges the peer already has.
+    /// Measured: a drain that used it read stream offset 5670 where it had already reached
+    /// 10206.</para>
+    /// <para>ZERO IS A SAFE FLOOR HERE BECAUSE THE TRANSPORT IS LOSSLESS. InMemoryDatagramTransport
+    /// delivers everything, so every number up to the largest really was received and a
+    /// contiguous range is the truthful ACK rather than a convenient one. A test driving the
+    /// impairing transport must not use this.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">No 1-RTT packet has been opened.</exception>
+    internal ValueTask SendCumulativeAckAsync(CancellationToken cancellationToken = default)
+    {
+        if (LargestApplicationPacketNumberReceived is not { } largest)
+        {
+            throw new InvalidOperationException(
+                "This peer has opened no 1-RTT packet, so it has no Largest Acknowledged to "
+                    + "put in an ACK frame (RFC 9000 s19.3).");
+        }
+
+        var encoded = new List<byte>();
+        TlsQuicAckFrames.WriteAckFrame(
+            encoded,
+            (ulong)TlsQuicFrameType.Ack,
+            ackDelay: 0,
+            [new TlsQuicAckRange(largest, 0)]);
+
+        var offset = 0;
+        if (!TlsQuicFrames.TryReadFrame(encoded.ToArray(), ref offset, out var ack, out var error))
+        {
+            throw new InvalidOperationException(
+                $"An ACK frame this peer just encoded did not read back: {error}.");
+        }
+
+        var written = BuildShortHeaderDatagram([ack]);
+        return _transport.SendAsync(
+            _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
+    }
+
     internal ValueTask SendAckAsync(
         DateTimeOffset sentAt, CancellationToken cancellationToken = default)
     {

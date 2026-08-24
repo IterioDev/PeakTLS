@@ -53,6 +53,16 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
     public int MaxDatagramPayloadSize =>
         TlsQuicUdpDatagramTransport.MaximumFor(_udp.AddressFamily) - _headerSize;
 
+    /// <inheritdoc />
+    /// <remarks>The same RFC 1928 section 7 header <see cref="MaxDatagramPayloadSize"/>
+    /// subtracts, reported on its own so the path MTU budget can charge for it too. Sizing a
+    /// QUIC datagram against the path and then prepending this is exactly how a datagram that
+    /// fits the path becomes one that does not: on a 1500-byte Ethernet MTU the ceiling is
+    /// 1472 bytes of UDP payload, and a 32-byte domain-form header turns a conforming
+    /// 1472-byte QUIC datagram into a 1504-byte one that a DF-set socket refuses outright with
+    /// SocketError.MessageSize.</remarks>
+    public int DatagramOverhead => _headerSize;
+
     /// <summary>Connects to a SOCKS5 proxy and establishes a UDP association for relaying
     /// QUIC datagrams.</summary>
     /// <exception cref="ArgumentException"><see cref="TlsQuicSocks5Options.Username"/> and
