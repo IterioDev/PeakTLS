@@ -31,12 +31,15 @@ The audit is deliberately run in two directions, because neither finds the other
 
 ## Method note: absence of a keyword is not absence of enforcement
 
-Two findings were nearly filed in error during the RFC 8446 pass, both because a grep shaped
-around the *words* a rule might use returned nothing:
+Three findings were nearly filed in error across the first two passes, every one because a grep
+shaped around the *words* a rule might use returned nothing while the rule was implemented:
 
 - `signature_algorithms_cert` looked absent when only one file was searched. It is implemented.
 - The RFC 8446 §4.2.8 key-share ordering rule looked unenforced because the code expresses it
   as a monotonic `Array.IndexOf` cursor rather than anything matching `subset` or `Contains`.
+- The RFC 9001 packet-protection labels (`quic key`, `quic iv`, `quic hp`) looked absent to a
+  search for those literal strings, because they are composed at runtime from a
+  version-dependent prefix and a suffix.
 
 Both would have been false positives in a report whose whole value is being trustworthy. A
 MISSING verdict in this document therefore requires the failed search patterns to be named, and
