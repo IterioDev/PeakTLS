@@ -497,6 +497,64 @@ Open question for the code: whether the padding target should be measured agains
 datagram rather than the QUIC payload when a header-adding transport is in use, so that a
 1200-byte target produces 1200 bytes on the wire instead of 1200 + header.
 
+### Unhandled frame types — a cluster, FINDING 6
+
+`Quic/TlsQuicConnection.cs` dispatches on frame type at `:1680-1782` and handles exactly eight:
+CRYPTO, ACK, HANDSHAKE_DONE, CONNECTION_CLOSE, PATH_CHALLENGE, STREAM, MAX_DATA, MAX_STREAM_DATA.
+Everything else reaches the `default:` arm at `:1791` and is ignored.
+
+That is correct for PADDING and PING, which need no action. It is not correct for the frames
+below, each of which carries a receive-side MUST that is consequently unenforced. Stream-state
+validation DOES exist for the handled frames — `Quic/TlsQuicStreams.cs:1410`, `:1461`, `:1516`,
+`:1525` all raise STREAM_STATE_ERROR — so this is a dispatch gap, not an absent concept.
+
+| § | Rule | Binds? | Verdict |
+|---|---|---|---|
+| 19.16 | "An endpoint that provides a zero-length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION" | **Yes** — this client's source connection ID length is 0 | MISSING |
+| 19.16 | A RETIRE_CONNECTION_ID sequence number above any previously sent is FRAME_ENCODING_ERROR | Yes | MISSING |
+| 19.16 | The sequence number MUST NOT refer to the connection ID of the packet carrying it | Yes | MISSING |
+| 19.13 | "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR" | Yes | MISSING, self-declared in code |
+| 19.15 | NEW_CONNECTION_ID received while sending a zero-length DESTINATION connection ID is PROTOCOL_VIOLATION | **No** — this client's destination connection ID is 8 bytes | N-A |
+
+**The §19.13 row was already known to the codebase.** The `default:` arm's own comment names it:
+*"ONE MUST IS THEREFORE STILL UNIMPLEMENTED AND IS NAMED RATHER THAN GLOSSED."* That is the right
+instinct and this audit simply found the other four next to it.
+
+The §19.16 rows are the ones that bind hardest, because this client deliberately uses a
+zero-length source connection ID — the same choice the Spotify capture makes. A server that
+sends RETIRE_CONNECTION_ID to a zero-length-CID client is misbehaving, and the RFC requires the
+client to say so rather than ignore it.
+
+Severity **LATENT** for all four: each requires a peer to send something a conforming server
+does not send.
+
+### GREASE negotiation rejection — compliant, but incidentally
+
+RFC 8701 requires a client to reject GREASE values a server negotiates. It does, in three
+places, but none of them is a GREASE check:
+
+- Cipher suite — `Handshake/ServerHelloParser.cs:49` demands `Enum.IsDefined(typeof(TlsCipherSuite), ...)`, and GREASE is not an enum member.
+- Version — `:90` demands the selected version equal exactly `TlsConstants.Tls13Version`.
+- HRR group — `:199` demands the group be one that was offered and not already shared.
+
+All three reject GREASE as a side effect of rejecting anything undefined. **This is worth
+recording because the protection is structural rather than intentional**: adding a GREASE
+constant to `TlsCipherSuite` for any reason would silently remove it. A reader looking for an
+explicit RFC 8701 check will not find one, and should not conclude the rule is unmet.
+
+### QUIC datagrams — send side satisfied by refusal
+
+`Quic/TlsQuicFrames.cs:912-922` refuses to write a DATAGRAM frame at all, with the refusal
+pinned by `TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne` and
+the RFC 9221 §3 sentence quoted beside it. Every send-side DATAGRAM MUST is therefore satisfied
+by construction.
+
+The receive side is NOT: RFC 9221 §5 requires terminating with PROTOCOL_VIOLATION on a DATAGRAM
+frame received without having advertised support, and RFC 9297 §2.1 requires H3_DATAGRAM_ERROR
+(0x33) for a payload too short to parse the Quarter Stream ID. Neither was located. Recorded in
+the checklist as MISSING, severity LATENT — the client advertises `max_datagram_frame_size` only
+when configured to, and a server sending unsolicited DATAGRAM frames is misbehaving.
+
 ### Deliberate divergences (impersonation, not defects)
 
 | Rule | What the library does | Why |
@@ -586,10 +644,20 @@ per-space sliding window of seen numbers, consulted before the frame loop. The A
 already deduplicates ACK RANGES and is mutation-tested - that is a different thing, do not treat
 it as this.
 
-**5. PUSH_PROMISE push IDs are not validated.** `Quic/TlsQuicHttp3Request.cs` default arm. The
+**5. Unhandled frame types skip their receive-side MUSTs.** `Quic/TlsQuicConnection.cs:1791`
+default arm. Add dispatch for RETIRE_CONNECTION_ID (PROTOCOL_VIOLATION, because this client
+provides a zero-length connection ID), and for the STREAM_DATA_BLOCKED / RESET_STREAM /
+STOP_SENDING stream-state rules. `Quic/TlsQuicStreams.cs` already raises STREAM_STATE_ERROR for
+the handled frames, so the machinery exists — this is wiring, not new concepts. The default
+arm's comment already names the STREAM_DATA_BLOCKED case; start there.
+
+**6. QUIC/HTTP-3 datagram receive validation.** RFC 9221 §5 and RFC 9297 §2.1. Sending is
+already refused outright and needs no work.
+
+**7. PUSH_PROMISE push IDs are not validated.** `Quic/TlsQuicHttp3Request.cs` default arm. The
 client never advertises a limit, so any PUSH_PROMISE is H3_ID_ERROR.
 
-**6. HTTP/3 PRIORITY_UPDATE (RFC 9218 s7.2) is absent.** Recorded as MISSING against the spec but
+**8. HTTP/3 PRIORITY_UPDATE (RFC 9218 s7.2) is absent.** Recorded as MISSING against the spec but
 a deliberate non-goal: no MUST compels a client to send one, and emitting priority signals no
 real target sends would make this client MORE distinguishable. Do not "fix" without a capture
 showing the impersonation target sends them.
@@ -616,7 +684,7 @@ the QUIC payload when a header-adding transport is in use.
 
 `scripts/must-checklist.json` holds all **508** client-relevant MUST sentences extracted from the
 pinned extracts, each with its source file, a subsystem bucket, and a `checked` flag.
-**67 are marked checked; 441 remain.** Continue from that file rather than re-deriving the list.
+**101 are marked checked; 407 remain.** Continue from that file rather than re-deriving the list.
 
 Largest unchecked buckets: `other` (144), `tls-hello` (64), `wire` (59), `streams` (59),
 `recovery` (35), `0rtt-resumption` (34).

@@ -585,19 +585,22 @@
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Clients MUST reject GREASE values when negotiated by the server.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Server Behavior When processing a ClientHello, servers MUST NOT treat GREASE values differently from any unknown value.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-server"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Servers MUST NOT negotiate any GREASE value when offered in a ClientHello.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-server"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
@@ -609,19 +612,22 @@
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Servers MUST reject GREASE values when negotiated by the client.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-server"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Client Behavior When processing a CertificateRequest or NewSessionTicket, clients MUST NOT treat GREASE values differently from any unknown value.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Clients MUST NOT negotiate any GREASE value when offered by the server.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc8701-complete-grease-values.txt",
@@ -633,7 +639,8 @@
   "src": "rfc8701-complete-grease-values.txt",
   "text": "Implementations MUST honor protocol specifications when sending GREASE values.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9000-packet-formats-and-pn-pseudocode.txt",
@@ -687,7 +694,8 @@
   "src": "rfc9000-packet-formats-and-pn-pseudocode.txt",
   "text": "An endpoint MUST treat receipt of a packet that has a non-zero value for these bits after removing both packet and header protection as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9000-packet-formats-and-pn-pseudocode.txt",
@@ -825,7 +833,8 @@
   "src": "rfc9000-packet-formats-and-pn-pseudocode.txt",
   "text": "An endpoint MUST treat receipt of a packet that has a non-zero value for these bits, after removing both packet and header protection, as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9000-section10-idle-timeout-and-immediate-close.txt",
@@ -927,7 +936,8 @@
   "src": "rfc9000-section12-packets-and-frames.txt",
   "text": "Duplicate suppression MUST happen after removing packet protection for the reasons described in Section 9.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9000-section12-packets-and-frames.txt",
@@ -1029,7 +1039,8 @@
   "src": "rfc9000-section13-packetization-and-ack-generation.txt",
   "text": "ACK Frames and Packet Protection ACK frames MUST only be carried in a packet that has the same packet number space as the packet being acknowledged; see Section 12.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9000-section13-packetization-and-ack-generation.txt",
@@ -1311,7 +1322,8 @@
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "An endpoint that is sending packets with a zero-length Destination Connection ID MUST treat receipt of a NEW_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "migration",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-nonbinding"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
@@ -1341,25 +1353,29 @@
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "Receipt of a RETIRE_CONNECTION_ID frame containing a sequence number greater than any previously sent to the peer MUST be treated as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "migration",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "The sequence number specified in a RETIRE_CONNECTION_ID frame MUST NOT refer to the Destination Connection ID field of the packet in which the frame is contained.",
   "bucket": "migration",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "An endpoint that provides a zero- length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION.",
   "bucket": "migration",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
   "text": "The recipient of this frame MUST generate a PATH_RESPONSE frame (Section 19.",
   "bucket": "migration",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9000-section19-frame-formats.txt",
@@ -1689,7 +1705,8 @@
   "src": "rfc9001-section5-packet-protection.txt",
   "text": "Similarly, a packet that appears to trigger a key update but cannot be unprotected successfully MUST be discarded.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section5-packet-protection.txt",
@@ -1749,7 +1766,8 @@
   "src": "rfc9001-section6-key-update.txt",
   "text": "An endpoint MUST NOT initiate a subsequent key update unless it has received an acknowledgment for a packet that was sent protected with keys from the current key phase.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -1773,19 +1791,22 @@
   "src": "rfc9001-section6-key-update.txt",
   "text": "Timing of Receive Key Generation Endpoints responding to an apparent key update MUST NOT generate a timing side-channel signal that might indicate that the Key Phase bit was invalid (see Section 9.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
   "text": "For this reason, endpoints MUST be able to retain two sets of packet protection keys for receiving packets: the current and the next.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
   "text": "Packets with higher packet numbers MUST be protected with either the same or newer packet protection keys than packets with lower packet numbers.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -1803,7 +1824,8 @@
   "src": "rfc9001-section6-key-update.txt",
   "text": "If the total number of encrypted packets with the same key exceeds the confidentiality limit for the selected AEAD, the endpoint MUST stop using those keys.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -1815,7 +1837,8 @@
   "src": "rfc9001-section6-key-update.txt",
   "text": "If a key update is not possible or integrity limits are reached, the endpoint MUST stop using the connection and only send stateless resets in response to receiving packets.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -1827,7 +1850,8 @@
   "src": "rfc9001-section6-key-update.txt",
   "text": "If the total number of received packets that fail authentication within the connection, across all keys, exceeds the integrity limit for the selected AEAD, the endpoint MUST immediately close the connection with a connection error of type AEAD_LIMIT_REACHED and not process any more packets.",
   "bucket": "quic-crypto",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9001-section6-key-update.txt",
@@ -2511,7 +2535,8 @@
   "src": "rfc9114-section7-framing-layer.txt",
   "text": "These reserved settings MUST NOT be sent, and their receipt MUST be treated as a connection error of type H3_SETTINGS_ERROR.",
   "bucket": "grease-reserved",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9114-section7-framing-layer.txt",
@@ -2937,19 +2962,22 @@
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
   "text": "An endpoint MUST NOT send DATAGRAM frames that are larger than the max_datagram_frame_size value it has received from its peer.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-neversends"
  },
  {
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
   "text": "An endpoint that receives a DATAGRAM frame when it has not indicated support via the transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
   "text": "Similarly, an endpoint that receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
@@ -2961,7 +2989,8 @@
   "src": "rfc9221-section3-max-datagram-frame-size-parameter.txt",
   "text": "Application protocols that use datagrams MUST define how they react to the absence of the max_datagram_frame_size transport parameter.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9221-section4-and-5-datagram-frames.txt",
@@ -2979,13 +3008,15 @@
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "Receipt of an HTTP/3 Datagram that includes a larger value MUST be treated as an HTTP/3 connection error of type H3_DATAGRAM_ERROR (0x33).",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "Receipt of a QUIC DATAGRAM frame whose payload is too short to allow parsing the Quarter Stream ID field MUST be treated as an HTTP/3 connection error of type H3_DATAGRAM_ERROR (0x33).",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "MISSING"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
@@ -3003,19 +3034,22 @@
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "The value of the SETTINGS_H3_DATAGRAM setting MUST be either 0 or 1.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "If the SETTINGS_H3_DATAGRAM setting is received with a value that is neither 0 nor 1, the receiver MUST terminate the connection with error H3_SETTINGS_ERROR.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "COMPLIANT"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
   "text": "QUIC DATAGRAM frames MUST NOT be sent until the SETTINGS_H3_DATAGRAM setting has been both sent and received with a value of 1.",
   "bucket": "datagram-ext",
-  "checked": false
+  "checked": true,
+  "verdict": "N-A-neversends"
  },
  {
   "src": "rfc9297-section2.1-http3-datagrams.txt",
