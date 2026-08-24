@@ -102,7 +102,17 @@ public sealed class TlsQuicHttp3StreamsTests
                 control, ref offset, out var frameType, out var payload, out _));
         Assert.Equal(0x04UL, frameType);
         Assert.True(TlsQuicHttp3Settings.TryDecodePayload(payload, out var settings, out _));
-        Assert.Equal(spec.Settings.ToArray(), settings.ToArray());
+
+        // THE FIRST FOUR ARE LITERAL AND COMPARED AS SUCH; THE FIFTH IS DRAWN. Comparing
+        // against spec.Settings would compare the wire against the (0, 0) placeholder, and
+        // comparing against a second spec.ComposeSettings() would compare this connection's
+        // draw against a different one - the redraw is the feature, not a flake.
+        Assert.Equal(spec.Settings.Length, settings.Length);
+        for (var i = 0; i < spec.Settings.Length - 1; i++)
+        {
+            Assert.Equal(spec.Settings[i], settings[i]);
+        }
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(settings[^1].Identifier));
         Assert.Equal(control.Length, offset);
     }
 

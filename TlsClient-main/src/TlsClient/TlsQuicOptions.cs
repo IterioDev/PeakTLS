@@ -166,9 +166,35 @@ public sealed class TlsQuicRecoveryOptions
     /// </summary>
     public double PacingIntervalScale { get; set; } = SpecDefaults.PacingIntervalScale;
 
+    /// <summary>
+    /// Gets or sets the congestion controller this connection runs, or <see langword="null"/>
+    /// for RFC 9002 section 7's New Reno.
+    /// </summary>
+    /// <remarks>
+    /// <para>FINGERPRINT SURFACE, NOT A TUNING KNOB. Reno, CUBIC and BBR answer the same loss
+    /// with different send cadences, so a persona whose real client runs one of the other two
+    /// cannot be matched by a spec that can only run Reno.</para>
+    /// <para>INTERNAL BECAUSE <c>ITlsQuicCongestionController</c> IS. A public property cannot
+    /// expose an internal type, and publishing the interface would drag
+    /// <c>TlsQuicSentPacket</c> and the rest of the recovery surface public with it - the
+    /// commitment <c>SharpTls/Properties/AssemblyInfo.cs</c> deliberately defers. Reachable
+    /// today from TlsClient and both test assemblies; when SharpTls's public QUIC surface is
+    /// designed this becomes public with it.</para>
+    /// <para>It used to be unreachable from ANYWHERE, which is the bug this closes:
+    /// <see cref="Snapshot"/> copied twelve fields and silently dropped the thirteenth, so a
+    /// controller set here was discarded on the way to the spec and
+    /// <c>TlsQuicLossDetection</c> built New Reno regardless.</para>
+    /// </remarks>
+    internal Func<SharpTls.Quic.ITlsQuicCongestionController>? CongestionController
+    {
+        get;
+        set;
+    }
+
     internal TlsQuicRecoverySpec Snapshot() =>
         new TlsQuicRecoverySpec
         {
+            CongestionController = CongestionController,
             InitialCongestionWindow = InitialCongestionWindow,
             MinimumCongestionWindowDatagrams = MinimumCongestionWindowDatagrams,
             LossReductionFactor = LossReductionFactor,
@@ -206,17 +232,56 @@ public sealed class TlsQuicOptions
     // throwing method, and this rejection belongs to the AlpnProtocols property.
     private static readonly string AlpnParameter = nameof(AlpnProtocols);
 
-    /// <summary>
-    /// RFC 9000 section 14.1's minimum Initial datagram, which every deployed QUIC server
-    /// accepts and which SharpTls's live run used.
-    /// </summary>
-    private const int InitialDatagramPaddingTarget = 1200;
+    // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
+    // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
+    // already declares both. That is four silent drift hazards: change TlsQuicConnectionSpec's
+    // default and these stay put, agreeing with nothing and citing no capture.
 
     /// <summary>
-    /// 1500 - 20 (IPv4 header) - 8 (UDP header): the UDP payload that fits an untunnelled
-    /// Ethernet frame, and the figure the captured presets advertise as max_udp_payload_size.
+    /// Gets or sets a callback that configures the TLS half of an HTTP/3 connection: client
+    /// certificates, Encrypted ClientHello, the resumption cache, 0-RTT, and parser limits.
     /// </summary>
-    private const int EthernetMaximumUdpPayload = 1472;
+    /// <remarks>
+    /// <para>THE QUIC-SHAPED TWIN OF <see cref="TlsSessionOptions.ConfigureTls"/>, which this
+    /// path cannot use: that one is <c>Action&lt;CustomTlsClientOptions&gt;</c> and describes a
+    /// TCP handshake, and RFC 9001 section 8.4 forbids over QUIC several TLS features that are
+    /// legal over TCP. One delegate covering both would be wrong on one of them.</para>
+    /// <para>RUNS BEFORE the session's <see cref="TlsSessionOptions.ClientCertificates"/> and
+    /// before the shared resumption cache is attached, so both can detect a conflict rather
+    /// than overwrite one. It is also the seam through which Encrypted ClientHello reaches
+    /// HTTP/3 today: <see cref="TlsSessionOptions.EchDnsResolver"/> drives the TCP path's
+    /// HTTPS-record lookup and retry, and that flow has no HTTP/3 twin yet, so a caller with an
+    /// ECH configuration in hand sets it on the options here.</para>
+    /// <para>DO NOT set <c>ClientHello</c> from it. The profile is composed per connection
+    /// around this connection's source connection ID; replacing it re-sends another
+    /// connection's <c>initial_source_connection_id</c>. Use
+    /// <see cref="ConfigureClientHello"/> for the ClientHello's shape.</para>
+    /// </remarks>
+    public Action<CustomTlsQuicClientOptions>? ConfigureTls { get; set; }
+
+    /// <summary>
+    /// Gets or sets how long the QUIC handshake may take before the connection abandons it, or
+    /// <see langword="null"/> for SharpTls's own default.
+    /// </summary>
+    /// <remarks>
+    /// A KNOB OF ITS OWN BECAUSE IT WAS BEING FED AN UNRELATED ONE. The h3 dial used to pass
+    /// <c>PooledConnectionLifetime</c> here - how long a healthy pooled connection may be
+    /// REUSED, five to ten minutes - as the deadline for a handshake that SharpTls defaults to
+    /// ten seconds. The internal deadline could then never fire and the real bound was the
+    /// outer handshake CTS, so the configuration was dead and its name at the call site said
+    /// otherwise.
+    /// </remarks>
+    public TimeSpan? HandshakeDeadline { get; set; }
+
+    /// <summary>
+    /// Gets or sets what this client writes into RFC 9000 section 17.4's latency spin bit on
+    /// 1-RTT packets. The default is <see cref="TlsQuicSpinBitPolicy.Zero"/>.
+    /// </summary>
+    /// <remarks>ZERO IS THE MAJORITY BEHAVIOUR, NOT A PLACEHOLDER. Section 17.4 permits any
+    /// value once an endpoint disables the spin bit, and Chromium sends zero. The knob exists
+    /// so a client that draws instead can be imitated; before it, the value was a literal in
+    /// the send path with no property at all.</remarks>
+    public TlsQuicSpinBitPolicy SpinBit { get; set; } = (TlsQuicSpinBitPolicy)SpecDefaults.SpinBit;
 
     /// <summary>Gets or sets the source connection ID length in bytes.</summary>
     public int SourceConnectionIdLength { get; set; } = SpecDefaults.SourceConnectionIdLength;
@@ -238,7 +303,7 @@ public sealed class TlsQuicOptions
     /// Gets or sets the byte length Initial datagrams are padded to. The default is RFC 9000
     /// section 14.1's 1200-byte minimum.
     /// </summary>
-    public int PaddingTarget { get; set; } = InitialDatagramPaddingTarget;
+    public int PaddingTarget { get; set; } = SpecDefaults.PaddingTarget;
 
     /// <summary>
     /// Gets or sets the byte ceiling every outgoing datagram is bounded by before path MTU
@@ -253,7 +318,7 @@ public sealed class TlsQuicOptions
     /// datagram size". A request body larger than this is split across datagrams rather than
     /// sent as one oversized one.
     /// </remarks>
-    public int BasePathMtu { get; set; } = InitialDatagramPaddingTarget;
+    public int BasePathMtu { get; set; } = SpecDefaults.BasePathMtu;
 
     /// <summary>
     /// Gets or sets the largest datagram size path MTU discovery will search up to - RFC 8899's
@@ -266,7 +331,7 @@ public sealed class TlsQuicOptions
     /// <c>max_udp_payload_size</c>, which tells a server what this client will RECEIVE; the
     /// two are deliberately separate, and the peer's own value still applies on top.
     /// </remarks>
-    public int MaximumPathMtu { get; set; } = EthernetMaximumUdpPayload;
+    public int MaximumPathMtu { get; set; } = SpecDefaults.MaximumPathMtu;
 
     /// <summary>
     /// Gets or sets whether RFC 8899 path MTU discovery runs, searching upward from
@@ -281,7 +346,7 @@ public sealed class TlsQuicOptions
     /// application data has been sent, so it never appears in the opening flight, and the
     /// search normally ends after one probe.
     /// </remarks>
-    public bool PathMtuDiscovery { get; set; } = true;
+    public bool PathMtuDiscovery { get; set; } = SpecDefaults.PathMtuDiscovery;
 
     /// <summary>
     /// Gets or sets the exact byte count of each CRYPTO frame in the Initial flight, in order.
@@ -416,6 +481,7 @@ public sealed class TlsQuicOptions
             BasePathMtu = BasePathMtu,
             MaximumPathMtu = MaximumPathMtu,
             PathMtuDiscovery = PathMtuDiscovery,
+            SpinBit = (SharpTls.Quic.TlsQuicSpinBitPolicy)SpinBit,
             InitialCryptoFrameByteCounts = [.. InitialCryptoFrameByteCounts],
             InitialCryptoFramesPerDatagram = [.. InitialCryptoFramesPerDatagram],
             InitialFrameOrder =
@@ -440,7 +506,9 @@ public sealed class TlsQuicOptions
             connectionSpec,
             http3.Snapshot(),
             alpn,
-            configureClientHello);
+            configureClientHello,
+            ConfigureTls,
+            HandshakeDeadline);
     }
 }
 
@@ -453,4 +521,6 @@ internal sealed record TlsQuicConfiguration(
     TlsQuicConnectionSpec ConnectionSpec,
     TlsQuicHttp3Spec Http3Spec,
     string[] AlpnProtocols,
-    Action<ClientHelloBuilder> ConfigureClientHello);
+    Action<ClientHelloBuilder> ConfigureClientHello,
+    Action<CustomTlsQuicClientOptions>? ConfigureTls,
+    TimeSpan? HandshakeDeadline);

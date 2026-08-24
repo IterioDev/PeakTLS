@@ -38,6 +38,7 @@ internal static class HttpConnectionFactory
                 origin,
                 proxy,
                 configuration,
+                tls13SessionCache,
                 dnsResolver,
                 cancellationToken).ConfigureAwait(false);
         }

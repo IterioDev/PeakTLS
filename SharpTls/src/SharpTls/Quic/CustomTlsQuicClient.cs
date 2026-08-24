@@ -94,6 +94,16 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
     // AdvertisedAckDelayExponent above - the profile is the one place the value is written,
     // and s10.1's effective timeout is the minimum of this and the peer's, so a caller that
     // could not read it would have to be told it twice.
+    // RFC 9000 s18.2's max_ack_delay (0x0b) EXACTLY AS THIS CLIENT ADVERTISES IT, in the
+    // milliseconds s18.2 states it in. Same one-source rule as the two accessors around it:
+    // s13.2.1 binds this endpoint to acknowledge 1-RTT packets "within its advertised
+    // max_ack_delay", so the number the ACK timer waits and the number on the wire must be the
+    // same number, and the profile is where that number is written.
+    internal ulong? AdvertisedMaxAckDelay =>
+        _configuration.ClientHello.Spec.QuicTransportParameters
+            ?.Get((ulong)TlsQuicTransportParameterId.MaxAckDelay)
+            ?.GetVariableInteger();
+
     internal ulong? AdvertisedMaxIdleTimeout =>
         _configuration.ClientHello.Spec.QuicTransportParameters
             ?.Get((ulong)TlsQuicTransportParameterId.MaxIdleTimeout)

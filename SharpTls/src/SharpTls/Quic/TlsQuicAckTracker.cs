@@ -1,4 +1,4 @@
-﻿namespace SharpTls.Quic;
+namespace SharpTls.Quic;
 
 // WHEN to send an ACK frame, and which packet numbers it names - RFC 9000 s13.1
 // (packet processing), s13.2 (generating acknowledgements) and s13.2.5 (host
@@ -702,7 +702,28 @@ internal sealed class TlsQuicAckTracker
     // overload passes null exactly as before.
     private readonly List<TlsQuicAckRange> _decodedRanges = [];
 
-    private readonly int _ackDelayExponent;
+    // NOT readonly. Its final value is this endpoint's ADVERTISED ack_delay_exponent, and the
+    // ClientHello that carries it does not exist when this tracker is constructed - the
+    // connection draws its source connection ID first, then builds the profile around it. The
+    // constructor seeds s18.2's default and OnLocalAckParameters replaces it once the
+    // advertisement is readable. See TlsQuicConnection.AdoptLocalAckParameters.
+    private int _ackDelayExponent;
+
+    // This endpoint's own max_ack_delay, for the same reason and by the same route. It used to
+    // be the DefaultMaxAckDelay constant read directly at both of the two sites below, which
+    // made a preset advertising 0x0B ignored: the wire said one bound and the ACK timer waited
+    // another. s13.2.1 binds the timer to the ADVERTISED value, so the advertisement wins.
+    private TimeSpan _localMaxAckDelay = DefaultMaxAckDelay;
+
+    /// <summary>This endpoint's <c>ack_delay_exponent</c>, after
+    /// <see cref="OnLocalAckParameters"/> has adopted the advertised one.</summary>
+    internal int AckDelayExponent => _ackDelayExponent;
+
+    /// <summary>This endpoint's <c>max_ack_delay</c>, after
+    /// <see cref="OnLocalAckParameters"/> has adopted the advertised one. The bound
+    /// <see cref="DelayedAckDeadline"/> waits under
+    /// <see cref="TlsQuicAckPolicy.DelayedToMaxAckDelay"/>.</summary>
+    internal TimeSpan LocalMaxAckDelay => _localMaxAckDelay;
     private readonly int _maximumAckRanges;
 
     /// <param name="ackDelayExponent">
@@ -780,8 +801,11 @@ internal sealed class TlsQuicAckTracker
     /// absent, a default of 25 milliseconds is assumed" IS what it advertised.
     /// <see cref="DefaultMaxAckDelay"/> is therefore the advertised value rather than a
     /// stand-in for it, and a second number here would be the very duplication that type
-    /// forbids. If this client ever starts sending 0x0B, the bound becomes a parameter on
-    /// this line and that is the one edit it needs.
+    /// forbids. This client now DOES send 0x0B when a preset advertises it, and the bound did
+    /// not become a parameter on this line: the ClientHello carrying it does not exist when
+    /// this tracker is constructed, so <see cref="OnLocalAckParameters"/> supplies both it and
+    /// the exponent once it does. This parameter is the seed for a profile that advertises
+    /// neither.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The exponent is negative or above 20, the range limit is below 1, or the
@@ -1160,7 +1184,7 @@ internal sealed class TlsQuicAckTracker
         _ackPolicy == TlsQuicAckPolicy.DelayedToMaxAckDelay
             && _ackElicitingPending[ApplicationSpace]
             && _ranges[ApplicationSpace].Count > 0
-            ? _ackElicitingPendingSince[ApplicationSpace] + DefaultMaxAckDelay
+            ? _ackElicitingPendingSince[ApplicationSpace] + _localMaxAckDelay
             : null;
 
     // RFC 9000 s13.2.1, and the two halves of one sentence read in one place: "An endpoint
@@ -1203,7 +1227,7 @@ internal sealed class TlsQuicAckTracker
     private bool IsWithheldAt(int space, DateTimeOffset now) =>
         _ackPolicy == TlsQuicAckPolicy.DelayedToMaxAckDelay
         && space == ApplicationSpace
-        && now - _ackElicitingPendingSince[space] < DefaultMaxAckDelay;
+        && now - _ackElicitingPendingSince[space] < _localMaxAckDelay;
 
     /// <summary>
     /// The largest packet number any ACK frame received in this space has
@@ -1245,6 +1269,36 @@ internal sealed class TlsQuicAckTracker
     /// <c>first_rtt_sample == 0</c> test, and s7.6's persistent congestion will read
     /// the time.</summary>
     internal DateTimeOffset? FirstRttSampleAt => _firstRttSampleAt;
+
+    /// <summary>
+    /// Adopts THIS endpoint's advertised <c>ack_delay_exponent</c> (0x0a) and
+    /// <c>max_ack_delay</c> (0x0b), once the ClientHello carrying them exists.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE ADVERTISEMENT IS THE SOURCE, NOT A SECOND KNOB TO KEEP IN STEP. This used to
+    /// be a comparison: the connection read the advertised exponent, compared it with
+    /// <c>TlsQuicConnectionOptions.AckDelayExponent</c>, and threw
+    /// <see cref="InvalidOperationException"/> when they disagreed - naming a property on an
+    /// `internal sealed` type that no preset and no public API could set. So the only way to
+    /// advertise a non-default 0x0a was to hit an error that could not be acted on. Adopting
+    /// the advertised value instead makes the two agree by construction, which is the same
+    /// rule the six flow-control parameters already follow.</para>
+    /// <para>ONE-WAY AND IDEMPOTENT, like <see cref="OnHandshakeConfirmed"/>. The ClientHello
+    /// is fixed for the life of the connection, so the values it carries cannot change.</para>
+    /// </remarks>
+    /// <param name="ackDelayExponent">This endpoint's advertised exponent. Clamped to 0..20,
+    /// which is s18.2's "values above 20 are invalid" applied to our own number rather than
+    /// only to the peer's.</param>
+    /// <param name="maxAckDelay">This endpoint's advertised max_ack_delay. Clamped to
+    /// zero..<see cref="MaximumMaxAckDelay"/>.</param>
+    internal void OnLocalAckParameters(int ackDelayExponent, TimeSpan maxAckDelay)
+    {
+        _ackDelayExponent = Math.Clamp(ackDelayExponent, 0, MaximumAckDelayExponent);
+        _localMaxAckDelay =
+            maxAckDelay < TimeSpan.Zero ? TimeSpan.Zero
+            : maxAckDelay > MaximumMaxAckDelay ? MaximumMaxAckDelay
+            : maxAckDelay;
+    }
 
     /// <summary>
     /// Takes the two acknowledgement-related transport parameters the PEER sent, per

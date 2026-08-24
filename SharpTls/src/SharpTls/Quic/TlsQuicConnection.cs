@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 
 namespace SharpTls.Quic;
 
@@ -1211,8 +1211,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // structural reason and not an oversight: TlsQuicAckTracker is sealed, holds the whole
         // ACK decision in TryBuildAck, and this is its ONLY construction site in the assembly,
         // so this is the one place a recovery spec and that tracker meet. See
-        // TlsQuicAckTracker's ackPolicy parameter for why the max_ack_delay bound is NOT
-        // passed beside it.
+        // TlsQuicAckTracker's ackPolicy parameter, whose own remarks predicted the edit that
+        // has since landed: "If this client ever starts sending 0x0B, the bound becomes a
+        // parameter on this line and that is the one edit it needs." It is not on this line
+        // because the ClientHello that carries 0x0B does not exist yet - the source connection
+        // ID is drawn first and the profile is composed around it - so the bound arrives at
+        // AdoptLocalAckParameters instead, through TlsQuicAckTracker.OnLocalAckParameters.
+        // Same for ack_delay_exponent: the argument below is now only the SEED for a profile
+        // that advertises neither.
         _acks = new TlsQuicAckTracker(
             options.AckDelayExponent,
             options.Spec.AckRangeLimit,
@@ -1716,19 +1722,26 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // no symptom on either side. s18.2's default is what an absent parameter means: "if
         // this value is absent, a default value of 3 is assumed (indicating a multiplier of
         // 8)."
-        var advertised = (int)(_client.AdvertisedAckDelayExponent
-            ?? TlsQuicAckTracker.DefaultAckDelayExponent);
-        if (advertised != _options.AckDelayExponent)
-        {
-            throw new InvalidOperationException(
-                $"This connection scales its ACK delays by 2^{_options.AckDelayExponent} but "
-                    + $"advertises ack_delay_exponent (0x0A) as {advertised}. RFC 9000 s19.3 "
-                    + "makes the ACK's sender the one that scales, so the peer will divide by "
-                    + "the advertised value and the two must agree. Set "
-                    + "TlsQuicConnectionOptions.AckDelayExponent to match the transport "
-                    + "parameter in the ClientHelloProfile the factory builds, or leave both "
-                    + "at s18.2's default of 3.");
-        }
+        //
+        // SO THE ADVERTISEMENT IS ADOPTED RATHER THAN COMPARED. This block used to throw
+        // InvalidOperationException when the advertised exponent disagreed with
+        // TlsQuicConnectionOptions.AckDelayExponent, and told the caller to go and set that
+        // property - on an `internal sealed` type, from a preset surface that forwards no such
+        // knob. The only reachable way to advertise a non-default 0x0a was therefore to hit an
+        // unactionable error. The two must agree; making them agree by construction is
+        // strictly better than refusing to run when they do not, and it is the same rule the
+        // six flow-control parameters follow (TlsQuicStreams.cs's "enforcement and
+        // advertisement cannot drift because they are one number").
+        //
+        // max_ack_delay (0x0b) rides along for the same reason, and closes the other half:
+        // s13.2.1 binds this endpoint to acknowledge 1-RTT packets "within its advertised
+        // max_ack_delay", and the ACK timer used to wait on a 25 ms constant no matter what the
+        // profile advertised. TlsQuicConnectionOptions.AckDelayExponent survives as the seed
+        // for a connection whose profile carries neither parameter, which is s18.2's default
+        // of 3 and 25 ms.
+        _acks.OnLocalAckParameters(
+            (int)(_client.AdvertisedAckDelayExponent ?? (ulong)_options.AckDelayExponent),
+            ToMaxAckDelay(_client.AdvertisedMaxAckDelay));
 
         // RFC 9001 s5.2: "The secrets are derived from the Destination Connection ID field of
         // the client's first Initial packet", which is the one just drawn. Installed BEFORE
@@ -3337,6 +3350,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // TlsQuicConnectionTests.AZeroRttPacketAndAOneRttPacketShareOneSpace pins the collapse
     // from outside, and it pins it through THIS forward, so a divergence between the two
     // mappings can no longer exist to be pinned.
+    /// <summary>The <c>ack_delay_exponent</c> this connection scales its own ACK delays by,
+    /// which after the handshake starts is the one its ClientHello advertised.</summary>
+    internal int AdoptedAckDelayExponent => _acks.AckDelayExponent;
+
+    /// <summary>The <c>max_ack_delay</c> this connection holds an ACK for, which after the
+    /// handshake starts is the one its ClientHello advertised.</summary>
+    internal TimeSpan AdoptedMaxAckDelay => _acks.LocalMaxAckDelay;
+
     private static int SpaceOf(TlsQuicEncryptionLevel level) => TlsQuicAckTracker.SpaceOf(level);
 
     private TimeSpan RemainingBeforeDeadline() =>

@@ -42,6 +42,31 @@ public enum TlsQuicEndpointRole
     Server,
 }
 
+/// <summary>What this endpoint writes into RFC 9000 section 17.4's latency spin bit.</summary>
+/// <remarks>
+/// <para>EVERY MEMBER IS THE SPIN BIT DISABLED, and all three are conformant. s17.4: "Each
+/// endpoint unilaterally decides if the spin bit is enabled or disabled for a connection", and
+/// for a disabled one "endpoints MAY set the spin bit to any value and MUST accept any value
+/// received." So this is a fingerprint choice and not a correctness one.</para>
+/// <para>THERE IS NO `Enabled` MEMBER, DELIBERATELY. Participating in the spin means echoing
+/// the spin of the highest-numbered 1-RTT packet received, which needs receive state this
+/// connection does not keep - and no capture in this repo measures a peer that spins, so it
+/// would be a feature written against nothing. Adding it is a receiver change plus a fourth
+/// member, not a fourth branch on the sender.</para>
+/// </remarks>
+public enum TlsQuicSpinBitPolicy
+{
+    /// <summary>Always zero. The shipped default, and what Chromium sends.</summary>
+    Zero,
+
+    /// <summary>One value drawn per connection and held for its life - s17.4's "chosen
+    /// independently for each connection" reading of a disabled spin bit.</summary>
+    RandomPerConnection,
+
+    /// <summary>A fresh value on every 1-RTT packet.</summary>
+    RandomPerPacket,
+}
+
 /// <summary>Errors owned by the QUIC transport rather than the TLS alert registry.</summary>
 /// <remarks>
 /// Values are copied from the RFC 9000 s20.1 capture in
@@ -132,6 +157,59 @@ public enum TlsQuicTransportError : ulong
     /// key update is possible.
     /// </summary>
     AeadLimitReached = 0x0F,
+
+    // ---------------------------------------------------------------------------------
+    // THE REST OF RFC 9000 s20.1, PLUS RFC 9368's. The six below completed the registry;
+    // before them a CONNECTION_CLOSE carrying any of these codes - sent or received - had
+    // no name, and TlsQuicConnection had no code to send for two conditions it can now
+    // actually detect (0x09 under s5.1.1, 0x01 for an internal fault).
+    //
+    // TWO OF THE SIX ARE SERVER-SIDE AND THIS CLIENT WILL NEVER SEND THEM. They are defined
+    // anyway because this enum also NAMES a received code: s10.2.1 lets a server close with
+    // any of them, and an undefined member renders in a diagnostic as a bare number.
+    // ---------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 9000 s20.1 INTERNAL_ERROR (0x01): "The endpoint encountered an internal error and
+    /// cannot continue with the connection."
+    /// </summary>
+    InternalError = 0x01,
+
+    /// <summary>
+    /// RFC 9000 s20.1 CONNECTION_REFUSED (0x02): "The server refused to accept a new
+    /// connection." Server-side; named here for a received CONNECTION_CLOSE.
+    /// </summary>
+    ConnectionRefused = 0x02,
+
+    /// <summary>
+    /// RFC 9000 s20.1 CONNECTION_ID_LIMIT_ERROR (0x09): "The number of connection IDs provided
+    /// by the peer exceeds the advertised active_connection_id_limit." Raised by
+    /// <see cref="TlsQuicConnection"/> when a NEW_CONNECTION_ID frame would push the count of
+    /// unretired peer connection IDs past the limit this endpoint advertised under 0x0E, which
+    /// s5.1.1 requires: "An endpoint MUST NOT provide more connection IDs than the peer's
+    /// limit."
+    /// </summary>
+    ConnectionIdLimitError = 0x09,
+
+    /// <summary>
+    /// RFC 9000 s20.1 INVALID_TOKEN (0x0b): "A server received a client Initial that contained
+    /// an invalid Token field." Server-side; named here for a received CONNECTION_CLOSE.
+    /// </summary>
+    InvalidToken = 0x0B,
+
+    /// <summary>
+    /// RFC 9000 s20.1 NO_VIABLE_PATH (0x10): "An endpoint has determined that the network path
+    /// is incapable of supporting QUIC. An endpoint is unlikely to receive a CONNECTION_CLOSE
+    /// frame carrying this code except when the path does not support a large enough MTU."
+    /// </summary>
+    NoViablePath = 0x10,
+
+    /// <summary>
+    /// RFC 9368 s6 VERSION_NEGOTIATION_ERROR (0x11): raised when the version_information
+    /// transport parameter is missing, malformed, or names a Chosen Version that disagrees with
+    /// the version in use.
+    /// </summary>
+    VersionNegotiationError = 0x11,
 }
 
 /// <summary>A fail-closed QUIC transport error raised by the recordless TLS boundary.</summary>

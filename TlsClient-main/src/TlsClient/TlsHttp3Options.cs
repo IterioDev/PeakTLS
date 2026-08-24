@@ -58,7 +58,33 @@ public enum TlsQpackNameMatchPolicy
 /// </summary>
 /// <param name="Identifier">The setting identifier, any QUIC variable-length integer.</param>
 /// <param name="Value">The setting value, any QUIC variable-length integer.</param>
-public readonly record struct TlsHttp3Setting(ulong Identifier, ulong Value);
+public readonly record struct TlsHttp3Setting(ulong Identifier, ulong Value)
+{
+    /// <summary>
+    /// Gets the function that draws this entry afresh for every connection, or
+    /// <see langword="null"/> for a literal pair.
+    /// </summary>
+    /// <remarks>RFC 9114 section 7.2.4.1 reserves the whole <c>0x1f * N + 0x21</c> family so a
+    /// peer sees settings it must ignore. A client that draws one per connection and a client
+    /// that ships one constant pair forever are trivially told apart, and the constant is the
+    /// stronger fingerprint of the two: it names the implementation rather than hiding
+    /// it.</remarks>
+    public Func<TlsHttp3Setting>? Draw { get; init; }
+
+    /// <summary>Gets whether this entry redraws on every connection.</summary>
+    public bool IsDrawn => Draw is not null;
+
+    /// <summary>Creates an entry whose identifier and value are drawn for each connection.</summary>
+    /// <param name="draw">Runs once per connection. The pair on the returned entry is used and
+    /// its own <see cref="Draw"/> is discarded.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="draw"/> is
+    /// <see langword="null"/>.</exception>
+    public static TlsHttp3Setting Drawn(Func<TlsHttp3Setting> draw)
+    {
+        ArgumentNullException.ThrowIfNull(draw);
+        return new TlsHttp3Setting(0, 0) { Draw = draw };
+    }
+}
 
 /// <summary>
 /// Configures the HTTP/3 layer's SETTINGS, stream-open order, pseudo-header order and QPACK
@@ -84,8 +110,32 @@ public sealed class TlsHttp3Options
     /// capture's five pairs, read from <c>TlsQuicHttp3Spec</c>'s own preset.
     /// </summary>
     public IList<TlsHttp3Setting> Settings { get; set; } =
-        [.. SpecDefaults.Settings.Select(
-            setting => new TlsHttp3Setting(setting.Identifier, setting.Value))];
+        [.. SpecDefaults.Settings.Select(FromSpec)];
+
+    /// <summary>Maps one SharpTls SETTINGS entry to this surface, drawn entries included.</summary>
+    /// <remarks>A DRAWN ENTRY MAPS TO A DRAWN ENTRY, not to one sample of it. Reading
+    /// <c>setting.Identifier</c> and <c>setting.Value</c> off a drawn entry would copy the
+    /// (0, 0) placeholder; calling its function once here would freeze one draw as this
+    /// options object's constant, which is the very thing the drawn slot exists to
+    /// prevent.</remarks>
+    private static TlsHttp3Setting FromSpec(TlsQuicHttp3Setting setting) =>
+        setting.IsDrawn
+            ? TlsHttp3Setting.Drawn(() =>
+                {
+                    var drawn = setting.Draw!();
+                    return new TlsHttp3Setting(drawn.Identifier, drawn.Value);
+                })
+            : new TlsHttp3Setting(setting.Identifier, setting.Value);
+
+    /// <summary>The inverse of <see cref="FromSpec"/>, for <c>Snapshot</c>.</summary>
+    private static TlsQuicHttp3Setting ToSpec(TlsHttp3Setting setting) =>
+        setting.IsDrawn
+            ? TlsQuicHttp3Setting.Drawn(() =>
+                {
+                    var drawn = setting.Draw!();
+                    return new TlsQuicHttp3Setting(drawn.Identifier, drawn.Value);
+                })
+            : new TlsQuicHttp3Setting(setting.Identifier, setting.Value);
 
     /// <summary>
     /// Gets or sets the unidirectional streams this client opens, in exact open order.
@@ -139,11 +189,7 @@ public sealed class TlsHttp3Options
         // it: removing the guard killed nothing, because SharpTls was already doing the work.
         return new TlsQuicHttp3Spec
         {
-            Settings =
-            [
-                .. Settings.Select(
-                    setting => new TlsQuicHttp3Setting(setting.Identifier, setting.Value)),
-            ],
+            Settings = [.. Settings.Select(ToSpec)],
             UnidirectionalStreamOpenOrder =
             [
                 .. UnidirectionalStreamOpenOrder.Select(

@@ -77,14 +77,17 @@ public sealed class TlsQuicHttp3SettingsTests
 
         Assert.True(TlsQuicHttp3Settings.TryDecodePayload(payload, out var decoded, out var error));
         Assert.Equal(TlsQuicHttp3ErrorCode.None, error);
-        Assert.Equal(spec.Settings.ToArray(), decoded.ToArray());
+        Assert.Equal(spec.Settings.Length, decoded.Length);
 
-        // Element by element as well as as a whole, so a failure names the position rather
-        // than printing two five-element arrays.
-        for (var i = 0; i < spec.Settings.Length; i++)
+        // Element by element, so a failure names the position rather than printing two
+        // five-element arrays. The last entry is DRAWN: Encode composed it once for the frame
+        // above, so the only thing that can be asserted about it here is the family it came
+        // from - a second composition would draw a different pair, which is the point of it.
+        for (var i = 0; i < spec.Settings.Length - 1; i++)
         {
             Assert.Equal(spec.Settings[i], decoded[i]);
         }
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(decoded[^1].Identifier));
     }
 
     [Fact]

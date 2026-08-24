@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace SharpTls.Quic;
 
 // ============================================================================
@@ -672,8 +674,22 @@ internal sealed partial class TlsQuicConnection
         // s17.4 mid-sentence, so the endpoint-behaviour paragraph is not checkable from this
         // repo's captures. It is not a TlsQuicConnectionSpec knob, so it is not claimed to be
         // one.
-        SpinBit = false,
+        SpinBit = DrawSpinBit(),
         KeyPhase = ProtectOneMoreApplicationPacket(),
+    };
+
+    /// <summary>One connection's spin-bit value, for
+    /// <see cref="TlsQuicSpinBitPolicy.RandomPerConnection"/>.</summary>
+    /// <remarks>DRAWN IN THE FIELD INITIALISER, so it is one draw for the life of the
+    /// connection whether or not the policy ever asks for it - which costs one byte of entropy
+    /// and removes the "was it drawn yet" state a lazy initialiser would need.</remarks>
+    private readonly bool _connectionSpinBit = RandomNumberGenerator.GetInt32(2) == 1;
+
+    private bool DrawSpinBit() => _options.Spec.SpinBit switch
+    {
+        TlsQuicSpinBitPolicy.RandomPerConnection => _connectionSpinBit,
+        TlsQuicSpinBitPolicy.RandomPerPacket => RandomNumberGenerator.GetInt32(2) == 1,
+        _ => false,
     };
 
     // RFC 9001 s6.6: "Endpoints MUST count the number of encrypted packets for each set of

@@ -777,19 +777,26 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     [Fact]
-    public async Task AnAdvertisedAckDelayExponentThatDisagreesWithTheOneWeScaleByIsRefused()
+    public async Task TheAdvertisedAckDelayExponentIsAdoptedRatherThanRefused()
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
         using var pki = TestPki.Create();
         await using var transport = new ScriptedDatagramTransport();
 
-        // TWO SOURCES FOR ONE NUMBER. The exponent this connection SCALES by is on the options;
-        // the one it ADVERTISES is transport parameter 0x0A inside the ClientHelloProfile the
-        // factory builds, which is the only place a transport parameter may live. RFC 9000
-        // s19.3 makes the ACK's SENDER the one that scales, so the peer divides by the
-        // advertised value and a mismatched pair is a 2^n error in its RTT estimate. It is
-        // masked today - every ack_delay this loop reports is structurally zero - which is
-        // precisely why it has to fail at construction rather than on the wire.
+        // ONE SOURCE FOR ONE NUMBER, AND THE ADVERTISEMENT IS IT. RFC 9000 s19.3 makes the
+        // ACK's SENDER the one that scales, so the peer divides by the value we advertised in
+        // transport parameter 0x0A and the two must agree.
+        //
+        // THIS USED TO THROW, AND THE THROW WAS THE BUG. It compared the advertised exponent
+        // with TlsQuicConnectionOptions.AckDelayExponent and refused a mismatch, telling the
+        // caller to set that property - on an `internal sealed` type, from a preset surface
+        // that forwards no such knob. So the only reachable way to advertise a non-default
+        // 0x0A was an error nobody could act on. Adopting makes the pair agree by
+        // construction, which is the rule the six flow-control parameters already follow.
+        //
+        // THE OPTIONS VALUE IS DELIBERATELY THE WRONG ONE HERE. 5 is what this connection
+        // would have scaled by; 7 is what it advertises; and asserting 7 is what proves the
+        // advertisement won rather than merely that the two happened to match.
         await using var connection = new TlsQuicConnection(
             new TlsQuicConnectionOptions(
                 transport, transport.RemoteEndPoint, Spec(), transport.Clock)
@@ -798,10 +805,10 @@ public sealed partial class TlsQuicConnectionTests
             },
             source => TlsClient(pki, source, ackDelayExponent: 7));
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await connection.StartAsync(cancellation.Token));
-        Assert.Contains("2^5", error.Message, StringComparison.Ordinal);
-        Assert.Contains("as 7", error.Message, StringComparison.Ordinal);
+        await connection.StartAsync(cancellation.Token);
+
+        Assert.Equal(7, connection.AdoptedAckDelayExponent);
+        Assert.Single(transport.Sent);
     }
 
     [Fact]
@@ -813,8 +820,8 @@ public sealed partial class TlsQuicConnectionTests
 
         // RFC 9000 s18.2: "if this value is absent, a default value of 3 is assumed (indicating
         // a multiplier of 8)." Every other connection in this file relies on that reading, so
-        // it is asserted once rather than assumed everywhere: the profile carries no 0x0A and
-        // the options scale by 3, and the reconciliation above must call that agreement.
+        // it is asserted once rather than assumed everywhere: the profile carries no 0x0A, so
+        // there is nothing to adopt and the options value stands as the seed.
         await using var connection = new TlsQuicConnection(
             new TlsQuicConnectionOptions(
                 transport, transport.RemoteEndPoint, Spec(), transport.Clock)

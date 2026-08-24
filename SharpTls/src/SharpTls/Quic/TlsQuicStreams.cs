@@ -1,4 +1,4 @@
-﻿namespace SharpTls.Quic;
+namespace SharpTls.Quic;
 
 // ============================================================================
 // A4 TASK 14e - MINIMAL STREAMS.
@@ -1822,7 +1822,13 @@ internal sealed partial class TlsQuicConnection
     /// <exception cref="InvalidOperationException">The peer's transport parameters have not
     /// arrived.</exception>
     internal TlsQuicStreamSet Streams => _streams ??=
-        new TlsQuicStreamSet(PeerFlowControl, _options.Spec.LocalFlowControl)
+        new TlsQuicStreamSet(
+            PeerFlowControl,
+            // AS ADVERTISED, NOT AS SPECIFIED. See TlsQuicLocalFlowControlSpec.AsAdvertisedBy:
+            // a limit the transport-parameter list never emits is zero to the peer under RFC
+            // 9000 s18.2, and enforcing the spec's default for it would police a budget the
+            // peer was never given.
+            _options.Spec.LocalFlowControl.AsAdvertisedBy(_options.Spec.TransportParameters))
         {
             // SET AT CONSTRUCTION AND NOT ONLY AT SEND TIME. Drain runs when the application
             // WRITES, which is before any datagram is built, so a set that learned its budget

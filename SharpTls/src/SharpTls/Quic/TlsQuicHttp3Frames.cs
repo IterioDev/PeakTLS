@@ -417,8 +417,11 @@ internal static class TlsQuicHttp3Settings
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(spec);
 
+        // ComposeSettings, NOT Settings. This is the one place the pairs reach the wire, and
+        // it runs once per connection as the control stream opens - which is exactly the
+        // lifetime a drawn reserved setting has to be redrawn on.
         var payload = new List<byte>();
-        EncodePayload(payload, spec.Settings);
+        EncodePayload(payload, spec.ComposeSettings());
         TlsQuicHttp3Frames.Write(
             destination,
             (ulong)TlsQuicHttp3FrameType.Settings,
@@ -545,7 +548,14 @@ internal static class TlsQuicHttp3Settings
         var parts = new string[settings.Count];
         for (var i = 0; i < settings.Count; i++)
         {
-            parts[i] = TlsQuicHttp3Frames.IsReservedIdentifier(settings[i].Identifier)
+            // A DRAWN SLOT RENDERS AS THE TOKEN TOO, and it has to: its stored pair is the
+            // (0, 0) placeholder, so rendering the numbers would print "0:0" for the one entry
+            // whose numbers are the ones that must not be printed. The capture's own
+            // fingerprint string is what settles this - line 47 reads
+            // "1:65536;6:262144;7:100;51:1;GREASE", so the service that produced it already
+            // collapses the reserved pair to a token rather than recording its value.
+            parts[i] = settings[i].IsDrawn
+                || TlsQuicHttp3Frames.IsReservedIdentifier(settings[i].Identifier)
                 ? ReservedToken
                 : string.Create(
                     CultureInfo.InvariantCulture,

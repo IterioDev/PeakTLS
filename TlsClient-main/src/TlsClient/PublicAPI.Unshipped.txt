@@ -236,8 +236,11 @@ TlsClient.TlsHttp3PseudoHeader.Method = 0 -> TlsClient.TlsHttp3PseudoHeader
 TlsClient.TlsHttp3PseudoHeader.Path = 3 -> TlsClient.TlsHttp3PseudoHeader
 TlsClient.TlsHttp3PseudoHeader.Scheme = 2 -> TlsClient.TlsHttp3PseudoHeader
 TlsClient.TlsHttp3Setting
+TlsClient.TlsHttp3Setting.Draw.get -> System.Func<TlsClient.TlsHttp3Setting>?
+TlsClient.TlsHttp3Setting.Draw.init -> void
 TlsClient.TlsHttp3Setting.Identifier.get -> ulong
 TlsClient.TlsHttp3Setting.Identifier.init -> void
+TlsClient.TlsHttp3Setting.IsDrawn.get -> bool
 TlsClient.TlsHttp3Setting.TlsHttp3Setting() -> void
 TlsClient.TlsHttp3Setting.TlsHttp3Setting(ulong Identifier, ulong Value) -> void
 TlsClient.TlsHttp3Setting.Value.get -> ulong
@@ -284,6 +287,8 @@ TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.get -> bool
 TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.set -> void
 TlsClient.TlsQuicOptions.ConfigureClientHello.get -> System.Action<SharpTls.ClientHelloBuilder!>?
 TlsClient.TlsQuicOptions.ConfigureClientHello.set -> void
+TlsClient.TlsQuicOptions.ConfigureTls.get -> System.Action<SharpTls.Quic.CustomTlsQuicClientOptions!>?
+TlsClient.TlsQuicOptions.ConfigureTls.set -> void
 TlsClient.TlsQuicOptions.CryptoLengthVarintWidth.get -> TlsClient.TlsQuicVarintWidth
 TlsClient.TlsQuicOptions.CryptoLengthVarintWidth.set -> void
 TlsClient.TlsQuicOptions.CryptoOffsetVarintWidth.get -> TlsClient.TlsQuicVarintWidth
@@ -291,6 +296,8 @@ TlsClient.TlsQuicOptions.CryptoOffsetVarintWidth.set -> void
 TlsClient.TlsQuicOptions.DestinationConnectionIdLength.get -> int
 TlsClient.TlsQuicOptions.DestinationConnectionIdLength.set -> void
 TlsClient.TlsQuicOptions.FlowControl.get -> TlsClient.TlsQuicFlowControlOptions!
+TlsClient.TlsQuicOptions.HandshakeDeadline.get -> System.TimeSpan?
+TlsClient.TlsQuicOptions.HandshakeDeadline.set -> void
 TlsClient.TlsQuicOptions.HeaderLengthVarintWidth.get -> TlsClient.TlsQuicVarintWidth
 TlsClient.TlsQuicOptions.HeaderLengthVarintWidth.set -> void
 TlsClient.TlsQuicOptions.InitialCryptoFrameByteCounts.get -> System.Collections.Generic.IList<int>!
@@ -314,6 +321,8 @@ TlsClient.TlsQuicOptions.PathMtuDiscovery.set -> void
 TlsClient.TlsQuicOptions.Recovery.get -> TlsClient.TlsQuicRecoveryOptions!
 TlsClient.TlsQuicOptions.SourceConnectionIdLength.get -> int
 TlsClient.TlsQuicOptions.SourceConnectionIdLength.set -> void
+TlsClient.TlsQuicOptions.SpinBit.get -> SharpTls.Quic.TlsQuicSpinBitPolicy
+TlsClient.TlsQuicOptions.SpinBit.set -> void
 TlsClient.TlsQuicOptions.TlsQuicOptions() -> void
 TlsClient.TlsQuicOptions.Token.get -> System.ReadOnlyMemory<byte>
 TlsClient.TlsQuicOptions.Token.set -> void
@@ -354,6 +363,8 @@ TlsClient.TlsQuicTransportParameterEntry.Id.get -> ulong
 TlsClient.TlsQuicTransportParameterEntry.IsDrawn.get -> bool
 TlsClient.TlsQuicTransportParameterEntry.IsPlaced.get -> bool
 TlsClient.TlsQuicTransportParameterOptions
+TlsClient.TlsQuicTransportParameterOptions.CyclicRotationLength.get -> int
+TlsClient.TlsQuicTransportParameterOptions.CyclicRotationLength.set -> void
 TlsClient.TlsQuicTransportParameterOptions.Entries.get -> System.Collections.Generic.IList<TlsClient.TlsQuicTransportParameterEntry!>!
 TlsClient.TlsQuicTransportParameterOptions.Entries.set -> void
 TlsClient.TlsQuicTransportParameterOptions.TlsQuicTransportParameterOptions() -> void
@@ -389,6 +400,7 @@ TlsClient.TlsRequestOptions.Scheme.get -> string?
 TlsClient.TlsRequestOptions.Scheme.set -> void
 TlsClient.TlsSessionOptions.Http3.get -> TlsClient.TlsHttp3Options!
 TlsClient.TlsSessionOptions.Quic.get -> TlsClient.TlsQuicOptions!
+static TlsClient.TlsHttp3Setting.Drawn(System.Func<TlsClient.TlsHttp3Setting>! draw) -> TlsClient.TlsHttp3Setting
 static TlsClient.TlsPresets.Spotify.get -> TlsClient.TlsPreset!
 static TlsClient.TlsPresets.Spotify917602050IOS270Http3.get -> TlsClient.TlsPreset!
 static TlsClient.TlsProfiles.Spotify917602050IOS270Quic.get -> TlsClient.TlsProfile!

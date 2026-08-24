@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 
 namespace SharpTls.Quic;
 
@@ -85,7 +86,37 @@ internal enum TlsQuicQpackNameMatchPolicy
 /// <see cref="QuicVariableLengthInteger.MaximumValue"/>.</param>
 /// <param name="Value">The s7.2.4 Value field. At most
 /// <see cref="QuicVariableLengthInteger.MaximumValue"/>.</param>
-internal readonly record struct TlsQuicHttp3Setting(ulong Identifier, ulong Value);
+internal readonly record struct TlsQuicHttp3Setting(ulong Identifier, ulong Value)
+{
+    /// <summary>Draws this entry afresh for every connection, or <see langword="null"/> for a
+    /// literal pair.</summary>
+    /// <remarks>
+    /// A DRAWN SLOT, FOR THE SAME REASON <c>TlsQuicTransportParameterSlot.Drawn</c> IS ONE.
+    /// RFC 9114 s7.2.4.1 reserves the whole <c>0x1f * N + 0x21</c> family so that a peer sees
+    /// values it must ignore; a client that draws one per connection and a client that ships
+    /// the same pair forever are trivially distinguishable, and the second is a stronger
+    /// fingerprint than sending no reserved setting at all - it names the implementation. This
+    /// list used to be literal pairs only, which is what
+    /// <c>TlsPreset.DrawReservedHttp3Setting</c>'s remarks recorded as the gap.
+    /// </remarks>
+    internal Func<TlsQuicHttp3Setting>? Draw { get; init; }
+
+    /// <summary>Whether this entry redraws on every connection.</summary>
+    internal bool IsDrawn => Draw is not null;
+
+    /// <summary>An entry whose identifier and value are drawn for each connection.</summary>
+    /// <remarks>The pair carried here is <c>(0, 0)</c> and is never emitted: only
+    /// <see cref="TlsQuicHttp3Spec.ComposeSettings"/>' result reaches the wire.</remarks>
+    /// <param name="draw">Runs once per connection. Its own <see cref="Draw"/> is discarded, so
+    /// a draw that returns another drawn entry cannot recurse.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="draw"/> is
+    /// <see langword="null"/>.</exception>
+    internal static TlsQuicHttp3Setting Drawn(Func<TlsQuicHttp3Setting> draw)
+    {
+        ArgumentNullException.ThrowIfNull(draw);
+        return new TlsQuicHttp3Setting(0, 0) { Draw = draw };
+    }
+}
 
 // ADDING A PROPERTY HERE? THE SAME TWO THINGS ARE OWED AS IN TlsQuicConnectionSpec.cs,
 // whose header states the rule in full and is the authority. In short:
@@ -145,8 +176,32 @@ internal sealed class TlsQuicHttp3Spec
         new(MaxFieldSectionSizeIdentifier, 262144),
         new(QpackBlockedStreamsIdentifier, 100),
         new(H3DatagramIdentifier, 1),
-        new(126585778853, 2585972839),
+        TlsQuicHttp3Setting.Drawn(DrawReservedSetting),
     ];
+
+    /// <summary>Draws one RFC 9114 s7.2.4.1 reserved SETTINGS pair.</summary>
+    /// <remarks>
+    /// <para>THE CAPTURE'S SHAPE, NOT THE CAPTURE'S NUMBERS. This entry used to be the literal
+    /// pair the remarks above record - 126585778853 and 2585972839 - which made it the DEFAULT
+    /// for every connection that does not replace <see cref="Settings"/>. A reserved setting
+    /// exists to be ignorable noise, and noise that is byte-identical on every connection from
+    /// every caller is not noise: it is a constant that identifies this library. The numbers
+    /// stay in the remarks as the measurement they are, and the shipped behaviour draws from
+    /// the family they belong to.</para>
+    /// <para>N SPANS 32 BITS because the capture's own N is 4083412220, which needs them all.
+    /// See <see cref="DrawWide32"/> for why the low bit costs a second call.</para>
+    /// </remarks>
+    internal static TlsQuicHttp3Setting DrawReservedSetting() =>
+        new((0x1FUL * DrawWide32()) + 0x21UL, DrawWide32());
+
+    /// <summary>Draws a value spanning the full 32 bits the capture's numbers needed.</summary>
+    /// <remarks>TWO CALLS, NOT ONE DOUBLED. <see cref="RandomNumberGenerator.GetInt32(int)"/>
+    /// stops one short of <see cref="int.MaxValue"/>, so one call reaches 31 bits and the
+    /// doubling widens it to 32 - but the doubling also clears the low bit, and the second call
+    /// is what puts it back. Without it the draw is uniform over the EVEN values only.</remarks>
+    private static ulong DrawWide32() =>
+        ((ulong)RandomNumberGenerator.GetInt32(int.MaxValue) * 2)
+            + (ulong)RandomNumberGenerator.GetInt32(2);
 
     /// <summary>RFC 9114 s11.2.2 Table 3's <c>MAX_FIELD_SECTION_SIZE</c>, 0x06.</summary>
     internal const ulong MaxFieldSectionSizeIdentifier = 0x06;
@@ -253,6 +308,15 @@ internal sealed class TlsQuicHttp3Spec
             for (var i = 0; i < value.Length; i++)
             {
                 var setting = value[i];
+
+                // A DRAWN ENTRY CARRIES NO PAIR TO CHECK. Its identifier and value are (0, 0)
+                // placeholders that never reach the wire; ComposeSettings runs the same rules
+                // over what the draw actually returns, which is the pair a peer sees.
+                if (setting.IsDrawn)
+                {
+                    continue;
+                }
+
                 ArgumentOutOfRangeException.ThrowIfGreaterThan(
                     setting.Identifier, QuicVariableLengthInteger.MaximumValue, nameof(Settings));
                 ArgumentOutOfRangeException.ThrowIfGreaterThan(
@@ -282,7 +346,7 @@ internal sealed class TlsQuicHttp3Spec
 
                 for (var j = 0; j < i; j++)
                 {
-                    if (value[j].Identifier == setting.Identifier)
+                    if (!value[j].IsDrawn && value[j].Identifier == setting.Identifier)
                     {
                         throw new ArgumentException(
                             $"Setting identifier 0x{setting.Identifier:x} occurs more than once.",
@@ -292,6 +356,70 @@ internal sealed class TlsQuicHttp3Spec
             }
             _settings = value;
         }
+    }
+
+    /// <summary>This connection's SETTINGS pairs: the list as written, with every drawn entry
+    /// replaced by what its function returned for THIS connection.</summary>
+    /// <remarks>
+    /// <para>CALLED ONCE PER CONNECTION, from <c>TlsQuicHttp3Settings.Encode</c> as the control
+    /// stream opens. Every other reader of <see cref="Settings"/> looks up a known identifier -
+    /// 0x01, 0x06, 0x07, 0x33 - and a drawn entry is by construction none of those, so those
+    /// readers need no composition and do not get one.</para>
+    /// <para>THE DRAW'S RESULT IS CHECKED, NOT TRUSTED. <see cref="Settings"/> cannot validate a
+    /// pair that does not exist yet, so the two rules that matter on the wire - RFC 9114
+    /// s11.2.2's HTTP/2-reserved identifiers, and the variable-length integer ceiling - are
+    /// applied here to what the function actually returned.</para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">A drawn entry returned an identifier RFC
+    /// 9114 s11.2.2 forbids, or a number too large for a variable-length integer.</exception>
+    internal ImmutableArray<TlsQuicHttp3Setting> ComposeSettings()
+    {
+        var anyDrawn = false;
+        foreach (var setting in _settings)
+        {
+            if (setting.IsDrawn)
+            {
+                anyDrawn = true;
+                break;
+            }
+        }
+
+        if (!anyDrawn)
+        {
+            return _settings;
+        }
+
+        var composed = ImmutableArray.CreateBuilder<TlsQuicHttp3Setting>(_settings.Length);
+        foreach (var setting in _settings)
+        {
+            if (!setting.IsDrawn)
+            {
+                composed.Add(setting);
+                continue;
+            }
+
+            // `with { Draw = null }` so the composed list is literal all the way down: a draw
+            // that returned another drawn entry would otherwise put an unresolved slot on the
+            // wire as the pair (0, 0).
+            var drawn = setting.Draw!() with { Draw = null };
+            if (drawn.Identifier > QuicVariableLengthInteger.MaximumValue ||
+                drawn.Value > QuicVariableLengthInteger.MaximumValue)
+            {
+                throw new InvalidOperationException(
+                    $"A drawn SETTINGS entry returned 0x{drawn.Identifier:x} = "
+                    + $"{drawn.Value}, which does not fit a QUIC variable-length integer.");
+            }
+            if (TlsQuicHttp3Frames.IsHttp2ReservedSettingIdentifier(drawn.Identifier))
+            {
+                throw new InvalidOperationException(
+                    $"A drawn SETTINGS entry returned identifier 0x{drawn.Identifier:x}, which "
+                    + "is reserved from HTTP/2 by RFC 9114 s11.2.2 and MUST NOT be sent.");
+            }
+
+            composed.Add(drawn);
+        }
+
+        return composed.MoveToImmutable();
     }
 
     /// <summary>Gets whether <c>SETTINGS_H3_DATAGRAM</c> = 1 may be sent on a connection whose

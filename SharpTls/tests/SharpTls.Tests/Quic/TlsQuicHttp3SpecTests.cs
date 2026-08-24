@@ -37,7 +37,55 @@ public sealed class TlsQuicHttp3SpecTests
         Assert.Equal(new TlsQuicHttp3Setting(6, 262144), spec.Settings[1]);
         Assert.Equal(new TlsQuicHttp3Setting(7, 100), spec.Settings[2]);
         Assert.Equal(new TlsQuicHttp3Setting(51, 1), spec.Settings[3]);
-        Assert.Equal(new TlsQuicHttp3Setting(126585778853, 2585972839), spec.Settings[4]);
+
+        // THE FIFTH IS THE CAPTURE'S SHAPE AND NOT THE CAPTURE'S NUMBERS. It used to be the
+        // literal pair (126585778853, 2585972839) - which made those two numbers the DEFAULT
+        // for every connection from every caller that does not replace Settings. A reserved
+        // setting exists to be ignorable noise; noise that is byte-identical everywhere is a
+        // constant that identifies this library rather than hiding it.
+        Assert.True(spec.Settings[4].IsDrawn);
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(
+            spec.ComposeSettings()[4].Identifier));
+    }
+
+    [Fact]
+    public void TheDefaultReservedSettingIsDrawnAfreshOnEveryComposition()
+    {
+        var spec = new TlsQuicHttp3Spec();
+
+        // Thirty-two compositions of ONE spec. A cached draw yields exactly one distinct pair
+        // every time; a correct one draws each half over 32 bits, so 32 correct compositions
+        // collide on all of them with probability far under 2^-900. The first four entries are
+        // literal and must NOT move, which is the other half of the assertion.
+        var pairs = new HashSet<(ulong, ulong)>();
+        for (var i = 0; i < 32; i++)
+        {
+            var composed = spec.ComposeSettings();
+            Assert.Equal(new TlsQuicHttp3Setting(1, 65536), composed[0]);
+            Assert.False(composed[4].IsDrawn);
+            Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(composed[4].Identifier));
+            pairs.Add((composed[4].Identifier, composed[4].Value));
+        }
+
+        Assert.True(pairs.Count > 1, "the reserved setting never changed across compositions");
+    }
+
+    [Fact]
+    public void TheDrawnReservedSettingsValueIsNotAlwaysEven()
+    {
+        // THE BUG THIS PINS WAS ONE MISSING TERM. The identifier drew `GetInt32(max) * 2 +
+        // GetInt32(2)` and the value drew only `GetInt32(max) * 2`, so every reserved value
+        // this library ever emitted was even - one standing bit of signal in the one field
+        // whose entire purpose is to carry none. Sixty-four draws are all-even by chance with
+        // probability 2^-64.
+        var spec = new TlsQuicHttp3Spec();
+        var sawOdd = false;
+        for (var i = 0; i < 64 && !sawOdd; i++)
+        {
+            sawOdd = (spec.ComposeSettings()[4].Value & 1) == 1;
+        }
+
+        Assert.True(sawOdd, "the drawn reserved value was even 64 times running");
     }
 
     [Fact]

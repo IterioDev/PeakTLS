@@ -353,11 +353,17 @@ public sealed class TlsQuicPrimitiveTests
     [InlineData(TlsQuicTransportError.CryptoBufferExceeded, 0x0DUL)]
     [InlineData(TlsQuicTransportError.KeyUpdateError, 0x0EUL)]
     [InlineData(TlsQuicTransportError.AeadLimitReached, 0x0FUL)]
+    [InlineData(TlsQuicTransportError.InternalError, 0x01UL)]
+    [InlineData(TlsQuicTransportError.ConnectionRefused, 0x02UL)]
+    [InlineData(TlsQuicTransportError.ConnectionIdLimitError, 0x09UL)]
+    [InlineData(TlsQuicTransportError.InvalidToken, 0x0BUL)]
+    [InlineData(TlsQuicTransportError.NoViablePath, 0x10UL)]
+    [InlineData(TlsQuicTransportError.VersionNegotiationError, 0x11UL)]
     public void EveryTransportErrorCarriesItsSection201CodePoint(TlsQuicTransportError error, ulong code) =>
         Assert.Equal(code, (ulong)error);
 
     [Fact]
-    public void TheTransportErrorCodePointsAreExactlyTheTwelvePinnedAbove() =>
+    public void TheTransportErrorCodePointsAreExactlyTheEighteenPinnedAbove() =>
         // The count is not asserted as a number: it is the list, so a member added
         // without a row above fails here rather than passing unnoticed. Sorted because
         // the enum's declaration order is not its numeric order.
@@ -381,8 +387,19 @@ public sealed class TlsQuicPrimitiveTests
         // available - and which s20.1 puts immediately after KEY_UPDATE_ERROR. The two are
         // adjacent AND related, which is exactly the pair a transcription is most likely to
         // collapse onto one number.
+        // AND AGAIN FOR THE SIX THAT COMPLETED s20.1's REGISTRY. Five are s20.1's own -
+        // INTERNAL_ERROR (0x01), CONNECTION_REFUSED (0x02), CONNECTION_ID_LIMIT_ERROR (0x09),
+        // INVALID_TOKEN (0x0b), NO_VIABLE_PATH (0x10) - and the sixth is RFC 9368 s6's
+        // VERSION_NEGOTIATION_ERROR (0x11). Two of the six run 0x09..0x0b THROUGH members that
+        // were already here (0x0a PROTOCOL_VIOLATION), which is the interleaving a
+        // transcription is most likely to get wrong, and 0x10/0x11 are the first two members
+        // that need a second hex digit.
         Assert.Equal(
-            new ulong[] { 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0C, 0x0D, 0x0E, 0x0F },
+            new ulong[]
+            {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+                0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
+            },
             Enum.GetValues<TlsQuicTransportError>().Select(e => (ulong)e).Order());
 
     private static void AssertKeys(

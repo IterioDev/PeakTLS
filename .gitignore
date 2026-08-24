@@ -22,7 +22,7 @@ sharptls-pin/
 mutsweep-t11/
 sharptls-mut-t5/
 SharpTls-mutation-sweep/
-
+graphify-out/
 # Secrets
 .env
 *.env

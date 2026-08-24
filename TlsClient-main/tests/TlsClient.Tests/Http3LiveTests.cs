@@ -47,6 +47,7 @@ public sealed class Http3LiveTests
             Origin,
             proxy: null,
             configuration,
+            new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             CancellationToken.None);
 
@@ -157,6 +158,7 @@ public sealed class Http3LiveTests
             new Uri($"https://{FingerprintHost}/"),
             proxy: null,
             configuration,
+            new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             CancellationToken.None);
 
@@ -327,6 +329,7 @@ public sealed class Http3LiveTests
             new Uri($"https://{FingerprintHost}/"),
             proxy: null,
             configuration,
+            new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             CancellationToken.None);
 

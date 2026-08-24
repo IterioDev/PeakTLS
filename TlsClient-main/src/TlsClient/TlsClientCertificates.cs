@@ -1,5 +1,6 @@
 using System.Net;
 using SharpTls;
+using SharpTls.Quic;
 using SharpTls.Certificates;
 
 namespace TlsClient;
@@ -176,14 +177,10 @@ internal sealed class TlsClientCertificateConfiguration
 
     public void Apply(CustomTlsClientOptions options)
     {
-        if (_selector is null && _defaultCertificate is null && _certificates.Count == 0)
+        ArgumentNullException.ThrowIfNull(options);
+        if (!ShouldApply(options.ClientCertificate, options.ClientCertificateSelector))
         {
             return;
-        }
-        if (options.ClientCertificate is not null || options.ClientCertificateSelector is not null)
-        {
-            throw new InvalidOperationException(
-                "ConfigureTls and ClientCertificates both configured client authentication.");
         }
 
         if (_selector is not null)
@@ -199,6 +196,54 @@ internal sealed class TlsClientCertificateConfiguration
 
         options.ClientCertificateSelector = (context, _) =>
             ValueTask.FromResult(Resolve(context.ServerName));
+    }
+
+    /// <summary>The same policy for a QUIC handshake.</summary>
+    /// <remarks>AN OVERLOAD RATHER THAN A SHARED HELPER TAKING AN INTERFACE, because the two
+    /// options types share no base and SharpTls does not define one. The decision they encode
+    /// is identical and lives once, in <see cref="ShouldApply"/>; only the two assignments
+    /// differ, and they are two lines each. Without this overload a client certificate
+    /// configured on the session reached the TCP path and was dropped on the h3 one - a
+    /// downgrade of exactly the kind the TCP path's own comment says must not happen
+    /// silently.</remarks>
+    public void Apply(CustomTlsQuicClientOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!ShouldApply(options.ClientCertificate, options.ClientCertificateSelector))
+        {
+            return;
+        }
+
+        if (_selector is not null)
+        {
+            options.ClientCertificateSelector = _selector;
+            return;
+        }
+        if (_certificates.Count == 0)
+        {
+            options.ClientCertificate = _defaultCertificate;
+            return;
+        }
+
+        options.ClientCertificateSelector = (context, _) =>
+            ValueTask.FromResult(Resolve(context.ServerName));
+    }
+
+    private bool ShouldApply(
+        TlsClientCertificate? configuredCertificate,
+        TlsClientCertificateSelector? configuredSelector)
+    {
+        if (_selector is null && _defaultCertificate is null && _certificates.Count == 0)
+        {
+            return false;
+        }
+        if (configuredCertificate is not null || configuredSelector is not null)
+        {
+            throw new InvalidOperationException(
+                "ConfigureTls and ClientCertificates both configured client authentication.");
+        }
+
+        return true;
     }
 
     private TlsClientCertificate? Resolve(string host)

@@ -126,6 +126,23 @@ public sealed class TlsQuicTransportParameterOptions
     private static readonly string EntriesParameter = nameof(Entries);
 
     /// <summary>
+    /// Gets or sets how many leading <see cref="Entries"/> rotate cyclically, by an offset
+    /// redrawn for every connection. Zero - the default - emits the list as written.
+    /// </summary>
+    /// <remarks>
+    /// <para>PER CONNECTION, WHICH IS THE POINT. A preset that rotates its own list when it is
+    /// applied gives every connection in a pooled session the same order for the session's
+    /// whole life: one of seven rather than one of one, but still a constant, and a peer that
+    /// opens two connections sees one order twice where the real client shows two. This is
+    /// applied inside the per-connection composition instead.</para>
+    /// <para>A LENGTH, NOT A FLAG, because the capture that needs it rotates seven of eight
+    /// entries: the Spotify iOS client's Google-private <c>0xff080808</c> sat last in 4 of 4
+    /// proxy captures regardless of where the rotation started. Put the non-rotating entries
+    /// after the rotating block and set this to the block's length.</para>
+    /// </remarks>
+    public int CyclicRotationLength { get; set; }
+
+    /// <summary>
     /// Gets or sets the transport parameters, in exact wire order. The default is the Brave 151
     /// capture's fourteen entries — seven placed, four literal and three drawn.
     /// </summary>
@@ -150,6 +167,10 @@ public sealed class TlsQuicTransportParameterOptions
             }
             slots.Add(entry.Slot);
         }
-        return new TlsQuicTransportParameterSpec { Parameters = slots.DrainToImmutable() };
+        return new TlsQuicTransportParameterSpec
+        {
+            Parameters = slots.DrainToImmutable(),
+            CyclicRotationLength = CyclicRotationLength,
+        };
     }
 }

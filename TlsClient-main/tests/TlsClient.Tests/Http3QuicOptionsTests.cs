@@ -168,11 +168,21 @@ public sealed class Http3QuicOptionsTests
     [Fact]
     public void DefaultHttp3Settings_EncodeToTheSameBytesAsABareSpec()
     {
-        // The SETTINGS frame is the first thing HTTP/3 puts on the control stream and it is
-        // fully determined by the spec — no draws — so this is an exact byte pin.
-        Assert.Equal<byte>(
-            EncodeSettings(new TlsQuicHttp3Spec()),
-            EncodeSettings(new TlsSessionOptions().Snapshot().Quic.Http3Spec));
+        // NOT AN EXACT BYTE PIN ANY MORE, AND THAT IS THE FIX RATHER THAN A WEAKENING. The
+        // last default setting is RFC 9114 s7.2.4.1 reserved and is now DRAWN per connection,
+        // so two encodings of the same spec differ in exactly that pair - which is what a
+        // reserved setting is for. Everything before it is still pinned byte for byte, and the
+        // drawn entry is pinned by family.
+        var bare = new TlsQuicHttp3Spec().ComposeSettings();
+        var viaOptions = new TlsSessionOptions().Snapshot().Quic.Http3Spec.ComposeSettings();
+
+        Assert.Equal(bare.Length, viaOptions.Length);
+        for (var i = 0; i < bare.Length - 1; i++)
+        {
+            Assert.Equal(bare[i], viaOptions[i]);
+        }
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(bare[^1].Identifier));
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(viaOptions[^1].Identifier));
     }
 
     [Fact]
@@ -181,7 +191,18 @@ public sealed class Http3QuicOptionsTests
         var legacy = new TlsQuicHttp3Spec();
         var current = new TlsSessionOptions().Snapshot().Quic.Http3Spec;
 
-        Assert.Equal<TlsQuicHttp3Setting>([.. legacy.Settings], [.. current.Settings]);
+        // ELEMENT BY ELEMENT EXCEPT THE LAST, which is drawn: two record structs holding
+        // different closures are never equal, and the pair they hold is a placeholder in both.
+        // What has to match is that both are drawn and both draw from the reserved family.
+        Assert.Equal(legacy.Settings.Length, current.Settings.Length);
+        for (var i = 0; i < legacy.Settings.Length - 1; i++)
+        {
+            Assert.Equal(legacy.Settings[i], current.Settings[i]);
+        }
+        Assert.True(legacy.Settings[^1].IsDrawn);
+        Assert.True(current.Settings[^1].IsDrawn);
+        Assert.True(TlsQuicHttp3Frames.IsReservedIdentifier(
+            current.ComposeSettings()[^1].Identifier));
         Assert.Equal<TlsQuicHttp3StreamType>(
             [.. legacy.UnidirectionalStreamOpenOrder],
             [.. current.UnidirectionalStreamOpenOrder]);
@@ -248,7 +269,19 @@ public sealed class Http3QuicOptionsTests
     {
         // The endpoint records settings sorted-or-not indistinguishably, but the BYTES still
         // differ, and it is the bytes this library promises to reproduce.
+        //
+        // EVERY ENTRY IS PINNED TO A LITERAL FIRST, because the shipped default's last entry
+        // is drawn per connection: leaving it in would make `before` and `after` differ in a
+        // pair that has nothing to do with order, and the reversal assertion below would
+        // compare one draw against another. This test is about ORDER.
         var options = new TlsSessionOptions();
+        options.Http3.Settings =
+        [
+            new TlsHttp3Setting(0x01, 65536),
+            new TlsHttp3Setting(0x06, 262144),
+            new TlsHttp3Setting(0x07, 100),
+            new TlsHttp3Setting(0x33, 1),
+        ];
         var before = EncodeSettings(options.Snapshot().Quic.Http3Spec);
 
         options.Http3.Settings = [.. options.Http3.Settings.Reverse()];
@@ -870,9 +903,14 @@ public sealed class Http3QuicOptionsTests
         var connection = snapshot.Quic.ConnectionSpec;
         var http3 = snapshot.Quic.Http3Spec;
 
+        // COMPOSED, NOT DECLARED. The reserved entry is drawn per connection, so its stored
+        // pair is a placeholder and only the composition carries the identifier this render
+        // has to recognise as GREASE. The hash is unaffected either way - the capture's own
+        // fingerprint string collapses that pair to the token - which is precisely why drawing
+        // it is safe.
         var settings = string.Join(
             ';',
-            http3.Settings.Select(setting =>
+            http3.ComposeSettings().Select(setting =>
                 TlsQuicHttp3Frames.IsReservedIdentifier(setting.Identifier)
                     ? "GREASE"
                     : $"{setting.Identifier}:{setting.Value}"));

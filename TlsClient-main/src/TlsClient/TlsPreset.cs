@@ -157,22 +157,27 @@ public static class TlsPresets
 
         // 91 captured connections produced exactly 7 transport-parameter orders and every one
         // was a cyclic rotation of the sequence above — never a shuffle, which would have
-        // drawn from 7! = 5040. A fixed order would match one connection in seven, so the
-        // rotation is redrawn here per options object.
+        // drawn from 7! = 5040. A fixed order would match one connection in seven.
+        //
+        // THE ROTATION IS DECLARED, NOT PERFORMED HERE, and that is the fix rather than a
+        // refactor. This block used to draw an offset and rotate the array on the spot, which
+        // happens once per OPTIONS OBJECT: every connection in a pooled session then shipped
+        // the same order for the session's whole life - one of seven instead of one of one,
+        // but still a constant, and a server that sees two connections from this client saw
+        // one order twice where the real one shows two. CyclicRotationLength moves the draw
+        // into TlsQuicTransportParameterSpec.Compose, which runs once per CONNECTION.
         // The seven known parameters rotate. 0xff080808 does NOT join the rotation: it sits
         // last in 4 of 4 proxy captures regardless of where the rotation started, so it is
         // appended after the rotated block rather than being an eighth rotating element.
         // Its 10 encoded bytes (8-byte varint id + length + one payload byte) are exactly the
         // 487 -> 497 growth measured in the second Initial CRYPTO frame, which is what
         // identified it. Absent from all 80 direct connections; see the cipher-order note.
-        var entries = SpotifyTransportParameters();
-        var offset = RandomNumberGenerator.GetInt32(entries.Length);
         quic.TransportParameters.Entries =
         [
-            .. entries[offset..],
-            .. entries[..offset],
+            .. SpotifyTransportParameters(),
             TlsQuicTransportParameterEntry.Literal(0xFF08_0808, [0x09]),
         ];
+        quic.TransportParameters.CyclicRotationLength = SpotifyRotatingParameterCount;
 
         quic.AlpnProtocols = ["h3"];
         quic.ConfigureClientHello =
@@ -185,7 +190,10 @@ public static class TlsPresets
         [
             new TlsHttp3Setting(0x01, 16_383),
             new TlsHttp3Setting(0x07, 100),
-            DrawReservedHttp3Setting(),
+            // DRAWN, NOT DRAWN-ONCE. Same fix as the transport-parameter rotation above:
+            // calling the draw here would freeze one identifier/value pair onto this options
+            // object and ship it on every connection the session makes.
+            TlsHttp3Setting.Drawn(DrawReservedHttp3Setting),
         ];
 
         // MEASURED: control, then qpack_encoder, then qpack_decoder, in 4 of 4 proxy captures
@@ -218,15 +226,30 @@ public static class TlsPresets
     /// with a random N, carrying a random value. Every captured identifier had that form, and
     /// the largest observed N needed 32 bits.
     /// </summary>
-    /// <remarks>Redrawn per options object. The real client redraws per CONNECTION, which
-    /// <see cref="TlsHttp3Options.Settings"/> cannot express: it is a list of literal pairs
-    /// with no drawn slot.</remarks>
-    private static TlsHttp3Setting DrawReservedHttp3Setting()
-    {
-        var n = ((ulong)RandomNumberGenerator.GetInt32(int.MaxValue) * 2)
+    /// <remarks>REDRAWN PER CONNECTION, through <see cref="TlsHttp3Setting.Drawn"/>. An
+    /// earlier revision called this method directly in the settings list, which drew once per
+    /// options object - and this remark recorded that as a gap
+    /// <see cref="TlsHttp3Options.Settings"/> "cannot express: it is a list of literal pairs
+    /// with no drawn slot". It has one now.</remarks>
+    /// <summary>The number of Spotify transport parameters that rotate; the Google-private
+    /// <c>0xff080808</c> entry sits after them and does not.</summary>
+    private const int SpotifyRotatingParameterCount = 7;
+
+    private static TlsHttp3Setting DrawReservedHttp3Setting() =>
+        new((0x1FUL * DrawWide32()) + 0x21UL, DrawWide32());
+
+    /// <summary>Draws a value spanning the full 32 bits the capture's numbers needed.</summary>
+    /// <remarks>
+    /// TWO CALLS, NOT ONE DOUBLED. <see cref="RandomNumberGenerator.GetInt32(int)"/> tops out
+    /// one short of <see cref="int.MaxValue"/>, so a single call reaches 31 bits and the
+    /// doubling widens it to 32 - but the doubling also clears the low bit, and the second
+    /// call is what puts it back. Without it the draw is uniform over the EVEN values only,
+    /// which is one standing bit of signal in a field whose entire purpose is to carry none.
+    /// The identifier had this shape from the start; the VALUE did not, and read
+    /// <c>GetInt32(int.MaxValue) * 2</c> - every reserved SETTINGS value this preset ever
+    /// emitted was even.
+    /// </remarks>
+    private static ulong DrawWide32() =>
+        ((ulong)RandomNumberGenerator.GetInt32(int.MaxValue) * 2)
             + (ulong)RandomNumberGenerator.GetInt32(2);
-        return new TlsHttp3Setting(
-            (0x1FUL * n) + 0x21UL,
-            (ulong)RandomNumberGenerator.GetInt32(int.MaxValue) * 2);
-    }
 }

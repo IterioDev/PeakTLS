@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SharpTls.Quic;
@@ -514,6 +516,83 @@ internal sealed class TlsQuicTransportParameterSpec
     private readonly ImmutableArray<TlsQuicTransportParameterSlot> _parameters =
         Brave151Parameters;
 
+    private readonly int _cyclicRotationLength;
+
+    /// <summary>
+    /// How many leading entries of <see cref="Parameters"/> rotate cyclically, by an offset
+    /// redrawn for every connection. Zero - the default - emits the list as written.
+    /// </summary>
+    /// <remarks>
+    /// <para>A LENGTH RATHER THAN A BOOLEAN, because the capture that needs it does not rotate
+    /// the whole list. The Spotify iOS capture's 91 connections produced exactly seven
+    /// transport-parameter orders and every one was a cyclic rotation of one sequence - never a
+    /// shuffle, which would have drawn from 7! = 5040 - while its Google-private
+    /// <c>0xff080808</c> sat LAST in 4 of 4 proxy captures regardless of where the rotation
+    /// started. So seven entries rotate and the eighth does not, and only a length can say
+    /// that.</para>
+    /// <para>REDRAWN PER CONNECTION, WHICH IS THE WHOLE POINT. Rotating once when the options
+    /// object is built gives every connection in a pooled session the same order: one of seven
+    /// rather than one of one, but still a constant for the life of the session, and a peer
+    /// that sees two connections sees the same order twice where the real client shows two.
+    /// <see cref="Compose"/> runs once per connection, from
+    /// <c>TlsQuicClientHelloProfileFactory.Create</c>, which is where the offset now comes
+    /// from.</para>
+    /// <para>THE ROTATION IS OF SLOTS, NOT OF COMPOSED VALUES, so a drawn entry still draws at
+    /// the position it lands in and a placed entry still takes its value from the connection
+    /// spec. Rotating afterwards would reorder a list a drawn entry may already have shortened
+    /// by returning null.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public int CyclicRotationLength
+    {
+        get => _cyclicRotationLength;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value, nameof(CyclicRotationLength));
+            _cyclicRotationLength = value;
+        }
+    }
+
+    /// <summary>This connection's slot order: the list as written, with its first
+    /// <see cref="CyclicRotationLength"/> entries rotated by a freshly drawn offset.</summary>
+    private ImmutableArray<TlsQuicTransportParameterSlot> RotateForThisConnection()
+    {
+        var length = _cyclicRotationLength;
+        if (length > _parameters.Length)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(CyclicRotationLength)} is {length} but "
+                + $"{nameof(Parameters)} has {_parameters.Length} entries. The rotating block "
+                + "cannot be longer than the list it is the front of.");
+        }
+
+        // A rotation of one is the identity, and so is an offset of zero. Both are answered
+        // without allocating rather than by building a copy of the same order.
+        if (length < 2)
+        {
+            return _parameters;
+        }
+
+        var offset = RandomNumberGenerator.GetInt32(length);
+        if (offset == 0)
+        {
+            return _parameters;
+        }
+
+        var rotated = ImmutableArray.CreateBuilder<TlsQuicTransportParameterSlot>(
+            _parameters.Length);
+        for (var i = 0; i < length; i++)
+        {
+            rotated.Add(_parameters[(i + offset) % length]);
+        }
+        for (var i = length; i < _parameters.Length; i++)
+        {
+            rotated.Add(_parameters[i]);
+        }
+
+        return rotated.MoveToImmutable();
+    }
+
     /// <summary>Gets the entries this client emits, in the order it emits them.</summary>
     /// <remarks>ANY IDENTIFIER, ANY BYTES, ANY ORDER, ANY SUBSET. Nothing here narrows what a
     /// caller may list; see this type's remarks. The default is
@@ -607,10 +686,37 @@ internal sealed class TlsQuicTransportParameterSpec
     // interval. Witnessed for initial_rtt by
     // TlsQuicTransportParameterSpecTests.ARangeWhoseBoundsAreEqualEmitsThatValue
     // RatherThanFailing, whose second half also witnesses the inclusive upper bound.
-    private static ulong DrawInclusive(ulong minimum, ulong maximum) =>
-        minimum >= maximum
-            ? minimum
-            : minimum + (ulong)Random.Shared.NextInt64(0, (long)(maximum - minimum) + 1);
+    private static ulong DrawInclusive(ulong minimum, ulong maximum)
+    {
+        if (minimum >= maximum)
+        {
+            return minimum;
+        }
+
+        var span = maximum - minimum;
+
+        // THE NARROW PATH IS THE ONLY ONE ANY CALLER IN THIS FILE TAKES, and it used to be the
+        // only one there was: `(long)(maximum - minimum) + 1`. NextInt64's exclusive bound is a
+        // long, so a span at or above long.MaxValue casts NEGATIVE and NextInt64 throws - the
+        // failure is an ArgumentOutOfRangeException naming a bound the caller never wrote.
+        // MaximumReservedIdentifierN is about 1.49e17 and every other range here is smaller, so
+        // no shipped preset can reach it. But Parameters accepts ANY identifier by design - see
+        // this type's "ARBITRARY BY CONSTRUCTION" remarks - so a caller can, and a knob that
+        // throws on a legal argument is not a knob.
+        if (span < long.MaxValue)
+        {
+            return minimum + (ulong)Random.Shared.NextInt64(0, (long)span + 1);
+        }
+
+        Span<byte> bytes = stackalloc byte[8];
+        RandomNumberGenerator.Fill(bytes);
+        var draw = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+
+        // span == ulong.MaxValue means every ulong is in range, so the draw IS the answer.
+        // Taking the general path instead would compute span + 1, which wraps to zero, and
+        // divide by it.
+        return span == ulong.MaxValue ? draw : minimum + (draw % (span + 1));
+    }
 
     /// <summary>Encodes RFC 9368 s3's Figure 2 - a Chosen Version, then the Available Versions
     /// - as the value of a <c>version_information</c> parameter.</summary>
@@ -758,6 +864,35 @@ internal sealed class TlsQuicTransportParameterSpec
         });
     }
 
+    /// <summary>Whether this list emits <paramref name="id"/> at all.</summary>
+    /// <remarks>
+    /// <para>THE QUESTION ENFORCEMENT HAS TO ASK BEFORE IT ENFORCES. <see cref="Compose"/> emits
+    /// a flow-control parameter only when a <see cref="TlsQuicTransportParameterSlot.Placed"/>
+    /// slot names it, and a list that names none of them is a legal list - the Spotify capture
+    /// carries seven parameters and <c>initial_max_streams_bidi</c> (0x08) is not one of them.
+    /// RFC 9000 s18.2 then makes the peer's understanding of that limit ZERO, while
+    /// <c>TlsQuicLocalFlowControlSpec</c> still held the spec's default of 100 and
+    /// <c>TlsQuicStreamSet</c> still enforced it. That is a limit policed but never advertised,
+    /// which is exactly the divergence TlsQuicStreams.cs's block comment says must not
+    /// happen.</para>
+    /// <para>DRAWN SLOTS ANSWER FALSE, DELIBERATELY. A drawn entry's identifier is not known
+    /// until its function runs, so it cannot be answered for statically - and
+    /// <see cref="Compose"/> refuses outright to let a drawn entry emit an identifier this
+    /// method places, so the false is not an approximation but the truth.</para>
+    /// </remarks>
+    internal bool Places(ulong id)
+    {
+        foreach (var slot in _parameters)
+        {
+            if (!slot.IsDrawn && slot.Id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Composes <see cref="Parameters"/> into the encodable set, placing the values
     /// this spec deliberately does not carry.</summary>
     /// <remarks>
@@ -822,7 +957,7 @@ internal sealed class TlsQuicTransportParameterSpec
             sourceConnectionId.ToArray();
 
         var composed = new List<TlsQuicTransportParameter>(_parameters.Length);
-        foreach (var slot in _parameters)
+        foreach (var slot in RotateForThisConnection())
         {
             // FIRST, AND ONCE PER CALL. A drawn entry's identifier is not known until its
             // function has run, so it cannot be looked up in `placed` beforehand; and the
@@ -838,6 +973,24 @@ internal sealed class TlsQuicTransportParameterSpec
                 // NothingOmitsTheParameterAndShortensTheList.
                 if (drawn is not null)
                 {
+                    // THE OTHER WAY INTO THE ADVERTISE/ENFORCE SPLIT, closed here because it is
+                    // the only place it is visible. A literal under a placed identifier is
+                    // rejected below on the grounds that two places would own one number; a
+                    // DRAWN entry returning the same identifier would slip past that check,
+                    // because its identifier is not known until its function has run. The
+                    // result would be a flow-control limit on the wire that came from a
+                    // draw while TlsQuicStreamSet enforced the one on LocalFlowControl.
+                    if (placed.ContainsKey(drawn.Id))
+                    {
+                        throw new ArgumentException(
+                            $"A drawn transport-parameter entry returned 0x{drawn.Id:X}, which "
+                            + "takes its value from the connection spec. Drawn entries cannot "
+                            + "emit a placed identifier: the value on the wire and the value "
+                            + $"{nameof(TlsQuicConnectionSpec)} enforces would be two different "
+                            + "numbers.",
+                            nameof(Parameters));
+                    }
+
                     composed.Add(drawn);
                 }
                 continue;

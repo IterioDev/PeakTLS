@@ -625,6 +625,10 @@ T: public sealed class SharpTls.Quic.TlsQuicSocks5Transport : SharpTls.Quic.ITls
   M: public static System.Threading.Tasks.Task<SharpTls.Quic.ITlsQuicDatagramTransport> ConnectAsync(SharpTls.Quic.TlsQuicSocks5Options options, System.Threading.CancellationToken cancellationToken)
   P: public System.Int32 DatagramOverhead { get; }
   P: public System.Int32 MaxDatagramPayloadSize { get; }
+T: public enum SharpTls.Quic.TlsQuicSpinBitPolicy : System.Int32
+  F: public const SharpTls.Quic.TlsQuicSpinBitPolicy RandomPerConnection = SharpTls.Quic.TlsQuicSpinBitPolicy.RandomPerConnection
+  F: public const SharpTls.Quic.TlsQuicSpinBitPolicy RandomPerPacket = SharpTls.Quic.TlsQuicSpinBitPolicy.RandomPerPacket
+  F: public const SharpTls.Quic.TlsQuicSpinBitPolicy Zero = SharpTls.Quic.TlsQuicSpinBitPolicy.Zero
 T: public sealed class SharpTls.Quic.TlsQuicTrafficSecret : System.IDisposable
   M: public SharpTls.Quic.TlsQuicPacketProtectionKeys DerivePacketProtectionKeys(SharpTls.Quic.TlsQuicVersion version)
   M: public System.Byte[] CopySecret()
@@ -638,16 +642,22 @@ T: public sealed class SharpTls.Quic.TlsQuicTrafficSecretEvent : SharpTls.Quic.T
 T: public enum SharpTls.Quic.TlsQuicTransportError : System.UInt64
   F: public const SharpTls.Quic.TlsQuicTransportError AeadLimitReached = SharpTls.Quic.TlsQuicTransportError.AeadLimitReached
   F: public const SharpTls.Quic.TlsQuicTransportError ApplicationError = SharpTls.Quic.TlsQuicTransportError.ApplicationError
+  F: public const SharpTls.Quic.TlsQuicTransportError ConnectionIdLimitError = SharpTls.Quic.TlsQuicTransportError.ConnectionIdLimitError
+  F: public const SharpTls.Quic.TlsQuicTransportError ConnectionRefused = SharpTls.Quic.TlsQuicTransportError.ConnectionRefused
   F: public const SharpTls.Quic.TlsQuicTransportError CryptoBufferExceeded = SharpTls.Quic.TlsQuicTransportError.CryptoBufferExceeded
   F: public const SharpTls.Quic.TlsQuicTransportError FinalSizeError = SharpTls.Quic.TlsQuicTransportError.FinalSizeError
   F: public const SharpTls.Quic.TlsQuicTransportError FlowControlError = SharpTls.Quic.TlsQuicTransportError.FlowControlError
   F: public const SharpTls.Quic.TlsQuicTransportError FrameEncodingError = SharpTls.Quic.TlsQuicTransportError.FrameEncodingError
+  F: public const SharpTls.Quic.TlsQuicTransportError InternalError = SharpTls.Quic.TlsQuicTransportError.InternalError
+  F: public const SharpTls.Quic.TlsQuicTransportError InvalidToken = SharpTls.Quic.TlsQuicTransportError.InvalidToken
   F: public const SharpTls.Quic.TlsQuicTransportError KeyUpdateError = SharpTls.Quic.TlsQuicTransportError.KeyUpdateError
   F: public const SharpTls.Quic.TlsQuicTransportError NoError = SharpTls.Quic.TlsQuicTransportError.NoError
+  F: public const SharpTls.Quic.TlsQuicTransportError NoViablePath = SharpTls.Quic.TlsQuicTransportError.NoViablePath
   F: public const SharpTls.Quic.TlsQuicTransportError ProtocolViolation = SharpTls.Quic.TlsQuicTransportError.ProtocolViolation
   F: public const SharpTls.Quic.TlsQuicTransportError StreamLimitError = SharpTls.Quic.TlsQuicTransportError.StreamLimitError
   F: public const SharpTls.Quic.TlsQuicTransportError StreamStateError = SharpTls.Quic.TlsQuicTransportError.StreamStateError
   F: public const SharpTls.Quic.TlsQuicTransportError TransportParameterError = SharpTls.Quic.TlsQuicTransportError.TransportParameterError
+  F: public const SharpTls.Quic.TlsQuicTransportError VersionNegotiationError = SharpTls.Quic.TlsQuicTransportError.VersionNegotiationError
 T: public sealed class SharpTls.Quic.TlsQuicTransportException : System.IO.IOException, System.Runtime.Serialization.ISerializable
   C: public SharpTls.Quic.TlsQuicTransportException(SharpTls.Quic.TlsQuicTransportError error, System.String message)
   M: public static System.UInt64 GetCryptoErrorCode(SharpTls.Protocol.TlsAlertDescription alert)

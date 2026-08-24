@@ -410,6 +410,17 @@ internal sealed class TlsQuicConnectionSpec
     /// </remarks>
     public bool PathMtuDiscovery { get; init; } = true;
 
+    /// <summary>
+    /// Gets what this endpoint writes into RFC 9000 section 17.4's latency spin bit on 1-RTT
+    /// packets. The default is <see cref="TlsQuicSpinBitPolicy.Zero"/>.
+    /// </summary>
+    /// <remarks>ZERO IS NOT A PLACEHOLDER HERE. s17.4 permits any value once the spin bit is
+    /// disabled, and always-zero is what Chromium sends, so it is the majority behaviour rather
+    /// than an outlier. The knob exists because a client that draws instead cannot otherwise be
+    /// imitated - the value used to be a `false` literal in the send path with no property at
+    /// all.</remarks>
+    public TlsQuicSpinBitPolicy SpinBit { get; init; } = TlsQuicSpinBitPolicy.Zero;
+
     /// <summary>Gets the largest datagram size path MTU discovery will search up to - RFC 8899
     /// s5.1.2's MAX_PLPMTU.</summary>
     /// <remarks>
@@ -1233,6 +1244,53 @@ internal sealed class TlsQuicLocalFlowControlSpec
                 InitialMaxStreamDataUni,
             _ => 0,
         };
+
+    /// <summary>
+    /// This same set of limits with every value zeroed that <paramref name="parameters"/> does
+    /// not put on the wire.
+    /// </summary>
+    /// <remarks>
+    /// <para>ADVERTISEMENT IS THE AUTHORITY, AND SILENCE IS AN ADVERTISEMENT OF ZERO. RFC 9000
+    /// s18.2 gives all six of these a default of 0 when the parameter is absent, so a peer that
+    /// never received <c>initial_max_streams_bidi</c> believes it may open no bidirectional
+    /// streams at all. This object, meanwhile, is where the spec's own defaults live - 100 for
+    /// that one - and <c>TlsQuicStreamSet</c> enforced them whether or not they had ever been
+    /// sent. A peer opening a stream it had not been permitted was therefore accepted, on a
+    /// budget it had never been told about.</para>
+    /// <para>WHY NOT MAKE THE SPEC ADVERTISE THEM INSTEAD. Because omitting them can be
+    /// CORRECT: the Spotify capture carries exactly seven transport parameters and 0x08 is not
+    /// among them, so adding a slot to satisfy the enforcement side would put an eighth
+    /// parameter on the wire and break the replication this library exists for. The
+    /// advertisement is the measurement; enforcement follows it.</para>
+    /// <para>ONE CALL SITE, at <c>TlsQuicConnection.Streams</c>, so every limit any stream ever
+    /// consults has already been through here.</para>
+    /// </remarks>
+    internal TlsQuicLocalFlowControlSpec AsAdvertisedBy(
+        TlsQuicTransportParameterSpec parameters)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+
+        ulong Advertised(TlsQuicTransportParameterId id, ulong value) =>
+            parameters.Places((ulong)id) ? value : 0;
+
+        return new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxData =
+                Advertised(TlsQuicTransportParameterId.InitialMaxData, InitialMaxData),
+            InitialMaxStreamDataBidiLocal = Advertised(
+                TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal,
+                InitialMaxStreamDataBidiLocal),
+            InitialMaxStreamDataBidiRemote = Advertised(
+                TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote,
+                InitialMaxStreamDataBidiRemote),
+            InitialMaxStreamDataUni = Advertised(
+                TlsQuicTransportParameterId.InitialMaxStreamDataUni, InitialMaxStreamDataUni),
+            InitialMaxStreamsBidi = Advertised(
+                TlsQuicTransportParameterId.InitialMaxStreamsBidi, InitialMaxStreamsBidi),
+            InitialMaxStreamsUni = Advertised(
+                TlsQuicTransportParameterId.InitialMaxStreamsUni, InitialMaxStreamsUni),
+        };
+    }
 
     /// <summary>How many streams of one direction this endpoint advertised that the peer may
     /// open.</summary>

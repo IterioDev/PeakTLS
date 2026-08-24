@@ -11,12 +11,20 @@ internal static class TlsQuicPacketNumber
     // argument to Truncate or Decode, which both operate in bits.
     internal static int EncodedLength(ulong fullPn, ulong? largestAcked)
     {
-        if (largestAcked is { } acked && fullPn < acked)
+        // <=, NOT <. RFC 9000 s12.3: "A QUIC endpoint MUST NOT reuse a packet number within
+        // the same packet number space", so a packet number EQUAL to one already acknowledged
+        // is as impossible as one below it - and it is the equal case that fails quietly.
+        // num_unacked becomes 0, BitOperations.Log2(0) returns 0 by documented convention
+        // ("by convention, input value 0 returns 0 since Log(0) is undefined") rather than by
+        // computing anything, and the result is a confident 1-byte encoding of a packet number
+        // the peer has already seen. The guard stopped exactly one short of the case that
+        // needed it.
+        if (largestAcked is { } acked && fullPn <= acked)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(fullPn),
                 fullPn,
-                $"Packet number {fullPn} is below the largest acknowledged {acked}.");
+                $"Packet number {fullPn} is not above the largest acknowledged {acked}.");
         }
 
         var numUnacked = largestAcked is null ? fullPn + 1 : fullPn - largestAcked.Value;

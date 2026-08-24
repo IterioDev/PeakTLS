@@ -34,6 +34,10 @@ internal sealed class Http3Connection : IHttpConnection
     /// set once at start and never moved, and every later receive is bounded by it too, so it
     /// is the connection's whole lifetime and not just its handshake.
     /// </summary>
+    /// <summary>SharpTls's own <c>TlsQuicConnectionOptions.HandshakeDeadline</c> default,
+    /// used when <c>TlsQuicOptions.HandshakeDeadline</c> names nothing.</summary>
+    private static readonly TimeSpan SharpTlsHandshakeDeadline = TimeSpan.FromSeconds(10);
+
     private static readonly TimeSpan DefaultConnectionLifetime = TimeSpan.FromMinutes(5);
 
     /// <summary>The idle timeout advertised when the session declares none. The effective one
@@ -162,11 +166,13 @@ internal sealed class Http3Connection : IHttpConnection
         Uri origin,
         TlsProxy? proxy,
         TlsSessionConfiguration configuration,
+        Tls13SessionCache tls13SessionCache,
         DnsEndpointResolver dnsResolver,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(origin);
         ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(tls13SessionCache);
         ArgumentNullException.ThrowIfNull(dnsResolver);
 
         var connectionId = Guid.NewGuid();
@@ -235,14 +241,21 @@ internal sealed class Http3Connection : IHttpConnection
             connection = new TlsQuicConnection(
                 new TlsQuicConnectionOptions(transport, endPoint, spec)
                 {
-                    HandshakeDeadline = Bounded(
-                        configuration.PooledConnectionLifetime,
-                        DefaultConnectionLifetime),
+                    // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
+                    // how long a healthy connection may be REUSED from the pool - minutes -
+                    // and handing it to a handshake deadline SharpTls defaults to ten seconds
+                    // meant the deadline could never fire: the real bound was the outer
+                    // HandshakeTimeout CTS below, and this line was dead configuration wearing
+                    // a misleading name. TlsQuicOptions.HandshakeDeadline is the knob for it;
+                    // null leaves SharpTls's own default in place.
+                    HandshakeDeadline = configuration.Quic.HandshakeDeadline
+                        ?? SharpTlsHandshakeDeadline,
                     IdleTimeout = Bounded(
                         configuration.PooledConnectionIdleTimeout,
                         DefaultIdleTimeout),
                 },
-                source => tlsClient = CreateTlsClient(origin, configuration, factory, source));
+                source => tlsClient = CreateTlsClient(
+                    origin, configuration, factory, tls13SessionCache, source));
 
             using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
@@ -771,10 +784,21 @@ internal sealed class Http3Connection : IHttpConnection
         },
     };
 
+    /// <remarks>
+    /// FIVE TLS FEATURES USED TO STOP AT THIS METHOD. It set ServerName, ServerPort,
+    /// ClientHello, certificate validation and pins, and nothing else - so a caller who
+    /// configured a client certificate, a TLS callback, or session resumption got silence on
+    /// every HTTP/3 dial, which for an Http3Only session meant on every dial it made. The
+    /// loudest of the five was resumption: SharpTlsTransport hands the shared
+    /// <see cref="Tls13SessionCache"/> to the TCP path, this path had no reference to one at
+    /// all, and every h3 handshake was therefore a full one where the client being imitated
+    /// resumes.
+    /// </remarks>
     private static CustomTlsQuicClient CreateTlsClient(
         Uri origin,
         TlsSessionConfiguration configuration,
         TlsQuicClientHelloProfileFactory factory,
+        Tls13SessionCache tls13SessionCache,
         ReadOnlyMemory<byte> sourceConnectionId)
     {
         var options = new CustomTlsQuicClientOptions
@@ -785,6 +809,29 @@ internal sealed class Http3Connection : IHttpConnection
         };
         options.CertificateValidation.DangerouslySkipServerCertificateValidation =
             configuration.DangerouslySkipServerCertificateValidation;
+
+        // THE CALLER'S HOOK RUNS FIRST, in the same order SharpTlsTransport uses on the TCP
+        // path: ConfigureTls, then ClientCertificates, then the cache. That order is what lets
+        // TlsClientCertificateConfiguration.Apply detect a caller who configured client
+        // authentication twice and say so, instead of one silently overwriting the other.
+        //
+        // A SEPARATE HOOK FROM TlsSessionOptions.ConfigureTls RATHER THAN THE SAME ONE. That
+        // one is Action<CustomTlsClientOptions> and this path has CustomTlsQuicClientOptions:
+        // different type, different legal surface. RFC 9001 s8.4 forbids several TLS features
+        // over QUIC that are perfectly legal over TCP, so one delegate covering both would be
+        // a delegate that is wrong on one of them.
+        configuration.Quic.ConfigureTls?.Invoke(options);
+        configuration.ClientCertificates.Apply(options);
+
+        // RFC 8446 s2.2 resumption, shared with the TCP path so a ticket issued over h2 or
+        // http/1.1 is offered on an h3 dial to the same origin and back. Only when the profile
+        // asked for it: a ClientHello with no psk_key_exchange_modes cannot carry a ticket, and
+        // attaching a cache to one would be a cache that never gets read.
+        if (options.SessionCache is null &&
+            options.ClientHello.Spec.SupportsSessionResumption)
+        {
+            options.SessionCache = tls13SessionCache;
+        }
         // Revocation is off for the reason SharpTls's own live run records: an OCSP fetch
         // happens inside the pump loop, between two datagrams, and a several-second fetch
         // would spend the connection's deadline and be recorded as packet loss. Chain and

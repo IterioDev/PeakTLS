@@ -62,7 +62,13 @@ public sealed class TlsPresetTests
         Assert.Equal(3, options.Http3.Settings.Count);
         Assert.Equal(new TlsHttp3Setting(0x01, 16_383), options.Http3.Settings[0]);
         Assert.Equal(new TlsHttp3Setting(0x07, 100), options.Http3.Settings[1]);
-        Assert.Equal(0x21UL % 0x1FUL, options.Http3.Settings[2].Identifier % 0x1FUL);
+        // DRAWN, SO THE SHAPE IS CHECKED ON WHAT THE DRAW RETURNS. The entry itself carries
+        // the (0, 0) placeholder; `0 % 0x1F` would satisfy no reserved-identifier test and
+        // asserting on it would be asserting on the placeholder.
+        Assert.True(options.Http3.Settings[2].IsDrawn);
+        Assert.Equal(
+            0x21UL % 0x1FUL,
+            options.Http3.Settings[2].Draw!().Identifier % 0x1FUL);
         Assert.DoesNotContain(options.Http3.Settings, s => s.Identifier == 0x06);
 
         // NO header order. Insertion order is what reaches the wire, so a preset declaring one
@@ -98,19 +104,39 @@ public sealed class TlsPresetTests
 
 
     [Fact]
-    public void SpotifyIosHttp3_RedrawsTheTransportParameterRotationPerOptions()
+    public void SpotifyIosHttp3_RedrawsTheTransportParameterRotationPerConnection()
     {
-        // The rotation is per-connection on the wire, so two options objects must be able to
-        // differ. Fifty draws over seven offsets miss all six alternatives with probability
-        // (1/7)^49, which is zero for practical purposes.
+        // PER CONNECTION, NOT PER OPTIONS OBJECT, AND THE DIFFERENCE IS THE WHOLE FIX. This
+        // test used to build fifty OPTIONS objects and assert their orders differed - which
+        // they did, because the preset rotated the array as it was applied. But a session
+        // holds ONE options object and pools many connections under it, so every connection in
+        // a session shipped the same order for the session's life: one of seven rather than
+        // one of one, and still a constant a server sees twice. Fifty COMPOSITIONS of one
+        // spec is the assertion that would have failed then and passes now.
+        var options = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
+        var spec = options.Snapshot().Quic.ConnectionSpec;
+
+        // Declared, not performed: the entries stay in the captured order and the rotation is
+        // a length the composer applies.
+        Assert.Equal(7, options.Quic.TransportParameters.CyclicRotationLength);
+        Assert.Equal(
+            new ulong[] { 0x04, 0x05, 0x06, 0x07, 0x09, 0x0E, 0x0F, 0xFF08_0808 },
+            options.Quic.TransportParameters.Entries.Select(e => e.Id).ToArray());
+
         var seen = new HashSet<string>();
         for (var i = 0; i < 50; i++)
         {
-            var options = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
-            var drawn = options.Quic.TransportParameters.Entries.Select(e => e.Id).ToArray();
-            seen.Add(string.Join(",", drawn[..^1]));
+            var composed = spec.TransportParameters.Compose(spec, []);
+            var ids = composed.Parameters.Select(e => e.Id).ToArray();
+
+            // 0xff080808 never joins the rotation: it sat last in 4 of 4 proxy captures
+            // regardless of where the rotation started, and CyclicRotationLength = 7 over an
+            // eight-entry list is how that is expressed.
+            Assert.Equal(0xFF08_0808UL, ids[^1]);
+            seen.Add(string.Join(",", ids[..^1]));
         }
 
+        // Fifty draws over seven offsets miss all six alternatives with probability (1/7)^49.
         Assert.True(seen.Count > 1, "the transport-parameter rotation never changed");
         Assert.True(seen.Count <= 7, $"expected at most 7 rotations, saw {seen.Count}");
     }
