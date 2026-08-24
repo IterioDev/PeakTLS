@@ -296,9 +296,17 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 37. Confirmed: 33 compliant, 1 defect (already fixed), 2 MISSING (key update,
-AEAD packet counting). The one question previously left UNVERIFIED was closed by pinning
-RFC 9001 §6, which turned it from an open question into a confirmed MUST violation. Dropped as false
+Findings raised: 35 — every row in the verdict tables above, counted directly rather than
+estimated. Confirmed: 32 compliant, 1 defect (already fixed), 2 MISSING (key update, AEAD
+packet counting). The five rows in the smaller-specs table are NOT counted here: they record
+presence, not compliance.
+
+Dropped as false positives before entry: 3, each one a rule that a keyword-shaped grep reported
+as absent while the code implemented it. Three near-misses against 32 confirmations is the
+number a reader should weigh when deciding how much to trust a MISSING verdict here.
+
+The one question previously left UNVERIFIED was closed by pinning RFC 9001 §6, which turned it
+from an open question into a confirmed MUST violation. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
 packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
 code implemented them. Three near-misses in two passes is why the method note above exists.
