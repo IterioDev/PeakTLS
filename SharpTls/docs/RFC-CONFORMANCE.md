@@ -1,7 +1,7 @@
 # Client-side MUST conformance audit
 
-Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and the RFC 9001 key
-schedule are done. Every other
+Status: **IN PROGRESS.** RFC 8446 (ClientHello and extension layer) and RFC 9001 §5
+(packet protection) are done. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
 clean bill for anything it does not name.
 
@@ -84,7 +84,7 @@ for TLS 1.3 compatibility mode — correct over TCP, illegal over QUIC. Now forc
 QUIC factory and pinned by
 `TlsQuicClientHelloProfileFactoryTests.TheSessionIdIsEmptyBecauseQuicHasNoCompatibilityMode`.
 
-### RFC 9001 (QUIC-TLS) — key schedule only
+### RFC 9001 (QUIC-TLS)
 
 Pinned extracts: `rfc9001-section5-packet-protection.txt`, `rfc9001-section4-using-tls.txt`,
 `rfc9001-appendix-a-test-vectors.txt`.
@@ -106,11 +106,51 @@ delegates to `HKDF.Extract`, so the library derivation is correct.
 The QUIC v2 row is coverage found rather than sought: labels are composed as a version-dependent
 prefix plus a suffix, so RFC 9369's `quicv2 ` schedule is handled alongside v1.
 
-Still unverified within RFC 9001, and therefore NOT covered by the rows above: header protection
-sample offset and mask application, AEAD nonce construction, key update and key phase, whether
-Initial secrets stay pinned to the ORIGINAL destination connection ID rather than being
-recomputed per packet, CRYPTO stream ordering, and whether the Appendix A test vectors are
-asserted anywhere in the test suite.
+Packet protection, second pass:
+
+| § | Requirement | Location | Verdict |
+|---|---|---|---|
+| 5.3 | AEAD nonce is the IV XOR the packet number, left-padded to the IV length | `Quic/TlsQuicPacketProtection.cs:194` | COMPLIANT |
+| 5.4 | Header protection masks the low 4 bits (long header) / low 5 bits (short header) of byte 0 | `Quic/TlsQuicHeaderProtection.cs:41` | COMPLIANT |
+| 5.4.2 | "sample of ciphertext is taken starting from an offset of 4 bytes", 16 bytes long | `Quic/TlsQuicHeaderProtection.cs:156` | COMPLIANT |
+| 5.2 | Initial secrets derive from the ORIGINAL destination connection ID | `Quic/TlsQuicConnection.cs:2092` | COMPLIANT |
+| 8.x | QUIC forbids the TLS `KeyUpdate` message | `Quic/CustomTlsQuicClient.cs:933` | COMPLIANT |
+| **5.3** | **"An endpoint MUST initiate a key update (Section 6) prior to exceeding any limit set for the AEAD that is in use."** | **NOT-FOUND** | **MISSING** |
+
+**The Appendix A test vectors are asserted.** The RFC's A.1 client destination connection ID
+`8394c8f03e515708` appears in `TlsQuicHeaderProtectionTests`, `TlsQuicPacketBuilderTests`,
+`TlsQuicPacketHeaderTests` and `TlsQuicPacketProtectionTests`. That is the strongest evidence
+available for this subsystem: the whole crypto path is checked against the RFC's own numbers
+rather than against the implementation's opinion of itself.
+
+The DCID row is another avoided trap. Initial keys are pinned to
+`OriginalDestinationConnectionId`, held separately from the working
+`_destinationConnectionId`, so they do not drift when the server supplies a new connection ID.
+Recomputing them per packet is a bug the pcap analyser in `scripts/` originally had.
+
+#### FINDING 1 — key update is not implemented (MISSING)
+
+Searched: `"ku"` and `+ "ku"` under `src/SharpTls/Quic` (no hits), `KeyPhase` across `src`
+(17 hits, all header bit plumbing), and `Next|Update|Phase|Rotate` in `Quic/TlsQuicKeySet.cs`.
+
+`Quic/TlsQuicKeySet.cs:436` states the position outright: *"Key update is out of scope for this
+phase"*, and constructs every key set with `keyPhase: false`. No `quic ku` secret can be
+derived. The Key Phase bit is fully plumbed on both read and write
+(`Quic/TlsQuicPacketHeader.cs:89`, `:133`, `:409`, `:463`) — the bit is understood, the key
+derivation behind it is not.
+
+Severity **LATENT** for the send side. The AEAD limits this MUST protects are on the order of
+2^23 packets for AES-GCM; a fingerprinting client making a handful of requests per connection
+will not approach them, so no live failure is expected.
+
+**The receive side is the part worth attention, and this audit cannot rule on it.** RFC 9001
+§6 is NOT among the pinned extracts, so the rule governing a client's response to a
+*peer-initiated* key update is outside what this document may quote. What can be stated from
+the code alone: the client parses the Key Phase bit but cannot derive the next generation of
+secrets, so a server that initiates a key update would leave it unable to decrypt. Whether that
+is a MUST violation is UNVERIFIED pending a pinned §6.
+
+Still unaudited within RFC 9001: CRYPTO stream ordering and the §5.6 0-RTT key rules.
 
 ### Deliberate divergences (impersonation, not defects)
 
@@ -126,9 +166,8 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 - RFC 9000 — transport. Wire encoding (§12, §14, §16, §18, §19, packet formats) and lifecycle
   (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20).
-- RFC 9001 — the key schedule is audited above. Still open: header protection, AEAD nonce
-  construction, key update, DCID pinning for Initial secrets, CRYPTO stream ordering, and
-  whether the Appendix A vectors are asserted in tests.
+- RFC 9001 — §5 is audited above. Still open: CRYPTO stream ordering, §5.6 0-RTT keys, and
+  §6 key update, which needs its extract pinned before it can be ruled on.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
   match exactly (a wrong constant is both a correctness and a fingerprint issue).
 - RFC 9114 — HTTP/3 framing, stream mapping, SETTINGS, pseudo-headers, error handling.
@@ -142,7 +181,8 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 13. Confirmed: 12 compliant, 1 defect (already fixed). Dropped as false
+Findings raised: 19. Confirmed: 17 compliant, 1 defect (already fixed), 1 MISSING (key
+update, LATENT). One question left UNVERIFIED for want of a pinned extract. Dropped as false
 positives before entry: 3 — `signature_algorithms_cert`, the §4.2.8 ordering rule, and the QUIC
 packet-protection labels, all three of which a keyword-shaped grep reported as absent while the
 code implemented them. Three near-misses in two passes is why the method note above exists.
