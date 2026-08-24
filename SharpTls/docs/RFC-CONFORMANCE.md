@@ -3,7 +3,7 @@
 Status: **IN PROGRESS.**
 
 - Complete: RFC 8446 (ClientHello and extension layer), RFC 9001 §5-§6.
-- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (2 requirements).
+- Sampled, not exhaustive: RFC 9114 (14 of 116 client MUSTs), RFC 9000 (12 of 153).
 - Presence established, MUSTs not enumerated: RFC 9204, 9221, 9368, 9369, 9218, 8701.
 - Untouched: RFC 9002, RFC 9297, and the bulk of RFC 9000. Every other
 RFC in scope is not yet audited and is listed as such below. Do not read this document as a
@@ -248,19 +248,50 @@ The RFC 9218 row is deliberately "partially". A `PriorityUpdate` field exists on
 path, but whether the HTTP/3 PRIORITY_UPDATE frame (0xF0700 / 0xF0701) is emitted, and whether
 the urgency and incremental defaults match §4, was NOT determined.
 
-### RFC 9000 (QUIC transport) — two spot checks only
+### RFC 9000 (QUIC transport) — sampled, NOT exhaustive
 
-Effectively unaudited. Two requirements were checked incidentally and both hold:
+The 14 pinned extracts contain **171 MUST occurrences, 153 client-relevant**. **12 were checked
+directly.** 141 remain unchecked. This is a sample chosen for interop risk, not coverage.
 
 | § | Requirement | Location | Verdict |
 |---|---|---|---|
-| 14.1 | Initial datagrams are padded to at least 1200 bytes | `Quic/TlsQuicConnectionSpec.cs:146` | COMPLIANT |
+| 14.1 | Initial datagrams padded to at least 1200 bytes | `Quic/TlsQuicConnectionSpec.cs:146` | COMPLIANT |
 | 18.2 | `max_udp_payload_size` below 1200 is a parameter error | `Quic/TlsQuicTransportParameters.cs:258` | COMPLIANT |
+| 7.2 | "This Destination Connection ID MUST be at least 8 bytes in length" | `Quic/TlsQuicConnection.cs:1175` | COMPLIANT |
+| 18.2 | "An endpoint that receives a value less than 2 MUST close the connection" (`active_connection_id_limit`) | `Quic/TlsQuicTransportParameters.cs:283` | COMPLIANT |
+| 18.2 | "A client MUST NOT include any server-only transport parameter" | `Quic/TlsQuicTransportParameters.cs:233` via `RequireServer` | COMPLIANT |
+| 17.2.5.2 | "A client MUST accept and process at most one Retry packet for each connection attempt" | `Quic/TlsQuicConnection.cs:194` | COMPLIANT, mutation-tested |
+| 17.2.5.2 | "A client MUST discard a Retry packet with a zero-length Retry Token field" | `Quic/TlsQuicConnection.cs:196` | COMPLIANT, mutation-tested |
+| 5.8 | "Clients MUST discard Retry packets that have a Retry Integrity Tag that cannot be validated" | `Quic/TlsQuicConnection.cs:198` | COMPLIANT, mutation-tested |
+| 6 | "A client MUST discard any Version Negotiation packet if it has received and successfully processed any other packet" | `Quic/TlsQuicConnection.cs:205` | COMPLIANT, mutation-tested |
+| 17.2.1 | Version Negotiation connection ID echo checks | `Quic/TlsQuicConnection.cs:206-207` | COMPLIANT, mutation-tested |
+| 19.7 | "A client MUST treat receipt of a NEW_TOKEN frame with an empty Token field as a connection error" | `Quic/TlsQuicConnectionFrames.cs:379` | COMPLIANT, tested |
+| 19.19 | CONNECTION_CLOSE types 0x1c and 0x1d are distinct forms | `Quic/TlsQuicConnection.cs:250` | COMPLIANT, mutation-tested |
 
-Everything else in RFC 9000 — frame formats, variable-length integers, packet number encoding,
-stream state machines, flow control, connection IDs, address validation, error codes, ACK
-generation — is unchecked. It is the largest surface in scope and the least covered by this
-document.
+**Seven of the twelve carry named killing mutants**, recorded in the mutation ledgers inside the
+source files themselves. That is stronger evidence than an audit read can produce: a ledger row
+naming the test that kills a specific deletion shows the rule is not merely present but load
+bearing. Retry handling and Version Negotiation are the best-evidenced areas in the codebase.
+
+#### UNRESOLVED — empty-payload packet rejection
+
+RFC 9000 §12.4: *"An endpoint MUST treat receipt of a packet containing no frames as a
+connection error of type PROTOCOL_VIOLATION."*
+
+Searched: `ProtocolViolation` across `Quic/` (hits, none on this rule), `at least one frame`,
+`contains no frames`, `empty payload`, `frameCount`, `frames.Count == 0`, `!frames.Any`,
+`IsEmpty` in the receiver and frame reader, and `s12.4` / `section 12.4` in comments. No check
+located.
+
+Recorded as **UNRESOLVED rather than MISSING on purpose.** Four rules in this audit have already
+looked absent to exactly this style of search and turned out to be implemented under a different
+spelling. The receive path is large and this reader has a demonstrated false-positive rate on it,
+so the honest verdict is that the check was not found, not that it does not exist. Confirming
+either way needs a reading of the packet receive path rather than another grep.
+
+Everything else in RFC 9000 — frame formats in detail, variable-length integer widths, packet
+number encoding and duplicate suppression, stream state machines, flow control accounting,
+address validation, ACK generation policy, error-code selection — is unchecked.
 
 ### Deliberate divergences (impersonation, not defects)
 
@@ -274,8 +305,9 @@ document.
 
 Nothing below has been examined. Each is a gap in this document, not a clean result.
 
-- RFC 9000 — all but the two spot checks above. Wire encoding (§12, §16, §19, packet formats)
-  and lifecycle (§2.1, §4.5, §6, §7, §8, §10, §13, §13.3, §20). Largest remaining gap.
+- RFC 9000 — 141 of 153 client-relevant MUSTs unchecked. The 12 sampled were all compliant and
+  seven were mutation-tested, which raises confidence in the areas touched and says nothing
+  about the rest. Largest remaining gap.
 - RFC 9001 — §5 and §6 are audited above. Still open: CRYPTO stream ordering and §5.6 0-RTT
   keys.
 - RFC 9002 — loss detection and congestion control, and whether the Appendix A/B constants
@@ -296,9 +328,9 @@ Nothing below has been examined. Each is a gap in this document, not a clean res
 
 ## Attrition
 
-Findings raised: 35 — every row in the verdict tables above, counted directly rather than
-estimated. Confirmed: 32 compliant, 1 defect (already fixed), 2 MISSING (key update, AEAD
-packet counting). The five rows in the smaller-specs table are NOT counted here: they record
+Findings raised: 46 — every row in the verdict tables above, counted directly rather than
+estimated (42 + 1 + 2 + 1). Confirmed: 42 compliant, 1 defect (already fixed), 2 MISSING (key
+update, AEAD packet counting), 1 UNRESOLVED (empty-payload packet rejection). The five rows in the smaller-specs table are NOT counted here: they record
 presence, not compliance.
 
 Dropped as false positives before entry: 3, each one a rule that a keyword-shaped grep reported
