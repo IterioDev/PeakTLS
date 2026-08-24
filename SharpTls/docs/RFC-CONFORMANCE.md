@@ -22,15 +22,16 @@ leaves behind is converting the second number into the first, one rule at a time
 
 ## What the audit changed
 
-Eight defects, in the order they were fixed. The **Finding** column is the number used in the
+Nine defects, in the order they were fixed. The **Finding** column is the number used in the
 body below, so the two can be read against each other; the `legacy_session_id` defect predates
 the numbering because it was found and fixed before the audit began.
 
-**Three of these were not latent.** The `legacy_session_id` violation broke every handshake
+**Four of these were not latent.** The `legacy_session_id` violation broke every handshake
 against a BoringSSL peer before a request could be sent. The datagram rules were live because
 the shipped presets invite datagrams. And a server exercising RFC 9001 §6 — which it may do at
 any point after the handshake is confirmed — was answered with a connection error. The rest
-require a peer to misbehave first.
+require a peer to misbehave first. And the ninth was breaking any request whose body exceeded
+about 1400 bytes, on every path - it reached this document as a proxy bug and was not one.
 
 | Finding | Rule | Was | Commit |
 |---|---|---|---|
@@ -41,6 +42,7 @@ require a peer to misbehave first.
 | 6 | RFC 9221 §3 and RFC 9297 §2.1 — DATAGRAM receive validation at both layers | Parsed, payload dropped, never validated, while the shipped presets advertise `max_datagram_frame_size` = 65536 and SETTINGS_H3_DATAGRAM = 1 | `d6ffad4` |
 | 4 | RFC 9000 §12.3 — duplicate suppression after removing packet protection | Only the largest packet number per space was kept; a duplicated datagram was walked twice, re-delivering its ACK | `2033d59` |
 | 1, 2 | RFC 9001 §6 — key update, and §6.6's AEAD usage counts | Out of scope by declaration: a flipped Key Phase bit was answered with KEY_UPDATE_ERROR, so a conforming server rotating keys had the connection closed on it | `e6cb025` |
+| 9 | RFC 9000 §14.2 — no datagram size ceiling on the send path | A 32 KB request body went out as one 32837-byte datagram, which a DF-set socket refuses. Found from a field report whose own diagnosis was wrong | `684b958`, `ed3412f` |
 
 **Finding 8 was not fixed and should not be.** RFC 9218 §7.2's PRIORITY_UPDATE is absent. No MUST
 compels a client to send one, and emitting priority signals that no real target sends would make
@@ -492,34 +494,50 @@ All nine match the extract exactly.
 No RFC 9002 MUST was audited — only the constants. The loss-detection and congestion-control
 ALGORITHMS around them are unchecked.
 
-### OPEN — RFC 9000 §14 and the SOCKS5 header, an unresolved field report
+### FINDING 9 — no datagram size ceiling at all (FIXED, `684b958` and `ed3412f`)
 
-Not a verdict. A live bug report is parked here because it is a §14 question and would
-otherwise be lost.
+This entry was headed "OPEN — RFC 9000 §14 and the SOCKS5 header, an unresolved field report"
+and parked a WSAEMSGSIZE report from a collaborator: reproducible over a SOCKS5 relay at
+`clienttoken` and `login5`, direct working. The reported diagnosis was that the relay's receive
+buffer was smaller than the QUIC datagram. **That was wrong, and so was the reading of §14 kept
+here.** Both are recorded rather than replaced, because each was a plausible answer that a
+measurement killed.
 
-RFC 9000 §14.1 requires a client to expand Initial datagrams to at least 1200 bytes, and §14
-requires the IPv4 Don't Fragment bit be set where the platform supports it —
-`TlsQuicUdpDatagramTransport.SetDontFragment` does set it, including on the SOCKS5 relay socket
-(`Quic/TlsQuicSocks5Transport.cs:85`).
+**What was actually wrong.** There was no path MTU ceiling on the send path anywhere.
+`TlsQuicStreamSet.Drain` moved an entire request body into ONE STREAM frame bounded only by the
+peer's flow-control credit, and the 1-RTT packet took every queued frame at once, bounded only
+by the 65527-byte send buffer. Measured, one datagram per body: 512 bytes produced 577, 2 KB
+produced 2113, 8 KB produced 8257, 32 KB produced 32837. RFC 9000 §14.2: "In the absence of
+these mechanisms, QUIC endpoints SHOULD NOT send datagrams larger than the smallest allowed
+maximum datagram size."
 
-Over a SOCKS5 relay the QUIC datagram is wrapped: the wire datagram is the RFC 1928 §7 header
-PLUS the 1200-byte QUIC payload, so 1210 bytes leave the interface where 1200 would directly.
-On Windows, a send with DF set fails with `SocketError.MessageSize` (WSAEMSGSIZE) when the
-datagram exceeds the local interface MTU. A field report describes exactly that:
-`SocketException` (WSAEMSGSIZE) at `clienttoken` and `login5` over a relay, direct working.
+**Why it surfaced on the relay and not directly.** §14 requires the DF bit and both transports
+set it, so on a 1500-byte MTU any datagram over 1472 bytes is refused at the socket. Verified
+against a live interface at the boundary: 1472 sent, 1473 threw `SocketError.MessageSize` with
+the exact message the report quotes. The SOCKS5 header adds 32 bytes for a domain-form Spotify
+host, so the relay crosses 1472 with a body 32 bytes smaller than direct does. **Direct fails
+too** — the report's "direct works" was a threshold, not an exemption.
 
-**Reproduced? No.** An in-process round trip through a real SOCKS5 relay implementation
-succeeded at 1200, 1252, 1472, 1500, 8192, 65000 and 65497 bytes in both directions. Loopback
-has a 65535-byte MTU, so the DF interaction cannot appear there, which is why the local result
-does not settle it.
+**Three wrong answers, each killed by a measurement rather than by argument.** The receive
+buffer is `_headerSize + 65527` and cannot truncate an IPv4 datagram, so a receive-side
+WSAEMSGSIZE is impossible. DF against the handshake datagrams does not explain it either: those
+are 1200 bytes and fit. And the section that used to stand here proposed measuring
+`PaddingTarget` against the wire datagram — but `PaddingTarget` is a FLOOR for Initial packets
+and ceilings nothing, so changing it would not have bounded the body that was actually
+overflowing.
 
-The reporter's diagnosis — that the receive buffer is smaller than the datagram — does not match
-the code: the receive scratch is `_headerSize + 65527`, already above 65535 and already
-including the header.
+**The fix, in two parts.** `684b958` bounds every datagram: `ITlsQuicDatagramTransport` gained
+`DatagramOverhead` so an encapsulating transport's header is charged against the path budget,
+`Drain` segments a body into datagram-sized STREAM frames (RFC 8899 §4.4), and
+`TakePendingFrames` takes only as many frames as fit, measured with the encoder that will write
+them. `ed3412f` adds RFC 8899 DPLPMTUD to raise that ceiling above 1200 — **off by default**,
+because a probe is a wire-visible behaviour on a schedule no capture in this repository
+records; see `TlsQuicConnectionSpec.PathMtuDiscovery`.
 
-Open question for the code: whether the padding target should be measured against the wire
-datagram rather than the QUIC payload when a header-adding transport is in use, so that a
-1200-byte target produces 1200 bytes on the wire instead of 1200 + header.
+**What is still not settled.** Whether the collaborator's specific failures were the 32-byte
+header crossing 1472 on a 1500-byte path, or a smaller MTU on their proxy route. Both produce
+the same exception and the fix covers both, so the distinction now costs nothing — but it was
+never established and is not claimed.
 
 ### FINDING 5 — unhandled frame types skipped their receive-side MUSTs (FIXED, `2a4faef`)
 
@@ -763,12 +781,7 @@ the frame's whole encoded length out. The length cannot be recomputed downstream
 field is a varint and RFC 9000 §16 requires the minimal encoding only of frame TYPES, so a peer
 may spend four bytes on a length that fits in one and the frame is still legal.
 
-### Still open, and neither is a conformance verdict
-
-**The SOCKS5 WSAEMSGSIZE field report**, recorded under the RFC 9000 §14 heading above. Not
-reproduced locally; loopback's 65535-byte MTU means a local test cannot settle it. The open code
-question is whether the padding target should be measured against the WIRE datagram rather than
-the QUIC payload when a header-adding transport is in use.
+### Still open, and it is not a conformance verdict
 
 **The live interop tests do not run.** `TlsClient-main/tests/TlsClient.Tests/Http3BoringSslInteropTests.cs`
 gates on `TLSCLIENT_LIVE_TESTS=1` and returns early otherwise — so it PASSES rather than skips,
