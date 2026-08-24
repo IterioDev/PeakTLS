@@ -1638,12 +1638,42 @@ internal sealed class TlsQuicHttp3Response
                 errorCode = FrameUnexpected;
                 return false;
 
+            // s7.2.5: "A client MUST treat receipt of a PUSH_PROMISE frame that contains a
+            // larger push ID than the client has advertised as a connection error of
+            // H3_ID_ERROR."
+            //
+            // THIS RULE BINDS *BECAUSE* SERVER PUSH IS UNIMPLEMENTED, which is the opposite of
+            // how it reads. This client never sends MAX_PUSH_ID, so the advertised maximum does
+            // not exist; s7.2.5's own preceding sentence - "A server MUST NOT use a push ID
+            // that is larger than the client has provided in a MAX_PUSH_ID frame" - leaves a
+            // server with no usable push ID at all. Every push ID is therefore larger than what
+            // was advertised, and every PUSH_PROMISE is H3_ID_ERROR.
+            //
+            // s4.1's "These PUSH_PROMISE frames are not part of the response" is why this used
+            // to fall to the default arm and be ignored. Not part of the response is not the
+            // same as permitted: s7.2.5 still has a push ID to check, and here it always fails.
+            //
+            // The push ID is READ FIRST so a truncated payload is reported as the framing
+            // failure it is. s7.2.5 gives PUSH_PROMISE a "Push ID (i)" field, so a payload
+            // without a readable varint is not a push ID this client can find too large - it is
+            // H3_FRAME_ERROR, and s7.1 makes that a check on receipt rather than on use.
+            case (ulong)TlsQuicHttp3FrameType.PushPromise:
+            {
+                var pushIdCursor = 0;
+                if (!QuicVariableLengthInteger.TryRead(payload, ref pushIdCursor, out _))
+                {
+                    errorCode = (ulong)TlsQuicHttp3ErrorCode.H3FrameError;
+                    return false;
+                }
+
+                errorCode = (ulong)TlsQuicHttp3ErrorCode.H3IdError;
+                return false;
+            }
+
             default:
                 // s4.1: "Frames of unknown types (Section 9), including reserved frames
                 // (Section 7.2.8) MAY be sent on a request or push stream before, after, or
-                // interleaved with other frames described in this section." PUSH_PROMISE lands
-                // here as well, and deliberately: s7.2.5 permits it on a request stream and
-                // s4.1 says "These PUSH_PROMISE frames are not part of the response".
+                // interleaved with other frames described in this section."
                 //
                 // The HTTP/2-inherited reserved types - 0x02, 0x06, 0x08, 0x09 - never reach
                 // this arm. TlsQuicHttp3Frames.TryRead refuses them with H3_FRAME_UNEXPECTED

@@ -1538,6 +1538,71 @@ internal sealed class TlsQuicStreamSet
         return true;
     }
 
+    /// <summary>Takes one received RFC 9000 s19.4 RESET_STREAM, s19.5 STOP_SENDING or s19.13
+    /// STREAM_DATA_BLOCKED frame and reports the s20.1 code to close with when the stream's
+    /// DIRECTION forbids that frame.</summary>
+    /// <remarks>
+    /// <para>FOUR MUSTs, ONE METHOD, because all four are the same test on different frames.
+    /// s19.4: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST
+    /// terminate the connection with error STREAM_STATE_ERROR." s19.13 says exactly that of
+    /// STREAM_DATA_BLOCKED. s19.5 says the mirror of STOP_SENDING - "An endpoint that receives
+    /// a STOP_SENDING frame for a receive-only stream MUST terminate the connection with error
+    /// STREAM_STATE_ERROR" - plus "Receiving a STOP_SENDING frame for a locally initiated
+    /// stream that has not yet been created MUST be treated as a connection error of type
+    /// STREAM_STATE_ERROR".</para>
+    /// <para>THE DIRECTION IS READ OFF THE IDENTIFIER, NOT OFF A STREAM OBJECT, which is the
+    /// difference from <see cref="TryReceive"/>. s2.1 makes direction a property of the id, and
+    /// every rule here binds on streams this endpoint may never have created - a RESET_STREAM
+    /// for a send-only stream we never opened is still a RESET_STREAM for a send-only stream.
+    /// Consulting <see cref="Find"/> first would make the verdict depend on whether the peer
+    /// had previously made us allocate one.</para>
+    /// <para>THE OPPOSITE PAIRING IS THE POINT AND IS EASY TO INVERT. RESET_STREAM and
+    /// STREAM_DATA_BLOCKED are refused on SEND-ONLY streams; STOP_SENDING is refused on
+    /// RECEIVE-ONLY ones. A STOP_SENDING on a stream we can only send on is the peer's whole
+    /// purpose for the frame, and a RESET_STREAM on a stream we can only receive on is the peer
+    /// resetting its own sending. Swapping the two tests would reject exactly the legal
+    /// traffic.</para>
+    /// <para>ACCEPTING THE FRAME IS NOT ACTING ON IT. Nothing here tears the stream down or
+    /// abandons a send; s3.2's state transitions for RESET_STREAM and STOP_SENDING are a
+    /// separate piece of work and the pre-existing behaviour - drop the frame - is what a true
+    /// return still means. This method closes the four MUSTs and claims nothing else.</para>
+    /// <para>NEVER THROWS, for any input, like every other peer-input path in this file.</para>
+    /// </remarks>
+    internal bool TryReceiveStreamStateSignal(
+        in TlsQuicFrame frame, out TlsQuicTransportError error)
+    {
+        error = TlsQuicTransportError.NoError;
+
+        var id = frame.StreamId;
+        var unidirectional =
+            TlsQuicStreamId.DirectionOf(id) == TlsQuicStreamDirection.Unidirectional;
+        var locallyInitiated =
+            TlsQuicStreamId.InitiatorOf(id) == TlsQuicStreamInitiator.Client;
+
+        // s2.1's two one-way cases, from THIS endpoint's side. We are the client, so a
+        // client-initiated unidirectional stream is s19.8's "send-only stream" and a
+        // server-initiated one is s19.10's "receive-only stream". A bidirectional stream is
+        // neither and no rule here touches it.
+        var sendOnly = unidirectional && locallyInitiated;
+        var receiveOnly = unidirectional && !locallyInitiated;
+
+        var forbidden = frame.Type switch
+        {
+            TlsQuicFrameType.ResetStream or TlsQuicFrameType.StreamDataBlocked => sendOnly,
+            TlsQuicFrameType.StopSending =>
+                receiveOnly || (locallyInitiated && Find(id) is null),
+            _ => false,
+        };
+
+        if (!forbidden)
+        {
+            return true;
+        }
+
+        error = TlsQuicTransportError.StreamStateError;
+        return false;
+    }
+
     /// <summary>Takes one received RFC 9000 s19.9 MAX_DATA frame, raising the connection-level
     /// send limit and releasing every stream that was waiting on it.</summary>
     /// <remarks>
@@ -1690,6 +1755,28 @@ internal sealed partial class TlsQuicConnection
                 + $"(RFC 9000 s19.8), so it is closing with {error}: stream {frame.StreamId}, "
                 + $"offset {frame.Offset}, {frame.Data.Length} byte(s), FIN "
                 + $"{TlsQuicStreamFrames.IsFin(frame.RawType)}.";
+        }
+    }
+
+    // The s19.4 RESET_STREAM, s19.5 STOP_SENDING and s19.13 STREAM_DATA_BLOCKED dispatch arm's
+    // body, here for the reason the two below are: the prose belongs beside the code.
+    //
+    // NO NULL-BUDGET GUARD, unlike its two neighbours, and that is not an omission. Those two
+    // need _peerFlowControl because they spend or raise a budget; this one reads a direction
+    // off a stream identifier, which is defined before any transport parameter arrives.
+    //
+    // BEFORE THIS ARM ALL FOUR MUSTs WENT UNENFORCED, all three frame types falling into the
+    // frame switch's default. The audit recorded one of them - s19.13's - in that arm's own
+    // comment and left the other three unnamed, which is how a subsystem-level "streams are
+    // compliant" verdict can be true of this file and false of the dispatch that reaches it.
+    private void ReceiveStreamStateSignal(in TlsQuicFrame frame, ref string? failure)
+    {
+        if (!Streams.TryReceiveStreamStateSignal(frame, out var error))
+        {
+            // FIRST FAILURE WINS, sharing the slot its neighbours use for the reason they give.
+            failure ??= $"The peer sent a {frame.Type} frame for a stream whose direction "
+                + "forbids it (RFC 9000 s19.4, s19.5 and s19.13), so it is closing with "
+                + $"{error}: stream {frame.StreamId}.";
         }
     }
 

@@ -735,6 +735,28 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
     }
 
+    /// <summary>Sends one 1-RTT packet carrying exactly the frames given, for the dispatch
+    /// rules whose input is a frame type this peer has no other reason to send.</summary>
+    /// <remarks>
+    /// <para>DELIBERATELY UNVALIDATED. A conforming server would not send a
+    /// RETIRE_CONNECTION_ID to an endpoint with a zero-length connection ID, which is exactly
+    /// why the client's refusal of one needs a peer willing to. Every other send method here
+    /// builds a frame a conforming server WOULD send; this one builds whatever it is handed.
+    /// </para>
+    /// <para>1-RTT ONLY, because s12.4 Table 3 gives every frame this is used for the row
+    /// "__01" or "___1", and because the short header is the only packet
+    /// <see cref="BuildShortHeaderDatagram"/> builds. A frame this method sends still passes
+    /// through TlsQuicFrameLegality on the way in, so a type Table 3 forbids at 1-RTT would be
+    /// refused for that reason instead and the test would be measuring the wrong check.</para>
+    /// </remarks>
+    internal ValueTask SendOneRttFramesAsync(
+        IReadOnlyList<TlsQuicFrame> frames, CancellationToken cancellationToken = default)
+    {
+        var written = BuildShortHeaderDatagram(frames);
+        return _transport.SendAsync(
+            _peerEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken);
+    }
+
     /// <summary>Sends one datagram carrying an ack-eliciting Handshake packet coalesced with
     /// the 1-RTT packet that carries HANDSHAKE_DONE.</summary>
     /// <remarks>

@@ -1421,6 +1421,8 @@ public sealed class TlsQuicHttp3RequestTests
     private static readonly byte[] SecondBodyPart = Encoding.UTF8.GetBytes("p3\", \"ok\": true}");
 
     private const ulong FrameUnexpected = (ulong)TlsQuicHttp3ErrorCode.H3FrameUnexpected;
+    private const ulong IdError = (ulong)TlsQuicHttp3ErrorCode.H3IdError;
+    private const ulong FrameError = (ulong)TlsQuicHttp3ErrorCode.H3FrameError;
 
     // C10b's code, spelled through the enum member for the same reason: 0x010e appears nowhere
     // in this file, so no expectation here is a second transcription of the s8 extract.
@@ -1523,20 +1525,40 @@ public sealed class TlsQuicHttp3RequestTests
         Assert.True(response.IsComplete);
     }
 
-    // s7.2.5 permits PUSH_PROMISE on a request stream and s4.1 says "These PUSH_PROMISE frames
-    // are not part of the response", so it is skipped rather than refused - the one known
-    // frame type in the default arm.
+    // s7.2.5: "A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push
+    // ID than the client has advertised as a connection error of H3_ID_ERROR."
+    //
+    // THIS TEST EXISTS BECAUSE THE INVERSION IS EASY TO GET BACKWARDS. s7.2.5 does permit
+    // PUSH_PROMISE on a request stream, and s4.1 does say "These PUSH_PROMISE frames are not
+    // part of the response" - which is why this frame was once skipped. But this client never
+    // sends MAX_PUSH_ID, so the advertised maximum does not exist and push ID 0 is already
+    // larger than it. Server push being unimplemented is what MAKES the rule bind, not what
+    // excuses it.
+    //
+    // Push ID 0 is deliberate: the smallest legal value still fails, so no reader can conclude
+    // the check is a bound on how large the identifier may grow.
     [Fact]
-    public void APushPromiseFrameIsSkippedRatherThanRefused()
-    {
-        var response = ReadWhole(Script(
-            (Headers, EncodeSection((":status", "200"))),
-            ((ulong)TlsQuicHttp3FrameType.PushPromise, [0x00, .. EncodeSection((":method", "GET"))]),
-            (Data, FirstBodyPart)));
+    public void APushPromiseFrameIsIdErrorBecauseNoPushIdWasEverAdvertised() =>
+        Assert.Equal(
+            IdError,
+            Refuse(Script(
+                (Headers, EncodeSection((":status", "200"))),
+                ((ulong)TlsQuicHttp3FrameType.PushPromise,
+                    [0x00, .. EncodeSection((":method", "GET"))]),
+                (Data, FirstBodyPart))));
 
-        Assert.Equal(FirstBodyPart, response.Body.ToArray());
-        Assert.True(response.IsComplete);
-    }
+    // s7.2.5 gives PUSH_PROMISE a "Push ID (i)" field, so an empty payload has no push ID to
+    // find too large. That is malformed framing - H3_FRAME_ERROR - and the ORDER matters: the
+    // varint is read before the comparison, or every truncated PUSH_PROMISE would be reported
+    // as an identifier problem it does not have.
+    [Fact]
+    public void APushPromiseFrameWithNoReadablePushIdIsFrameError() =>
+        Assert.Equal(
+            FrameError,
+            Refuse(Script(
+                (Headers, EncodeSection((":status", "200"))),
+                ((ulong)TlsQuicHttp3FrameType.PushPromise, []),
+                (Data, FirstBodyPart))));
 
     // The s7 Table 1 "No" column for request streams. Each subsection states it separately -
     // s7.2.3, s7.2.4, s7.2.6, s7.2.7 - and all four say H3_FRAME_UNEXPECTED. Without this the

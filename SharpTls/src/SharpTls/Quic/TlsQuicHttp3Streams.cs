@@ -706,15 +706,31 @@ internal sealed class TlsQuicHttp3Streams
             case (ulong)TlsQuicHttp3FrameType.Goaway:
                 return TryAcceptGoaway(payload, out error);
 
-            // The two remaining control frames whose payload s7.2.3 and s7.2.7 define as
-            // exactly one varint. Nothing here acts on the value - server push is refused by
-            // never sending MAX_PUSH_ID - but the payload is still parsed, because s7.1's "A
-            // frame payload that contains additional bytes after the identified fields ... MUST
-            // be treated as a connection error of type H3_FRAME_ERROR" is a check on receipt,
-            // not on use.
+            // s7.2.3's CANCEL_PUSH, whose payload s7.2.3 defines as exactly one varint.
+            // Nothing here acts on the value - server push is refused by never sending
+            // MAX_PUSH_ID - but the payload is still parsed, because s7.1's "A frame payload
+            // that contains additional bytes after the identified fields ... MUST be treated as
+            // a connection error of type H3_FRAME_ERROR" is a check on receipt, not on use.
             case (ulong)TlsQuicHttp3FrameType.CancelPush:
-            case (ulong)TlsQuicHttp3FrameType.MaxPushId:
                 return TlsQuicHttp3Frames.TryReadSingleVarintPayload(payload, out _, out error);
+
+            // s7.2.7: "A server MUST NOT send a MAX_PUSH_ID frame.  A client MUST treat the
+            // receipt of a MAX_PUSH_ID frame as a connection error of type
+            // H3_FRAME_UNEXPECTED."
+            //
+            // THE SHARED PAYLOAD SHAPE IS WHY THIS WAS WRONG ONCE. CANCEL_PUSH and MAX_PUSH_ID
+            // are both "the control stream, one varint", so they were merged into a single arm
+            // and MAX_PUSH_ID inherited CANCEL_PUSH's rule. Their rules are OPPOSITE: one is
+            // legal on this stream, the other is never legal from a server at all. Do not merge
+            // them again, however identical the payloads look.
+            //
+            // s7.2.7's OTHER two MUSTs - the wrong-stream rule and the non-increasing-value
+            // rule - are unreachable behind this one. A frame a client must reject outright
+            // cannot also be rejected for arriving in the wrong place or carrying the wrong
+            // number. TlsQuicHttp3Request rejects it on request streams for its own reason.
+            case (ulong)TlsQuicHttp3FrameType.MaxPushId:
+                error = TlsQuicHttp3ErrorCode.H3FrameUnexpected;
+                return false;
 
             // An unknown frame type, reserved or not, is ignored. Its payload was already
             // skipped by TlsQuicHttp3Frames.TryRead honouring the Length.

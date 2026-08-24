@@ -239,6 +239,41 @@ public sealed class TlsQuicHttp3StreamsTests
     }
 
     [Fact]
+    public void AMaxPushIdFrameOnTheControlStreamIsRejectedWithH3FrameUnexpected()
+    {
+        // s7.2.7: "A server MUST NOT send a MAX_PUSH_ID frame.  A client MUST treat the
+        // receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."
+        //
+        // THE PAYLOAD IS DELIBERATELY WELL FORMED. MAX_PUSH_ID and CANCEL_PUSH are both "one
+        // varint on the control stream", and a single arm once handled both - so MAX_PUSH_ID
+        // was parsed and accepted under CANCEL_PUSH's rule. A malformed payload here would
+        // pass even with the arms merged again, because the varint read would fail on its own.
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+
+        Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x0d, 0x01, 0x00]);
+
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3FrameUnexpected, error);
+    }
+
+    [Fact]
+    public void ACancelPushFrameOnTheControlStreamIsStillAccepted()
+    {
+        // The other half of the split above. s7.2.3 puts CANCEL_PUSH on the control stream
+        // legitimately, so rejecting MAX_PUSH_ID must not have been done by rejecting the
+        // shape they share. Same encoding, same length, opposite verdict.
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(new TlsQuicHttp3Spec(), set);
+
+        Deliver(set, PeerUni0, [0x00, 0x04, 0x00, 0x03, 0x01, 0x00]);
+
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, error);
+        Assert.True(http3.PeerSettingsReceived);
+    }
+
+    [Fact]
     public void AReservedFrameAfterSettingsOnTheControlStreamIsIgnored()
     {
         // s7.2.8: reserved frames "have no semantics ... Endpoints MUST NOT consider these

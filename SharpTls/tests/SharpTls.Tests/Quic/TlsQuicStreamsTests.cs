@@ -808,6 +808,93 @@ public sealed class TlsQuicStreamsTests
         Assert.Empty(stream.Received);
     }
 
+    // ---- s19.4, s19.5 and s19.13: the frame types whose rule is the stream's DIRECTION -----
+    //
+    // s2.1's four identifiers do all the work here, so they are named once: 0 is
+    // client-initiated bidirectional, 1 server-initiated bidirectional, 2 client-initiated
+    // unidirectional - SEND-ONLY for this endpoint - and 3 server-initiated unidirectional,
+    // RECEIVE-ONLY. Every test below picks 2 or 3 for that reason and not arbitrarily.
+
+    [Theory]
+    [InlineData((ulong)TlsQuicFrameType.ResetStream)]
+    [InlineData((ulong)TlsQuicFrameType.StreamDataBlocked)]
+    public void AResetOrBlockedSignalOnOurOwnUnidirectionalStreamIsStreamStateError(
+        ulong frameType)
+    {
+        // s19.4: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST
+        // terminate the connection with error STREAM_STATE_ERROR." s19.13 says the same of
+        // STREAM_DATA_BLOCKED, word for word with the type changed.
+        //
+        // THE STREAM IS NEVER OPENED, which is the difference from the s19.8 pair above.
+        // Neither sentence says "that has not yet been created", so the verdict must come off
+        // the identifier alone; opening stream 2 first would let a Find-based implementation
+        // pass this test and still miss the frame it was written for.
+        var streams = Set();
+
+        Assert.False(streams.TryReceiveStreamStateSignal(Signal(frameType, 2), out var error));
+        Assert.Equal(TlsQuicTransportError.StreamStateError, error);
+    }
+
+    [Theory]
+    [InlineData((ulong)TlsQuicFrameType.ResetStream)]
+    [InlineData((ulong)TlsQuicFrameType.StreamDataBlocked)]
+    public void AResetOrBlockedSignalOnAServerUnidirectionalStreamIsAccepted(
+        ulong frameType)
+    {
+        // THE OTHER SIDE OF THE SAME TEST, and the reason it exists: stream 3 is receive-only
+        // for us, so a RESET_STREAM on it is the peer resetting its OWN sending - the ordinary
+        // use of the frame. A check written as "unidirectional" rather than "send-only" would
+        // fail this and pass the one above.
+        var streams = Set();
+
+        Assert.True(streams.TryReceiveStreamStateSignal(Signal(frameType, 3), out var error));
+        Assert.Equal(TlsQuicTransportError.NoError, error);
+    }
+
+    [Fact]
+    public void AStopSendingOnAServerUnidirectionalStreamIsStreamStateError()
+    {
+        // s19.5: "An endpoint that receives a STOP_SENDING frame for a receive-only stream
+        // MUST terminate the connection with error STREAM_STATE_ERROR." RECEIVE-only, where
+        // the two frames above say SEND-only - the pairing is inverted and stream 3 is refused
+        // here while it was accepted above.
+        var streams = Set();
+
+        Assert.False(streams.TryReceiveStreamStateSignal(
+            Signal((ulong)TlsQuicFrameType.StopSending, 3), out var error));
+        Assert.Equal(TlsQuicTransportError.StreamStateError, error);
+    }
+
+    [Fact]
+    public void AStopSendingOnAStreamWeOpenedIsAccepted()
+    {
+        // The inversion's other half. Stream 2 is send-only for us, and asking us to stop
+        // sending on a stream we send on is the frame's whole purpose - s19.5's own words,
+        // "STOP_SENDING requests that a peer cease transmission on a stream". Opened first,
+        // because an unopened client-initiated identifier trips the not-yet-created rule below
+        // and this test would then pass for the wrong reason.
+        var streams = Set();
+        var stream = streams.OpenUnidirectional();
+
+        Assert.True(streams.TryReceiveStreamStateSignal(
+            Signal((ulong)TlsQuicFrameType.StopSending, stream.Id), out var error));
+        Assert.Equal(TlsQuicTransportError.NoError, error);
+    }
+
+    [Fact]
+    public void AStopSendingOnALocallyInitiatedStreamWeNeverOpenedIsStreamStateError()
+    {
+        // s19.5's other MUST: "Receiving a STOP_SENDING frame for a locally initiated stream
+        // that has not yet been created MUST be treated as a connection error of type
+        // STREAM_STATE_ERROR." Stream 0 is client-initiated and BIDIRECTIONAL, so it is
+        // neither send-only nor receive-only and only this sentence can refuse it.
+        var streams = Set();
+
+        Assert.False(streams.TryReceiveStreamStateSignal(
+            Signal((ulong)TlsQuicFrameType.StopSending, 0), out var error));
+        Assert.Equal(TlsQuicTransportError.StreamStateError, error);
+    }
+
     [Fact]
     public void AServerInitiatedBidirectionalStreamIsAcceptedAndTakesTheBidiLocalLimit()
     {
@@ -1263,6 +1350,16 @@ public sealed class TlsQuicStreamsTests
                 TlsQuicTransportParameterId.InitialMaxStreamsUni, streamsUni),
         ])),
         local);
+
+    // s19.4's, s19.5's and s19.13's frames as the PEER would send them, carrying only the two
+    // fields the direction rules read. The application error code and final size are omitted
+    // because no rule under test looks at them; a helper that filled them in would suggest
+    // they mattered.
+    private static TlsQuicFrame Signal(ulong frameType, ulong streamId) => new()
+    {
+        RawType = frameType,
+        StreamId = streamId,
+    };
 
     // s19.10's and s19.9's frames as the PEER would send them. Hand-built for the reason every
     // other peer frame in this file is - a helper that reused the send path's construction

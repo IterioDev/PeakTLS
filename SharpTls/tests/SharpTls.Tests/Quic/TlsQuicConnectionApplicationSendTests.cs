@@ -221,6 +221,117 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
     }
 
+    // ---- s19.16 and s19.4: frame types the dispatch used to drop ---------------------------
+
+    [Theory]
+    [InlineData(0, 0UL)]
+    [InlineData(0, 9UL)]
+    [InlineData(5, 0UL)]
+    [InlineData(5, 9UL)]
+    public async Task ARetireConnectionIdFrameIsRefusedAsAProtocolViolation(
+        int sourceConnectionIdLength, ulong sequenceNumber)
+    {
+        // FOUR ROWS BECAUSE TWO DIFFERENT SENTENCES REACH THE SAME VERDICT, and a single row
+        // could not tell them apart.
+        //
+        // Length 0 - TlsQuicConnectionSpec.SourceConnectionIdLength's default and what the
+        // shipped profiles use - is s19.16's "An endpoint that provides a zero-length
+        // connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection
+        // error of type PROTOCOL_VIOLATION", which does not look at the number at all.
+        //
+        // Length 5 is the rest of s19.16: this endpoint never sends a NEW_CONNECTION_ID frame,
+        // so sequence number 0 is the only one ever provided. Number 9 is then "a sequence
+        // number greater than any previously sent to the peer", a MUST; number 0 refers to the
+        // Destination Connection ID of the packet carrying the frame, which s19.16 lets the
+        // peer treat as PROTOCOL_VIOLATION and this endpoint does.
+        //
+        // ZERO IS IN BOTH LENGTH ROWS ON PURPOSE. An implementation that only compared against
+        // the highest issued number would pass rows 2 and 4 and let row 1 and row 3 through.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        var spec = new TlsQuicConnectionSpec
+        {
+            PaddingTarget = Spec().PaddingTarget,
+            SourceConnectionIdLength = sourceConnectionIdLength,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.RetireConnectionId,
+                    SequenceNumber = sequenceNumber,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        // THE MESSAGE IS ASSERTED, NOT JUST THE TYPE. This frame used to fall into the frame
+        // switch's default arm and be dropped silently; an InvalidOperationException from
+        // anywhere else in the receive path would satisfy Assert.ThrowsAsync alone.
+        Assert.Contains("RETIRE_CONNECTION_ID", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AResetStreamFrameOnOurOwnUnidirectionalStreamClosesTheConnection()
+    {
+        // s19.4: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST
+        // terminate the connection with error STREAM_STATE_ERROR." Stream 2 is s2.1's
+        // client-initiated unidirectional identifier and this endpoint is the client.
+        //
+        // THE RULE ITSELF IS TESTED IN TlsQuicStreamsTests, five ways. THIS TEST IS ABOUT THE
+        // DISPATCH: RESET_STREAM, STOP_SENDING and STREAM_DATA_BLOCKED all reached the frame
+        // switch's default arm and were dropped, so a stream set that refused them perfectly
+        // still never saw one. One frame type is enough to prove the arm exists, because all
+        // three share it.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.ResetStream,
+                    StreamId = 2,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Contains("ResetStream", error.Message, StringComparison.Ordinal);
+        Assert.Contains("StreamStateError", error.Message, StringComparison.Ordinal);
+    }
+
     // BOTH ROWS OF TlsQuicConnectionSpec.CoalesceAscendingByLevel, and the FALSE one is the
     // reason this test exists: with it false the answer's long-header packets are ordered
     // Handshake-then-Initial, and a 1-RTT packet placed in that order would come FIRST -

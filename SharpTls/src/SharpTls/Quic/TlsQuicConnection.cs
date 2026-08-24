@@ -1656,6 +1656,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 // malformed ACK. Task 14e; the text is ReceiveStreamFrame's, in
                 // TlsQuicStreams.cs.
                 string? streamFailure = null;
+                string? protocolFailure = null;
                 var peerClosed = false;
 
                 var outcome = _receiver.Receive(
@@ -1788,31 +1789,91 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 ReceiveFlowControlFrame(frame, ref streamFailure);
                                 break;
 
+                            case TlsQuicFrameType.ResetStream:
+                            case TlsQuicFrameType.StopSending:
+                            case TlsQuicFrameType.StreamDataBlocked:
+                                // The four s19.4, s19.5 and s19.13 direction rules, whose whole
+                                // content lives in ReceiveStreamStateSignal in
+                                // TlsQuicStreams.cs beside the two receive-side rules it
+                                // mirrors. One arm for three types because all four MUSTs are
+                                // the same test on a stream identifier.
+                                //
+                                // s19.12's DATA_BLOCKED IS DELIBERATELY NOT HERE. It carries
+                                // no stream id, so it has no direction to be wrong about and
+                                // s19.12 states no rule of this shape; it stays in the default
+                                // arm with the reason that arm gives.
+                                //
+                                // ACCEPTING IS STILL NOT ACTING. A RESET_STREAM this endpoint
+                                // does not refuse is dropped exactly as it was before, because
+                                // s3.2's state transitions are separate work. What changed is
+                                // that the ones the RFC says to close on now close.
+                                ReceiveStreamStateSignal(frame, ref streamFailure);
+                                break;
+
+                            case TlsQuicFrameType.RetireConnectionId:
+                                // s19.16, and for this client every path through it ends in
+                                // the same place - but for two different reasons, which is why
+                                // the length is tested rather than assumed.
+                                //
+                                // ZERO-LENGTH SOURCE CONNECTION ID, which is
+                                // TlsQuicConnectionSpec.SourceConnectionIdLength's default and
+                                // what the shipped profiles use: "An endpoint that provides a
+                                // zero-length connection ID MUST treat receipt of a
+                                // RETIRE_CONNECTION_ID frame as a connection error of type
+                                // PROTOCOL_VIOLATION." Unconditional - the sequence number is
+                                // not even consulted, because there is no connection ID it
+                                // could name.
+                                //
+                                // NON-ZERO SOURCE CONNECTION ID, which the spec permits and a
+                                // future profile may want: this endpoint never sends a
+                                // NEW_CONNECTION_ID frame, so sequence number 0 - the one the
+                                // handshake provided - is the only one ever "sent to the
+                                // peer". s19.16: "Receipt of a RETIRE_CONNECTION_ID frame
+                                // containing a sequence number greater than any previously
+                                // sent to the peer MUST be treated as a connection error of
+                                // type PROTOCOL_VIOLATION", which makes every number above 0 a
+                                // violation.
+                                //
+                                // AND SEQUENCE NUMBER 0 IS REFUSED UNDER s19.16's MAY, not
+                                // under a MUST. "The sequence number specified in a
+                                // RETIRE_CONNECTION_ID frame MUST NOT refer to the Destination
+                                // Connection ID field of the packet in which the frame is
+                                // contained.  The peer MAY treat this as a connection error of
+                                // type PROTOCOL_VIOLATION." The MUST NOT binds the SENDER and
+                                // this client never sends the frame, so the MAY is the only
+                                // receive-side action the rule offers. With one connection ID
+                                // issued and every 1-RTT packet from the server carrying it as
+                                // the Destination Connection ID, number 0 always refers to
+                                // that field, so the option always applies. Exercising it
+                                // needs no per-packet context, which is why this is a length
+                                // test and not a comparison against the packet in hand.
+                                protocolFailure ??=
+                                    "The peer sent a RETIRE_CONNECTION_ID frame (RFC 9000 "
+                                    + "s19.16) naming sequence number "
+                                    + $"{frame.SequenceNumber}, which this endpoint never "
+                                    + "issued: its source connection ID is "
+                                    + $"{_sourceConnectionId.Length} byte(s) long and no "
+                                    + "NEW_CONNECTION_ID frame is ever sent.";
+                                break;
+
                             default:
                                 // PADDING, PING and anything else the peer legally sends
                                 // during a handshake need no action from A4-minimal.
                                 //
-                                // s19.12's DATA_BLOCKED AND s19.13's STREAM_DATA_BLOCKED ARE
-                                // STILL HERE, DELIBERATELY. Both are the peer saying it wants
-                                // to send more than OUR advertised limits allow, and this
-                                // endpoint already raises those limits on delivery rather than
-                                // on request - TlsQuicStream.CreditReceiveWindow and
+                                // s19.12's DATA_BLOCKED IS STILL HERE, DELIBERATELY. It is the
+                                // peer saying it wants to send more than OUR advertised limits
+                                // allow, and this endpoint already raises those limits on
+                                // delivery rather than on request -
+                                // TlsQuicStream.CreditReceiveWindow and
                                 // TlsQuicStreamSet.CreditConnectionWindow - so there is
                                 // nothing for the signal to trigger that has not already
-                                // happened. s19.12 calls them "input to tuning of flow control
+                                // happened. s19.12 calls it "input to tuning of flow control
                                 // algorithms", which is what a receiver with an adaptive
-                                // window would use them for and this one has not got.
+                                // window would use it for and this one has not got.
                                 //
-                                // ONE MUST IS THEREFORE STILL UNIMPLEMENTED AND IS NAMED
-                                // RATHER THAN GLOSSED. s19.13: "An endpoint that receives a
-                                // STREAM_DATA_BLOCKED frame for a send-only stream MUST
-                                // terminate the connection with error STREAM_STATE_ERROR."
-                                // Ignoring it is the pre-existing behaviour, not a regression
-                                // - both types fell into this arm before MAX_DATA was handled
-                                // too - and it is conservative: the cost is tolerating a peer
-                                // frame s19.13 says to close on, never sending a byte past a
-                                // limit. The receive side of the two BLOCKED frames is its own
-                                // task.
+                                // ITS SIBLING STREAM_DATA_BLOCKED LEFT THIS ARM, and the two
+                                // are no longer symmetric: s19.13 attaches a MUST to a
+                                // stream's direction and s19.12, carrying no stream id, cannot.
                                 break;
                         }
                     });
@@ -1832,6 +1893,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 if (streamFailure is { } badStream)
                 {
                     throw new InvalidOperationException(badStream);
+                }
+
+                // And once more for the frames whose rule is not about a stream at all. Kept
+                // separate from streamFailure rather than folded into it because the two carry
+                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and task
+                // 9b's immediate close will need to tell them apart.
+                if (protocolFailure is { } violation)
+                {
+                    throw new InvalidOperationException(violation);
                 }
 
                 AccountForPacket(outcome);
