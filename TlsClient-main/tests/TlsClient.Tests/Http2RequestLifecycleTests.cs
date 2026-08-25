@@ -163,6 +163,7 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("body"),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).FramesBeforeHeaders =
                 [
                     new TlsHttp2PriorityUpdateFrame { Value = "u=0, i" },
@@ -315,6 +316,7 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("body"),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).FramesBeforeHeaders =
                 [
                     new TlsHttp2RequestRawFrame
@@ -599,6 +601,7 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("first"),
                 };
+                first.AddHeader("content-length", "-1");
                 var firstOptions = TlsRequestOptions.For(first);
                 firstOptions.FramesBeforeHeaders =
                 [
@@ -617,6 +620,7 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("second"),
                 };
+                second.AddHeader("content-length", "-1");
                 // A different before-list and, deliberately, no after-list at all.
                 TlsRequestOptions.For(second).FramesBeforeHeaders =
                 [
@@ -707,16 +711,17 @@ public sealed class Http2RequestLifecycleTests
             .ToArray();
 
     /// <summary>
-    /// The remaining three overrides on one HTTP/2 request. Every session value here is
-    /// different from the request's, so none of the assertions can pass on the fallback.
+    /// The remaining two overrides on one HTTP/2 request. Every session value here is different
+    /// from the request's, so neither assertion can pass on the fallback. The field order rides
+    /// along: there is no order to override any more, so what the block has to show is the
+    /// request's own insertion order, unreordered.
     /// </summary>
     [Fact]
-    public async Task HeaderOrderPriorityAndPriorityUpdate_AreResolvedFromTheRequest()
+    public async Task PriorityAndPriorityUpdate_AreResolvedFromTheRequest()
     {
         var options = new TlsSessionOptions
         {
             Profile = TlsProfiles.Modern,
-            HeaderOrder = ["x-beta", "x-alpha"],
         };
         options.Http2.HeaderPriority = new TlsHttp2Priority { Weight = 20 };
         options.Http2.PriorityUpdate = "u=5";
@@ -729,10 +734,10 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("body"),
                 };
+                request.AddHeader("content-length", "-1");
                 request.AddHeader("x-alpha", "1");
                 request.AddHeader("x-beta", "2");
                 var requestOptions = TlsRequestOptions.For(request);
-                requestOptions.HeaderOrder = ["x-alpha", "x-beta"];
                 requestOptions.HeaderPriority = new TlsHttp2Priority { Weight = 200 };
                 requestOptions.PriorityUpdate = "u=0, i";
                 return await session.SendAsync(request, cancellationToken);
@@ -791,32 +796,30 @@ public sealed class Http2RequestLifecycleTests
             .ToList();
         Assert.True(
             names.IndexOf("x-alpha") < names.IndexOf("x-beta"),
-            "the request HeaderOrder was not applied to the HTTP/2 field block");
+            "the request's own field order did not survive into the HTTP/2 field block");
     }
 
     /// <summary>
-    /// HeaderOrder is the one per-request override HTTP/1.1 honours, because
-    /// <c>Http11RequestWriter.Order</c> is already shared with the HTTP/2 header builder and
-    /// splitting the semantics by protocol would be surprising. The session order here is the
-    /// reverse of the request's, so the assertion cannot pass on the fallback.
+    /// The request's own field order reaches the HTTP/1.1 head unreordered. There is no order
+    /// override on either the session or the request to resolve between: the list the caller
+    /// built with <c>AddHeader</c> is the only order there is.
     /// </summary>
     [Fact]
-    public async Task HeaderOrder_IsHonouredPerRequestOnHttp11()
+    public async Task TheRequestsOwnFieldOrderReachesTheHttp11Head()
     {
-        var requestHead = await SendOverHttp11Async(
-            options => options.HeaderOrder = ["x-alpha", "x-beta"]);
+        var requestHead = await SendOverHttp11Async(_ => { });
 
         Assert.True(
             requestHead.IndexOf("x-alpha", StringComparison.OrdinalIgnoreCase) <
                 requestHead.IndexOf("x-beta", StringComparison.OrdinalIgnoreCase),
-            $"the request order was not applied:{Environment.NewLine}{requestHead}");
+            $"the request's own order did not reach the head:{Environment.NewLine}{requestHead}");
     }
 
     /// <summary>
-    /// Every override other than HeaderOrder is HTTP/2 only and is ignored on an HTTP/1.1
-    /// connection rather than throwing, so a persona survives a version fallback. The session
-    /// HeaderOrder still applies, which is what proves the request was written normally rather
-    /// than merely not crashing.
+    /// The pseudo-header, priority and PRIORITY_UPDATE overrides are HTTP/2 only and are ignored
+    /// on an HTTP/1.1 connection rather than throwing, so a persona survives a version fallback.
+    /// The field order still reaches the head, which is what proves the request was written
+    /// normally rather than merely not crashing.
     /// </summary>
     [Fact]
     public async Task Http2OnlyOverrides_AreIgnoredRatherThanRejectedOnHttp11()
@@ -829,17 +832,15 @@ public sealed class Http2RequestLifecycleTests
         });
 
         Assert.StartsWith("GET /order HTTP/1.1", requestHead, StringComparison.Ordinal);
-        // The session order, untouched by the ignored HTTP/2 overrides.
         Assert.True(
-            requestHead.IndexOf("x-beta", StringComparison.OrdinalIgnoreCase) <
-                requestHead.IndexOf("x-alpha", StringComparison.OrdinalIgnoreCase),
-            $"the session order was not applied:{Environment.NewLine}{requestHead}");
+            requestHead.IndexOf("x-alpha", StringComparison.OrdinalIgnoreCase) <
+                requestHead.IndexOf("x-beta", StringComparison.OrdinalIgnoreCase),
+            $"the field order did not survive:{Environment.NewLine}{requestHead}");
     }
 
     /// <summary>
     /// Drives one request over an HTTP/1.1-only loopback connection and returns the request
-    /// head the client wrote. The session declares the reverse of the per-request order, so
-    /// whichever one the writer used is visible in the output.
+    /// head the client wrote.
     /// </summary>
     private static async Task<string> SendOverHttp11Async(Action<TlsRequestOptions> configure)
     {
@@ -861,7 +862,6 @@ public sealed class Http2RequestLifecycleTests
         {
             Profile = TlsProfiles.Modern,
             HttpVersionPolicy = TlsHttpVersionPolicy.Http11Only,
-            HeaderOrder = ["x-beta", "x-alpha"],
             ConfigureTls = tls =>
             {
                 tls.CertificateValidation.CustomTrustRoots = [certificates.Root];

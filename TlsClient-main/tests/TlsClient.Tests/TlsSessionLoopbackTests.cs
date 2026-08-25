@@ -46,7 +46,12 @@ public sealed class TlsSessionLoopbackTests
         await using var session = new TlsSession(options);
         var url = $"https://127.0.0.1:{port}/";
 
-        var response = await session.GetAsync(url, timeout.Token);
+        // The cookie is the REQUEST's own. The container still records the server's Set-Cookie,
+        // but nothing injects a Cookie field, so what a same-origin redirect has to carry
+        // forward is the field the caller added.
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.AddHeader("Cookie", "sid=managed");
+        var response = await session.SendAsync(request, timeout.Token);
         var secondRequest = await serverTask;
 
         Assert.Equal("two", response.Text);
