@@ -8,17 +8,13 @@ internal static class Http11RequestWriter
     private static readonly SearchValues<char> InvalidMethodCharacters = SearchValues.Create(
         "()<>@,;:\\\"/[]?={} \t\r\n");
 
-    public static byte[] SerializeHeaders(
-        BufferedRequest request,
-        string[] preferredOrder,
-        string? cookieHeader)
+    public static byte[] SerializeHeaders(BufferedRequest request)
     {
         // No Connection field is generated. RFC 9112 section 9.3 makes HTTP/1.1 persistent by
         // default, so a request that does not add one simply does not send one — and an
         // unrequested keep-alive is a field no capture shows.
-        var headers = MergeHeaders(request, cookieHeader);
+        var headers = MergeHeaders(request);
 
-        headers = Order(headers, preferredOrder);
         // RFC 9112 section 3.2.3: "When making a CONNECT request to establish a tunnel through
         // one or more proxies, a client MUST send only the host and port of the tunnel
         // destination as the request-target ... except that it sends the scheme's default port
@@ -57,15 +53,10 @@ internal static class Http11RequestWriter
         return Encoding.Latin1.GetBytes(builder.ToString());
     }
 
-    // emitTrailerHeader decides whether a request carrying trailers also gets a Trailer
-    // field naming them, the field RFC 9110 section 6.6.2 defines for that purpose. Only the
-    // HTTP/2 header builder ever passes false: the switch lives on
-    // TlsHttp2Options.EmitTrailerHeader because it is HTTP/2 clients that generally omit the
-    // field, and the HTTP/1.1 callers here have no HTTP/2 session to read it from.
-    internal static List<HeaderEntry> MergeHeaders(
-        BufferedRequest request,
-        string? cookieHeader,
-        bool emitTrailerHeader = true)
+    // No Trailer field is generated either. RFC 9110 section 6.6.2 defines one for announcing
+    // trailers, and a request that wants it adds it — which is also why the session-level
+    // switch that used to decide this is gone.
+    internal static List<HeaderEntry> MergeHeaders(BufferedRequest request)
     {
         // Every field is the request's own, in the order the caller added it. There is no
         // session-level header set to merge over, so nothing can silently take a position the
@@ -126,11 +117,9 @@ internal static class Http11RequestWriter
         return headers;
     }
 
-    internal static bool Has100Continue(
-        BufferedRequest request,
-        string? cookieHeader)
+    internal static bool Has100Continue(BufferedRequest request)
     {
-        var headers = MergeHeaders(request, cookieHeader);
+        var headers = MergeHeaders(request);
         return headers
             .Where(header => header.Name.Equals("Expect", StringComparison.OrdinalIgnoreCase))
             .SelectMany(header => header.Values)
@@ -181,28 +170,26 @@ internal static class Http11RequestWriter
         return uri.IsDefaultPort && !includeDefaultPort ? host : $"{host}:{uri.Port}";
     }
 
-    internal static List<HeaderEntry> Order(List<HeaderEntry> headers, string[] preferredOrder)
-    {
-        if (preferredOrder.Length == 0)
-        {
-            return headers;
-        }
-
-        var ordered = new List<HeaderEntry>(headers.Count);
-        foreach (var name in preferredOrder)
-        {
-            var index = headers.FindIndex(header =>
-                string.Equals(header.Name, name, StringComparison.OrdinalIgnoreCase));
-            if (index < 0)
-            {
-                continue;
-            }
-            ordered.Add(headers[index]);
-            headers.RemoveAt(index);
-        }
-        ordered.AddRange(headers);
-        return ordered;
-    }
+    /// <summary>
+    /// The authority a request conveys when it added no Host field of its own — the value the
+    /// HTTP/2 and HTTP/3 <c>:authority</c> fallback uses.
+    /// </summary>
+    /// <remarks>
+    /// RFC 9113 section 8.5 defines a plain CONNECT's <c>:authority</c> as "the host and port to
+    /// connect to (equivalent to the authority-form of the request-target of CONNECT requests;
+    /// see Section 3.2.3 of [HTTP/1.1])", and RFC 9112 section 3.2.3 makes the port mandatory in
+    /// that form, so a default port elided here reaches the wire as a CONNECT that "does not
+    /// conform to these restrictions" and is therefore malformed. RFC 8441 section 4 hands
+    /// <c>:authority</c> back to ordinary section 8.3.1 semantics once <c>:protocol</c> is
+    /// present, so an extended CONNECT elides a default port like every other method.
+    /// <para>The rule lives here rather than in the field section because <c>:authority</c> is a
+    /// pseudo-header: nothing synthesises a Host field, so a request that wants one adds it, and
+    /// the value it added wins over this.</para>
+    /// </remarks>
+    internal static string AuthorityFor(BufferedRequest request) => FormatAuthority(
+        request.Url,
+        string.Equals(request.Method, "CONNECT", StringComparison.Ordinal) &&
+            request.Protocol is null);
 
     /// <summary>
     /// Reports the index of the framing slot the caller reserved, or -1. The NAME chosen there

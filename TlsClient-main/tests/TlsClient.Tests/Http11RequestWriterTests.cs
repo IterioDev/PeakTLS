@@ -4,31 +4,38 @@ namespace TlsClient.Tests;
 
 public sealed class Http11RequestWriterTests
 {
+    /// <summary>
+    /// The field section is the caller's list, in the caller's order, and nothing else: no
+    /// synthesised Host, no injected Cookie, no generated Connection. Only the Content-Length
+    /// VALUE is the writer's, and it lands in the slot the caller reserved for it.
+    /// </summary>
     [Fact]
-    public void SerializeHeaders_UsesOriginFormAndPreferredOrder()
+    public void SerializeHeaders_UsesOriginFormAndTheCallersOwnFieldSection()
     {
         var request = new BufferedRequest(
             "POST",
             new Uri("https://example.com:8443/a%20b?q=1#ignored"),
-            [new HeaderEntry("X-Test", ["request"]), new HeaderEntry("Accept", ["*/*"])],
+            [
+                new HeaderEntry("Host", ["example.com:8443"]),
+                new HeaderEntry("X-Test", ["request"]),
+                new HeaderEntry("Content-Length", ["-1"]),
+                new HeaderEntry("Accept", ["*/*"]),
+                new HeaderEntry("Cookie", ["sid=abc"]),
+            ],
             [1, 2, 3],
             HasContent: true);
 
-        var bytes = Http11RequestWriter.SerializeHeaders(
-            request,
-            ["Host", "X-Test", "Accept"],
-            "sid=abc");
-        var text = Encoding.Latin1.GetString(bytes);
+        var text = Encoding.Latin1.GetString(Http11RequestWriter.SerializeHeaders(request));
 
-        Assert.StartsWith(
+        Assert.Equal(
             "POST /a%20b?q=1 HTTP/1.1\r\n" +
             "Host: example.com:8443\r\n" +
             "X-Test: request\r\n" +
-            "Accept: */*\r\n",
-            text,
-            StringComparison.Ordinal);
-        Assert.Contains("Cookie: sid=abc\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Content-Length: 3\r\n", text, StringComparison.Ordinal);
+            "Content-Length: 3\r\n" +
+            "Accept: */*\r\n" +
+            "Cookie: sid=abc\r\n" +
+            "\r\n",
+            text);
         Assert.DoesNotContain("ignored", text, StringComparison.Ordinal);
     }
 
@@ -61,15 +68,17 @@ public sealed class Http11RequestWriterTests
     /// to connect to (equivalent to the authority-form of the request-target of CONNECT
     /// requests; see Section 3.2.3 of [HTTP/1.1])", and RFC 9112 section 3.2.3 gives that form
     /// as "authority-form = uri-host ':' port" — no default to fall back on.
-    /// <c>Http2Connection.BuildRequestHeaders</c> reads <c>:authority</c> out of this seeded
-    /// field, so the port has to survive here or the CONNECT reaches the wire malformed.
+    /// Nothing synthesises a Host field any more, so this is the <c>:authority</c> fallback
+    /// <c>Http2Connection.BuildRequestHeaders</c> and <c>Http3FieldMapper</c> use when the
+    /// request added no Host of its own. The port has to survive here or the CONNECT reaches
+    /// the wire malformed.
     /// </summary>
     [Fact]
-    public void PlainConnect_SeedsAHostFieldCarryingTheDefaultPort()
+    public void PlainConnect_ConveysAnAuthorityCarryingTheDefaultPort()
     {
-        var headers = SeedHost("CONNECT", "https://example.com/", protocol: null);
+        var authority = Authority("CONNECT", "https://example.com/", protocol: null);
 
-        Assert.Equal("example.com:443", headers);
+        Assert.Equal("example.com:443", authority);
     }
 
     /// <summary>
@@ -78,9 +87,9 @@ public sealed class Http11RequestWriterTests
     [Fact]
     public void PlainConnect_KeepsANonDefaultPort()
     {
-        var headers = SeedHost("CONNECT", "https://example.com:8443/", protocol: null);
+        var authority = Authority("CONNECT", "https://example.com:8443/", protocol: null);
 
-        Assert.Equal("example.com:8443", headers);
+        Assert.Equal("example.com:8443", authority);
     }
 
     /// <summary>
@@ -91,30 +100,27 @@ public sealed class Http11RequestWriterTests
     /// together because they are the same rule: only a plain CONNECT departs from it.
     /// </summary>
     [Fact]
-    public void ExtendedConnectAndOrdinaryMethods_SeedAHostFieldWithoutADefaultPort()
+    public void ExtendedConnectAndOrdinaryMethods_ConveyAnAuthorityWithoutADefaultPort()
     {
         Assert.Equal(
             "example.com",
-            SeedHost("CONNECT", "https://example.com/", protocol: "websocket"));
-        Assert.Equal("example.com", SeedHost("GET", "https://example.com/", protocol: null));
+            Authority("CONNECT", "https://example.com/", protocol: "websocket"));
+        Assert.Equal("example.com", Authority("GET", "https://example.com/", protocol: null));
     }
 
     /// <summary>
     /// RFC 9112 section 3.2.3: "When making a CONNECT request to establish a tunnel through one
     /// or more proxies, a client MUST send only the host and port of the tunnel destination as
     /// the request-target ... except that it sends the scheme's default port if the target URI
-    /// elides the port." The request-line and the seeded <c>Host</c> field carry the same
-    /// authority string.
+    /// elides the port." No Host field accompanies it unless the caller added one — the
+    /// request-line is what this pins.
     /// </summary>
     [Fact]
     public void PlainConnect_UsesTheAuthorityFormRequestTarget()
     {
         var text = Serialize("CONNECT", "https://example.com/", protocol: null);
 
-        Assert.StartsWith(
-            "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n",
-            text,
-            StringComparison.Ordinal);
+        Assert.Equal("CONNECT example.com:443 HTTP/1.1\r\n\r\n", text);
     }
 
     /// <summary>
@@ -172,11 +178,10 @@ public sealed class Http11RequestWriterTests
             PathOverride = pathOverride,
         };
 
-        return Encoding.Latin1.GetString(
-            Http11RequestWriter.SerializeHeaders(request, ["Host"], null));
+        return Encoding.Latin1.GetString(Http11RequestWriter.SerializeHeaders(request));
     }
 
-    private static string SeedHost(string method, string url, string? protocol)
+    private static string Authority(string method, string url, string? protocol)
     {
         var request = new BufferedRequest(
             method,
@@ -188,7 +193,6 @@ public sealed class Http11RequestWriterTests
             Protocol = protocol,
         };
 
-        return Http11RequestWriter.MergeHeaders(request, null)
-            .Single(header => header.Name == "Host").Values.Single();
+        return Http11RequestWriter.AuthorityFor(request);
     }
 }

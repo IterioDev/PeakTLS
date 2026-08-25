@@ -362,9 +362,7 @@ internal sealed class Http2Connection : IHttpConnection
         var data = _configuration.Http2.Data;
         var headerBlockEndsStream = data.EmptyBodyEndsOnHeaders &&
             (!request.HasPayload || request.ContentLength == 0 && !request.HasTrailers);
-        var expectsContinue = request.HasContent && Http11RequestWriter.Has100Continue(
-            request,
-            cookieHeader);
+        var expectsContinue = request.HasContent && Http11RequestWriter.Has100Continue(request);
         // Both lists are checked before a byte is written, so a rejected script cannot leave a
         // half-open stream behind.
         ValidateRequestFrames(request.FramesBeforeHeaders, state.StreamId);
@@ -808,18 +806,12 @@ internal sealed class Http2Connection : IHttpConnection
         BufferedRequest request,
         string? cookieHeader)
     {
-        var regular = Http11RequestWriter.MergeHeaders(
-            request,
-            cookieHeader,
-            _configuration.Http2.EmitTrailerHeader);
-        regular = Http11RequestWriter.Order(
-            regular,
-            request.HeaderOrder ?? _configuration.HeaderOrder);
+        var regular = Http11RequestWriter.MergeHeaders(request);
         var pseudoHeaders = _configuration.Http2.PseudoHeaders;
         var authorityMode = request.AuthorityMode ?? pseudoHeaders.AuthorityMode;
         var host = regular.FirstOrDefault(header =>
             string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase));
-        var authority = host?.Values.FirstOrDefault() ?? Http11RequestWriter.FormatAuthority(request.Url);
+        var authority = host?.Values.FirstOrDefault() ?? Http11RequestWriter.AuthorityFor(request);
         // A declared override reaches the wire verbatim, which is the only way to express the
         // asterisk form RFC 9113 section 8.3.1 requires of an OPTIONS request whose target URI
         // has no path component. No URI can produce that string.

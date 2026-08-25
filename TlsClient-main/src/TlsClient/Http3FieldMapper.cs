@@ -54,23 +54,12 @@ internal static class Http3FieldMapper
         TlsSessionConfiguration configuration,
         out string authority)
     {
-        // The session's own trailer-field policy, read from where it already lives. It sits on
-        // TlsHttp2Options because HTTP/2 clients are the ones that generally omit RFC 9110
-        // section 6.6.2's Trailer field, and HTTP/3 is the same shape of client — a persona
-        // that omits it over HTTP/2 would be conspicuous for announcing it over HTTP/3. It has
-        // no effect on a request without trailers, so no GET's field section moves.
-        var merged = Http11RequestWriter.MergeHeaders(
-            request,
-            cookieHeader,
-            configuration.Http2.EmitTrailerHeader);
-        merged = Http11RequestWriter.Order(
-            merged,
-            request.HeaderOrder ?? configuration.HeaderOrder);
+        var merged = Http11RequestWriter.MergeHeaders(request);
 
         var host = merged.FirstOrDefault(header =>
             string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase));
         authority = host?.Values.FirstOrDefault() ??
-            Http11RequestWriter.FormatAuthority(request.Url);
+            Http11RequestWriter.AuthorityFor(request);
 
         var fields = ImmutableArray.CreateBuilder<TlsQuicHttp3Field>();
         foreach (var header in merged)
