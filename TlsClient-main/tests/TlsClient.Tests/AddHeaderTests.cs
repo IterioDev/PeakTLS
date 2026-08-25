@@ -48,6 +48,25 @@ public sealed class AddHeaderTests
     }
 
     [Fact]
+    public async Task TheBufferedFieldSectionIsTheAddHeaderSequence()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "https://example.com/");
+        request.AddHeader("host", "example.com");
+        request.AddHeader("accept", "*/*");
+        request.AddHeader("user-agent", "agent");
+
+        var buffered = await BufferedRequest.CreateAsync(
+            request,
+            maximumBodyBytes: 4096,
+            TlsHttpVersionPolicy.PreferHttp2,
+            CancellationToken.None);
+
+        Assert.Equal(
+            ["host", "accept", "user-agent"],
+            buffered.Headers.Select(header => header.Name.ToLowerInvariant()));
+    }
+
+    [Fact]
     public void AddHeaderRejectsANameThatIsNotAToken() =>
         Assert.Throws<ArgumentException>(() =>
         {

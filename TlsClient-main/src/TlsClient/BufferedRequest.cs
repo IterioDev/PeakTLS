@@ -149,14 +149,24 @@ internal sealed record BufferedRequest(
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
 
-        var entries = new List<HeaderEntry>();
-        AddOrReplace(entries, request.Headers.NonValidated);
+        // ponytail: transitional fallback, deleted in Task 6 of the sealed-AddHeader plan.
+        // Until every caller has moved to request.AddHeader, a request with an empty list still
+        // reads .NET's collections.
+        var legacy = requestConfiguration.Headers.Length == 0;
+        var entries = new List<HeaderEntry>(requestConfiguration.Headers);
+        if (legacy)
+        {
+            AddOrReplace(entries, request.Headers.NonValidated);
+        }
 
         byte[] body = [];
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            AddOrReplace(entries, request.Content.Headers.NonValidated);
+            if (legacy)
+            {
+                AddOrReplace(entries, request.Content.Headers.NonValidated);
+            }
             body = await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
             if (body.Length > maximumBodyBytes)
             {
@@ -200,13 +210,18 @@ internal sealed record BufferedRequest(
         TlsHttpVersionPolicy sessionVersionPolicy)
     {
         var requestConfiguration = TlsRequestOptions.Snapshot(request);
+        var legacy = requestConfiguration.Headers.Length == 0;
         var (method, url, entries, versionPolicy) = ReadMetadata(
             request,
-            sessionVersionPolicy);
+            sessionVersionPolicy,
+            requestConfiguration.Headers);
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            AddOrReplace(entries, request.Content.Headers.NonValidated);
+            if (legacy)
+            {
+                AddOrReplace(entries, request.Content.Headers.NonValidated);
+            }
             if (request.Content.Headers.ContentLength is { } declaredLength &&
                 declaredLength > maximumBodyBytes)
             {
@@ -287,7 +302,8 @@ internal sealed record BufferedRequest(
     private static (string Method, Uri Url, List<HeaderEntry> Entries,
         TlsHttpVersionPolicy VersionPolicy) ReadMetadata(
         HttpRequestMessage request,
-        TlsHttpVersionPolicy sessionVersionPolicy)
+        TlsHttpVersionPolicy sessionVersionPolicy,
+        HeaderEntry[] configuredHeaders)
     {
         ArgumentNullException.ThrowIfNull(request);
         var url = request.RequestUri ??
@@ -303,8 +319,12 @@ internal sealed record BufferedRequest(
         var versionPolicy = ResolveVersionPolicy(request, sessionVersionPolicy);
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
-        var entries = new List<HeaderEntry>();
-        AddOrReplace(entries, request.Headers.NonValidated);
+        // ponytail: transitional fallback, deleted in Task 6 of the sealed-AddHeader plan.
+        var entries = new List<HeaderEntry>(configuredHeaders);
+        if (configuredHeaders.Length == 0)
+        {
+            AddOrReplace(entries, request.Headers.NonValidated);
+        }
         return (method, url, entries, versionPolicy);
     }
 

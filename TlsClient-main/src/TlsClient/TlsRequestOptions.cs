@@ -335,6 +335,7 @@ public sealed class TlsRequestOptions
         {
             return new TlsRequestConfiguration(
                 [],
+                [],
                 TlsRequestReplayPolicy.Never,
                 false,
                 null,
@@ -359,6 +360,7 @@ public sealed class TlsRequestOptions
         }
         return new TlsRequestConfiguration(
             trailers,
+            options.Headers.Snapshot(),
             options.ReplayPolicy,
             options._hasProxyOverride,
             options._proxy,
@@ -475,6 +477,7 @@ public enum TlsRequestReplayPolicy
 
 internal sealed record TlsRequestConfiguration(
     HeaderEntry[] Trailers,
+    HeaderEntry[] Headers,
     TlsRequestReplayPolicy ReplayPolicy,
     bool HasProxyOverride,
     TlsProxy? Proxy,
