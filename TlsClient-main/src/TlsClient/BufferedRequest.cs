@@ -25,14 +25,6 @@ internal sealed record BufferedRequest(
 
     public bool SuppressSensitiveSessionHeaders { get; init; }
 
-    /// <summary>
-    /// True when the fields came from <c>request.AddHeader</c> rather than the legacy
-    /// <c>request.Headers</c> read.
-    /// </summary>
-    // ponytail: transitional, deleted in Task 6 of the sealed-AddHeader plan along with the
-    // legacy path it distinguishes.
-    public bool SealedHeaders { get; init; }
-
     /// <summary>Frames written immediately before the HTTP/2 header block. Ignored on HTTP/1.1.</summary>
     public TlsHttp2RequestFrameConfiguration[] FramesBeforeHeaders { get; init; } = [];
 
@@ -157,24 +149,16 @@ internal sealed record BufferedRequest(
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
 
-        // ponytail: transitional fallback, deleted in Task 6 of the sealed-AddHeader plan.
-        // Until every caller has moved to request.AddHeader, a request with an empty list still
-        // reads .NET's collections.
-        var legacy = requestConfiguration.Headers.Length == 0;
+        // The field section, whole. request.Headers and request.Content.Headers are not read:
+        // .NET rejects the Content-* family on the former and appends the latter, so neither can
+        // express the position a captured client puts a content field in, and both reflow values
+        // on the way in.
         var entries = new List<HeaderEntry>(requestConfiguration.Headers);
-        if (legacy)
-        {
-            AddOrReplace(entries, request.Headers.NonValidated);
-        }
 
         byte[] body = [];
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            if (legacy)
-            {
-                AddOrReplace(entries, request.Content.Headers.NonValidated);
-            }
             body = await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
             if (body.Length > maximumBodyBytes)
             {
@@ -191,7 +175,6 @@ internal sealed record BufferedRequest(
             hasContent,
             versionPolicy)
         {
-            SealedHeaders = !legacy,
             Trailers = requestConfiguration.Trailers,
             ReplayPolicy = requestConfiguration.ReplayPolicy,
             HasProxyOverride = requestConfiguration.HasProxyOverride,
@@ -219,7 +202,6 @@ internal sealed record BufferedRequest(
         TlsHttpVersionPolicy sessionVersionPolicy)
     {
         var requestConfiguration = TlsRequestOptions.Snapshot(request);
-        var legacy = requestConfiguration.Headers.Length == 0;
         var (method, url, entries, versionPolicy) = ReadMetadata(
             request,
             sessionVersionPolicy,
@@ -227,10 +209,6 @@ internal sealed record BufferedRequest(
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            if (legacy)
-            {
-                AddOrReplace(entries, request.Content.Headers.NonValidated);
-            }
             if (request.Content.Headers.ContentLength is { } declaredLength &&
                 declaredLength > maximumBodyBytes)
             {
@@ -248,7 +226,6 @@ internal sealed record BufferedRequest(
             request.Content,
             streamingBufferSize)
         {
-            SealedHeaders = !legacy,
             Trailers = requestConfiguration.Trailers,
             ReplayPolicy = requestConfiguration.ReplayPolicy,
             HasProxyOverride = requestConfiguration.HasProxyOverride,
@@ -329,13 +306,7 @@ internal sealed record BufferedRequest(
         var versionPolicy = ResolveVersionPolicy(request, sessionVersionPolicy);
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
-        // ponytail: transitional fallback, deleted in Task 6 of the sealed-AddHeader plan.
-        var entries = new List<HeaderEntry>(configuredHeaders);
-        if (configuredHeaders.Length == 0)
-        {
-            AddOrReplace(entries, request.Headers.NonValidated);
-        }
-        return (method, url, entries, versionPolicy);
+        return (method, url, new List<HeaderEntry>(configuredHeaders), versionPolicy);
     }
 
     internal static void AddOrReplace(List<HeaderEntry> destination, HeaderEntry incoming)
@@ -350,18 +321,6 @@ internal sealed record BufferedRequest(
         else
         {
             destination[index] = copy;
-        }
-    }
-
-    private static void AddOrReplace(
-        List<HeaderEntry> destination,
-        HttpHeadersNonValidated headers)
-    {
-        foreach (var header in headers)
-        {
-            AddOrReplace(
-                destination,
-                new HeaderEntry(header.Key, header.Value.ToArray()));
         }
     }
 

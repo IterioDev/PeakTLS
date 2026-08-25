@@ -13,14 +13,10 @@ internal static class Http11RequestWriter
         string[] preferredOrder,
         string? cookieHeader)
     {
+        // No Connection field is generated. RFC 9112 section 9.3 makes HTTP/1.1 persistent by
+        // default, so a request that does not add one simply does not send one — and an
+        // unrequested keep-alive is a field no capture shows.
         var headers = MergeHeaders(request, cookieHeader);
-        // ponytail: the guard goes with the legacy path in Task 6 of the sealed-AddHeader plan,
-        // taking the injection with it. RFC 9112 section 9.3 makes HTTP/1.1 persistent by
-        // default, so a request that does not name Connection simply does not send it.
-        if (!request.SealedHeaders && !Contains(headers, "Connection"))
-        {
-            headers.Add(new HeaderEntry("Connection", ["keep-alive"]));
-        }
 
         headers = Order(headers, preferredOrder);
         // RFC 9112 section 3.2.3: "When making a CONNECT request to establish a tunnel through
@@ -90,34 +86,12 @@ internal static class Http11RequestWriter
 
         Remove(headers, "Proxy-Authorization");
 
-        // ponytail: both guards go with the legacy path in Task 6 of the sealed-AddHeader plan,
-        // taking the two injections with them. A sealed request sends the Host and Cookie fields
-        // it added, and no others — an absent Host is malformed over HTTP/1.1 (RFC 9112 section
-        // 3.2) and that is the caller's to fix, not this routine's to paper over.
-        if (!request.SealedHeaders && !Contains(headers, "Host"))
-        {
-            // RFC 9113 section 8.5 defines a plain CONNECT's ":authority" as "the host and port
-            // to connect to (equivalent to the authority-form of the request-target of CONNECT
-            // requests; see Section 3.2.3 of [HTTP/1.1])", and RFC 9112 section 3.2.3 makes the
-            // port mandatory in that form. Http2Connection.BuildRequestHeaders reads
-            // ":authority" out of this very field, so a default port elided here reaches the
-            // wire as a CONNECT that "does not conform to these restrictions" and is therefore
-            // malformed (section 8.5). RFC 8441 section 4 hands ":authority" back to ordinary
-            // section 8.3.1 semantics once ":protocol" is present, so extended CONNECT elides a
-            // default port like every other method.
-            var connectAuthority =
-                string.Equals(request.Method, "CONNECT", StringComparison.Ordinal) &&
-                request.Protocol is null;
-            headers.Insert(
-                0,
-                new HeaderEntry("Host", [FormatAuthority(request.Url, connectAuthority)]));
-        }
-        if (!request.SealedHeaders &&
-            !Contains(headers, "Cookie") &&
-            !string.IsNullOrEmpty(cookieHeader))
-        {
-            headers.Add(new HeaderEntry("Cookie", [cookieHeader]));
-        }
+        // No Host is synthesised and no Cookie is injected. A request sends the fields it added
+        // and no others, so an absent Host — malformed over HTTP/1.1 by RFC 9112 section 3.2 —
+        // is the caller's to fix rather than this routine's to paper over, and the session's
+        // cookie container records Set-Cookie without ever contributing a request field.
+        // FormatAuthority survives for the HTTP/2 and HTTP/3 :authority fallback, which reads
+        // the Host field when one was added and derives the authority from the URL when not.
         if (request.HasPayload)
         {
             // The caller reserves the body-framing field's POSITION by adding Content-Length or
@@ -126,60 +100,28 @@ internal static class Http11RequestWriter
             // would have to be appended, which no captured client does: real ones interleave it,
             // so an appended one is a distinguisher. The NAME chosen there decides the framing.
             var index = IndexOfFraming(headers);
-            var lengthKnown = !request.HasTrailers && request.ContentLength is not null;
-            // ponytail: the SealedHeaders branches go in Task 6 of the sealed-AddHeader plan,
-            // leaving only the sealed arm. A legacy request's Content-Length entry came from
-            // HttpContent.Headers rather than from the caller, so its name decides nothing.
-            var chunked = !lengthKnown;
-            if (request.SealedHeaders)
+            if (index < 0)
             {
-                if (index < 0)
-                {
-                    throw new InvalidOperationException(
-                        "The request has a body, but its header list names neither " +
-                        "Content-Length nor Transfer-Encoding. Call request.AddHeader with one " +
-                        "of them to place the body-framing field.");
-                }
-                chunked = headers[index].Name.Equals(
-                    "Transfer-Encoding", StringComparison.OrdinalIgnoreCase);
-                if (!chunked && !lengthKnown)
-                {
-                    throw new InvalidOperationException(
-                        "The request names Content-Length, but its body length is not known in " +
-                        "advance. Name Transfer-Encoding instead.");
-                }
+                throw new InvalidOperationException(
+                    "The request has a body, but its header list names neither Content-Length " +
+                    "nor Transfer-Encoding. Call request.AddHeader with one of them to place " +
+                    "the body-framing field.");
             }
-            var framing = chunked
+            var lengthKnown = !request.HasTrailers && request.ContentLength is not null;
+            var chunked = headers[index].Name.Equals(
+                "Transfer-Encoding", StringComparison.OrdinalIgnoreCase);
+            if (!chunked && !lengthKnown)
+            {
+                throw new InvalidOperationException(
+                    "The request names Content-Length, but its body length is not known in " +
+                    "advance. Name Transfer-Encoding instead.");
+            }
+            headers[index] = chunked
                 ? new HeaderEntry("Transfer-Encoding", ["chunked"])
                 : new HeaderEntry(
                     "Content-Length",
                     [request.ContentLength!.Value.ToString(
                         System.Globalization.CultureInfo.InvariantCulture)]);
-            if (index < 0)
-            {
-                // ponytail: transitional, deleted in Task 6 of the sealed-AddHeader plan. A
-                // legacy request never carries a framing slot, so appending is what it did.
-                headers.Add(framing);
-            }
-            else
-            {
-                headers[index] = framing;
-            }
-            // ponytail: the guard goes with the legacy path in Task 6 of the sealed-AddHeader
-            // plan, taking the whole block with it. A sealed request's Trailer field is one the
-            // caller added, so nothing here may drop or generate one.
-            if (!request.SealedHeaders && request.HasTrailers)
-            {
-                // Dropped whether or not one is generated, so a caller-supplied Trailer field
-                // cannot survive the suppression and reach the wire in its place.
-                Remove(headers, "Trailer");
-                if (emitTrailerHeader)
-                {
-                    headers.Add(new HeaderEntry(
-                        "Trailer",
-                        [string.Join(", ", request.Trailers.Select(trailer => trailer.Name))]));
-                }
-            }
         }
         return headers;
     }
