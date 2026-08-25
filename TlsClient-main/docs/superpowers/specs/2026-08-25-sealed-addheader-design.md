@@ -46,16 +46,17 @@ insertion-ordered, `Add(name, value)` appends a value while keeping the name's e
 position, `Snapshot()` returns `HeaderEntry[]`. No new collection type.
 
 ```csharp
-// TlsRequestOptions
+// TlsRequestOptions, beside the existing Trailers property
 public TlsHeaders Headers { get; } = new();
 
-/// <summary>Adds a header. This is the only way a field reaches the wire.</summary>
-public void AddHeader(string name, string value) => Headers.Add(name, value);
+// TlsRequestHeaderExtensions
+public static void AddHeader(this HttpRequestMessage request, string name, string value)
+    => TlsRequestOptions.For(request).Headers.Add(name, value);
 ```
 
-The method takes no `HttpRequestMessage`. Once nothing round-trips through
-`HttpRequestHeaders`, the request has no part in header composition, and an unused
-parameter would only imply otherwise.
+Two arguments, called on the request. `TlsRequestOptions.For(request)` already gets-or-creates
+the options object stored in `request.Options`, so the extension needs nothing threaded through
+the call site.
 
 Name validation is `TlsHeaders`' own (`InvalidNameCharacters`), so a malformed name
 throws at the call site rather than at send.
@@ -75,8 +76,11 @@ and the computed length.
    `SuppressSensitiveSessionHeaders` is set — a cross-origin redirect must not carry
    credentials to a new host. This survives unchanged.
 3. Strip `Proxy-Authorization`.
-4. Substitute the framing value in place: overwrite the caller's placeholder at the
-   `Content-Length` or `Transfer-Encoding` slot with the computed value.
+4. Substitute the framing field in place, at the slot the caller named. The **name** chosen
+   there decides the framing, not just the position: `Transfer-Encoding` forces chunked
+   whatever the body's length, and `Content-Length` takes the computed length. Naming
+   `Content-Length` for a body whose length is not known in advance — trailers, or a streaming
+   source — throws, rather than quietly emitting the other field.
 
 HTTP/2 `:authority` and HTTP/3's `host` → `:authority` mapping are unchanged. Those are
 pseudo-headers, governed by `PseudoHeaderOrder`, and are outside this contract.
@@ -102,6 +106,7 @@ exact bytes.
 | `Host` synthesis | `MergeHeaders` |
 | `Cookie` injection | `MergeHeaders`; `cookieHeader` parameter threaded through 27 sites |
 | `Trailer` emission | `MergeHeaders`, and the `emitTrailerHeader` flag with it |
+| `Connection: keep-alive` injection | `SerializeHeaders`; RFC 9112 section 9.3 makes HTTP/1.1 persistent by default, so omitting it is legal |
 
 No profile JSON documents exist on disk; profiles are declared in code. The schema change
 affects externally authored documents only.
@@ -111,6 +116,8 @@ affects externally authored documents only.
 - Body present, and the header list names neither `content-length` nor
   `transfer-encoding` → `InvalidOperationException` at build time. On HTTP/1.1 the
   alternative is a body the server cannot delimit, which is a hang, not a clean failure.
+- Body present, `content-length` named, but the length is not known in advance — trailers, or
+  a streaming source → `InvalidOperationException`. Name `transfer-encoding` instead.
 - `AddHeader` with a name that is not a valid token → `ArgumentException`, from
   `TlsHeaders`.
 
