@@ -122,6 +122,23 @@ public static class TlsPresets
         quic.PacketNumberEncodedLength = 1;
         quic.Token = ReadOnlyMemory<byte>.Empty;
         quic.PaddingTarget = 1200;
+
+        // NOT MEASURED — a deliberate accommodation, and the one value here that describes the
+        // local path rather than the captured client. The library default is 1472, the UDP
+        // payload that fills a 1500-byte Ethernet MTU exactly; on any smaller path — WireGuard
+        // 1420, PPPoE 1492, most VPNs, and a good many proxy egress links — that is a 1500-byte
+        // IP packet the interface will not carry, and because RFC 9000 s14 has the socket set
+        // Don't Fragment, Windows refuses the send with WSAEMSGSIZE (10040) rather than
+        // fragmenting. This preset is Http3Only and is used through a SOCKS5 UDP relay more
+        // often than not, so the tunnelled path is the common case rather than the exception.
+        // 1392 clears the usual tunnel MTUs with room for the relay's own RFC 1928 section 7
+        // header, which TlsQuicSocks5Transport charges on top of every datagram.
+        //
+        // It costs a little throughput on a genuine 1500-byte path. It is not a fingerprint
+        // axis worth defending: the captured Initial datagrams are 1200 either way, and a real
+        // device's post-handshake datagram sizes follow whatever path it is on.
+        quic.MaximumPathMtu = 1392;
+
         quic.HeaderLengthVarintWidth = TlsQuicVarintWidth.TwoBytes;
         quic.CryptoLengthVarintWidth = TlsQuicVarintWidth.TwoBytes;
         quic.CryptoOffsetVarintWidth = TlsQuicVarintWidth.Minimal;

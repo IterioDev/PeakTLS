@@ -34,6 +34,13 @@ public sealed class TlsPresetTests
         Assert.Equal([1, 1], options.Quic.InitialCryptoFramesPerDatagram);
         Assert.False(options.Quic.CoalesceAscendingByLevel);
 
+        // NOT A CAPTURED VALUE — the one local-path accommodation in this preset, pinned so the
+        // default cannot reach a size a tunnelled path refuses. The library default is 1472,
+        // which fills a 1500-byte MTU exactly and, with Don't Fragment set, fails the send with
+        // WSAEMSGSIZE on any smaller path. Asserted because it is the kind of value a later
+        // "align with the library default" tidy-up would silently undo.
+        Assert.Equal(1392, options.Quic.MaximumPathMtu);
+
         Assert.Equal(16_777_216UL, options.Quic.FlowControl.InitialMaxData);
         Assert.Equal(2_097_152UL, options.Quic.FlowControl.InitialMaxStreamDataBidiLocal);
         Assert.Equal(8UL, options.Quic.FlowControl.InitialMaxStreamsUni);

@@ -112,6 +112,14 @@ seven. `CreateOptions()` redraws the rotation each time.
 - **The reserved SETTINGS redraw cadence.** `TlsHttp3Options.Settings` is a list of literal
   pairs with no drawn slot, so it is redrawn per options object; the real client redraws
   per connection.
+- **`Quic.MaximumPathMtu`, pinned to 1392 and not a captured value at all.** It describes the
+  local path rather than the client. The library default is 1472 — the UDP payload that fills
+  a 1500-byte Ethernet MTU exactly — and RFC 9000 §14 has the socket set Don't Fragment, so on
+  a smaller path (WireGuard 1420, PPPoE 1492, most VPNs, many proxy egress links) the send is
+  refused with `WSAEMSGSIZE` rather than fragmented. This preset is `Http3Only` and is usually
+  driven through a SOCKS5 UDP relay, whose RFC 1928 §7 header is charged on top of every
+  datagram, so the tunnelled path is the common case. Raise it to 1472 if you know your path
+  carries a full 1500-byte MTU and you want the throughput back.
 
 ### Two header images, one QUIC shape
 
