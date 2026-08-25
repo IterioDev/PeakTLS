@@ -5,15 +5,14 @@ namespace TlsClient;
 
 /// <summary>
 /// A coherent preset pairing a SharpTls ClientHello with HTTP/2 settings, flow control,
-/// priorities, pseudo-header order and regular-header order.
-/// <para>A preset carries NO default headers. Every field on the wire is one the caller added
-/// to the request, in the order they added it; the declared header order only decides where a
-/// field lands when it is present. Nothing is sent on the caller's behalf.</para>
+/// priorities and pseudo-header order.
+/// <para>A preset carries NO headers and no header order. Every field on the wire is one the
+/// caller added to the request with <c>AddHeader</c>, in the order they added it. Nothing is
+/// sent on the caller's behalf.</para>
 /// </summary>
 public sealed class TlsPreset
 {
     private readonly Action<TlsHttp2Options> _configureHttp2;
-    private readonly string[] _headerOrder;
     private readonly TlsHttpVersionPolicy _versionPolicy;
     private readonly Action<TlsSessionOptions>? _configureTransport;
 
@@ -21,14 +20,12 @@ public sealed class TlsPreset
         string name,
         TlsProfile profile,
         Action<TlsHttp2Options> configureHttp2,
-        string[] headerOrder,
         TlsHttpVersionPolicy versionPolicy = TlsHttpVersionPolicy.PreferHttp2,
         Action<TlsSessionOptions>? configureTransport = null)
     {
         Name = name;
         Profile = profile;
         _configureHttp2 = configureHttp2;
-        _headerOrder = headerOrder;
         _versionPolicy = versionPolicy;
         _configureTransport = configureTransport;
     }
@@ -49,7 +46,6 @@ public sealed class TlsPreset
     {
         options.Profile = Profile;
         options.HttpVersionPolicy = _versionPolicy;
-        options.HeaderOrder = (string[])_headerOrder.Clone();
         _configureHttp2(options.Http2);
 
         // An h3 preset's shape lives in options.Quic and options.Http3, neither of which the
@@ -61,14 +57,6 @@ public sealed class TlsPreset
 /// <summary>Versioned TLS and HTTP/2 presets backed by SharpTls profiles.</summary>
 public static class TlsPresets
 {
-    /// <summary>
-    /// The header order of a Spotify iOS HTTP/3 POST to <c>login5.spotify.com/v3/login</c>.
-    /// SEVEN fields, and not a subset of the v4 order: <c>accept</c> leads, and there is no
-    /// <c>x-retry-count</c>, <c>cache-control</c> or <c>client-token</c>. Two endpoints on one
-    /// host with two header images, which is why the presets name the path and not the host.
-    /// </summary>
-
-
     /// <summary>
     /// Gets the passively-captured Spotify 9.1.76.2050 on iOS 27.0 (iPhone17,2) HTTP/3 preset.
     /// Its provenance differs from the other built-ins: it is decoded from the QUIC Initial
@@ -86,7 +74,8 @@ public static class TlsPresets
     /// algorithm and transport-parameter set was identical, with only the rotation offset and
     /// the GREASE values differing. That is why one preset covers every endpoint, and why there
     /// are no per-endpoint variants of it — those would have differed only in header order, and
-    /// header order is the caller's (see <see cref="TlsSessionOptions.HeaderOrder"/>).</para>
+    /// header order is the caller's — a field reaches the wire only when
+    /// <c>request.AddHeader</c> put it there.</para>
     /// <para>The Authorization and X-Client-Id slots are per-account credentials and are left
     /// empty; set them on the session and they take their captured positions. See
     /// docs/PRESETS.md for what remains unmeasured — every value under
@@ -98,10 +87,6 @@ public static class TlsPresets
         TlsProfiles.Spotify917602050IOS270Quic,
         static _ => { },
 
-        // NO header order, deliberately. Fields reach the wire in the order the caller added
-        // them; declaring one here would re-sort headers the caller had already put in order,
-        // and append anything this array did not name. The measured images are in USAGE.md.
-        [],
         TlsHttpVersionPolicy.Http3Only,
         ConfigureSpotifyIosQuic);
 

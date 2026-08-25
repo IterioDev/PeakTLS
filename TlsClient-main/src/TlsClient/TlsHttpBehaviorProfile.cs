@@ -44,12 +44,10 @@ public sealed class TlsHttpBehaviorProfile
     private TlsHttpBehaviorProfile(
         string name,
         TlsHttpVersionPolicy httpVersionPolicy,
-        string[] headerOrder,
         TlsHttp2Behavior http2)
     {
         Name = name;
         HttpVersionPolicy = httpVersionPolicy;
-        HeaderOrder = Array.AsReadOnly(headerOrder);
         Http2 = http2;
     }
 
@@ -58,9 +56,6 @@ public sealed class TlsHttpBehaviorProfile
 
     /// <summary>Gets the captured HTTP version and ALPN policy.</summary>
     public TlsHttpVersionPolicy HttpVersionPolicy { get; }
-
-    /// <summary>Gets preferred regular-header names in exact order.</summary>
-    public IReadOnlyList<string> HeaderOrder { get; }
 
     /// <summary>
     /// Gets the captured HTTP/2 connection behavior: the preface script, the HPACK policy,
@@ -81,13 +76,10 @@ public sealed class TlsHttpBehaviorProfile
             throw new ArgumentOutOfRangeException(nameof(options));
         }
 
-        var headerOrder = options.HeaderOrder?.ToArray() ?? [];
-        ValidateHeaderOrder(headerOrder);
         var http2 = options.Http2.Snapshot();
         return new TlsHttpBehaviorProfile(
             name,
             options.HttpVersionPolicy,
-            headerOrder,
             TlsHttp2Behavior.FromConfiguration(http2));
     }
 
@@ -135,16 +127,14 @@ public sealed class TlsHttpBehaviorProfile
         {
             throw new JsonException("The HTTP version policy is not defined.");
         }
-        if (document.HeaderOrder is null || document.Http2 is null)
+        if (document.Http2 is null)
         {
             throw new JsonException("The behavior document is missing required fields.");
         }
 
-        ValidateHeaderOrder(document.HeaderOrder);
         var profile = new TlsHttpBehaviorProfile(
             document.Name,
             document.HttpVersionPolicy,
-            (string[])document.HeaderOrder.Clone(),
             TlsHttp2Behavior.FromDocument(document.Http2));
 
         // Apply through the normal public option model so every production bound and
@@ -163,7 +153,6 @@ public sealed class TlsHttpBehaviorProfile
     {
         ArgumentNullException.ThrowIfNull(options);
         options.HttpVersionPolicy = HttpVersionPolicy;
-        options.HeaderOrder = HeaderOrder.ToArray();
         Http2.ApplyTo(options.Http2);
     }
 
@@ -172,7 +161,6 @@ public sealed class TlsHttpBehaviorProfile
         DocumentVersion,
         Name,
         HttpVersionPolicy,
-        HeaderOrder.ToArray(),
         Http2.ToDocument());
 
     private static JsonSerializerOptions CreateJsonOptions(bool writeIndented) => new()
@@ -183,17 +171,6 @@ public sealed class TlsHttpBehaviorProfile
         Converters = { new JsonStringEnumConverter() },
         MaxDepth = 32,
     };
-
-    private static void ValidateHeaderOrder(string[] headerOrder)
-    {
-        if (headerOrder.Length > 256 ||
-            headerOrder.Any(string.IsNullOrWhiteSpace) ||
-            headerOrder.Distinct(StringComparer.OrdinalIgnoreCase).Count() != headerOrder.Length)
-        {
-            throw new JsonException(
-                "Header order must contain at most 256 distinct, non-empty names.");
-        }
-    }
 
     private static void ValidateNoDuplicateProperties(JsonElement element)
     {
@@ -223,7 +200,6 @@ public sealed class TlsHttpBehaviorProfile
         int Version,
         string Name,
         TlsHttpVersionPolicy HttpVersionPolicy,
-        string[] HeaderOrder,
         Http2Document Http2);
 
     internal sealed record Http2Document(

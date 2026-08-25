@@ -27,44 +27,6 @@ public static class SpotifyHttp3Examples
     private const string UserAgent = "Spotify/9.1.76 iOS/27.0 (iPhone17,2)";
 
     /// <summary>
-    /// The captured header order of a Spotify iOS HTTP/3 GET to <c>spclient</c>, confirmed from
-    /// two independent capture paths. You do not need to set this - adding the fields in this
-    /// order achieves the same thing - and it is here so the target image is visible.
-    /// </summary>
-    private static readonly string[] SpclientGetOrder =
-    [
-        "accept",
-        "x-client-id",
-        "accept-encoding",
-        "priority",
-        "app-platform",
-        "user-agent",
-        "authorization",
-        "accept-language",
-        "spotify-app-version",
-    ];
-
-    /// <summary>
-    /// The captured order of the <c>login5.spotify.com</c> <c>/v4/login</c> POST. Note where the
-    /// content fields sit: <c>content-type</c> FIRST and <c>content-length</c> seventh of ten,
-    /// between <c>cache-control</c> and <c>user-agent</c>. Neither position is reachable by
-    /// insertion order, which is the whole reason a body request names its order.
-    /// </summary>
-    private static readonly string[] Login5PostOrder =
-    [
-        "content-type",
-        "accept",
-        "priority",
-        "accept-encoding",
-        "x-retry-count",
-        "cache-control",
-        "content-length",
-        "user-agent",
-        "accept-language",
-        "client-token",
-    ];
-
-    /// <summary>
     /// One session, one proxy, for the whole of its life. <c>options.Proxy</c> is set once and
     /// every request the session makes goes through it - there is no per-session "enable proxy"
     /// call and no way to lose it midway.
@@ -105,60 +67,31 @@ public static class SpotifyHttp3Examples
     {
         ArgumentNullException.ThrowIfNull(session);
 
-        // Added in SpclientGetOrder, so no HeaderOrder is set. Add them in a different order and
-        // that different order is what ships - the library does not second-guess you.
+        // The order you add them in is the order that ships. Nothing re-sorts it, and nothing
+        // is added on your behalf — this preset is Http3Only, so the authority travels as
+        // :authority and no host field is needed. On HTTP/1.1 or HTTP/2, add "host" yourself
+        // at the position you want it: RFC 9112 section 3.2 makes an absent one malformed.
         var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("accept", "*/*");
-        request.Headers.TryAddWithoutValidation("x-client-id", clientId);
-        request.Headers.TryAddWithoutValidation("accept-encoding", "gzip, deflate, br");
-        request.Headers.TryAddWithoutValidation("priority", "u=3, i");
-        request.Headers.TryAddWithoutValidation("app-platform", "iOS");
-        request.Headers.TryAddWithoutValidation("user-agent", UserAgent);
-        request.Headers.TryAddWithoutValidation("authorization", "Bearer " + bearerToken);
-        request.Headers.TryAddWithoutValidation("accept-language", "en-US,en;q=0.9");
-        request.Headers.TryAddWithoutValidation("spotify-app-version", "9.1.76.2050");
-
-        return session.SendAsync(request, cancellationToken);
-    }
-
-    /// <summary>
-    /// The same GET, ordered from the request itself. Use this when you are handed headers you
-    /// did not add in order: it restates the order you built rather than a hard-coded array.
-    /// </summary>
-    /// <remarks>
-    /// Over HTTP/3 this is equivalent to setting nothing. Over HTTP/1.1 or HTTP/2 it is NOT.
-    /// <c>Host</c> is generated rather than added, so it is absent from <c>request.Headers</c>,
-    /// and <c>Order</c> appends whatever the array does not name - which moves Host from first
-    /// to last. It is harmless here only because HTTP/3 drops Host and emits <c>:authority</c>
-    /// instead, and this preset is Http3Only. On any other transport, append <c>"host"</c>
-    /// yourself at the position you want it.
-    /// </remarks>
-    public static Task<TlsResponse> GetOrderedFromRequestAsync(
-        TlsSession session,
-        string url,
-        string bearerToken,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(session);
-
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("accept", "*/*");
-        request.Headers.TryAddWithoutValidation("user-agent", UserAgent);
-        request.Headers.TryAddWithoutValidation("authorization", "Bearer " + bearerToken);
-
-        TlsRequestOptions.For(request).HeaderOrder =
-            request.Headers.Select(header => header.Key).ToArray();
+        request.AddHeader("accept", "*/*");
+        request.AddHeader("x-client-id", clientId);
+        request.AddHeader("accept-encoding", "gzip, deflate, br");
+        request.AddHeader("priority", "u=3, i");
+        request.AddHeader("app-platform", "iOS");
+        request.AddHeader("user-agent", UserAgent);
+        request.AddHeader("authorization", "Bearer " + bearerToken);
+        request.AddHeader("accept-language", "en-US,en;q=0.9");
+        request.AddHeader("spotify-app-version", "9.1.76.2050");
 
         return session.SendAsync(request, cancellationToken);
     }
 
     /// <summary>A POST with a protobuf body, in the captured login-leg image.</summary>
     /// <remarks>
-    /// The order is stated because it HAS to be. <c>content-type</c> is set on
-    /// <c>request.Content.Headers</c>, the only collection that accepts it, and content headers
-    /// are appended after the request headers - so insertion order can never put it first.
-    /// <c>content-length</c> never appears in the code at all: it is recomputed from the body,
-    /// and naming it in the order is what decides where the generated field lands.
+    /// The content fields are added like any other, and land where they were added:
+    /// <c>content-type</c> FIRST and <c>content-length</c> seventh of ten, between
+    /// <c>cache-control</c> and <c>user-agent</c>. The <c>content-length</c> VALUE is a
+    /// placeholder — the real one is recomputed from the body — so only its position here
+    /// matters. A body with no <c>content-length</c> or <c>transfer-encoding</c> added throws.
     /// </remarks>
     public static Task<TlsResponse> PostLoginAsync(
         TlsSession session,
@@ -173,27 +106,27 @@ public static class SpotifyHttp3Examples
         {
             Content = new ReadOnlyMemoryContent(protobufBody),
         };
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/x-protobuf");
 
-        request.Headers.TryAddWithoutValidation("accept", "*/*");
-        request.Headers.TryAddWithoutValidation("priority", "u=3, i");
-        request.Headers.TryAddWithoutValidation("accept-encoding", "gzip, deflate, br");
-        request.Headers.TryAddWithoutValidation("x-retry-count", "0");
-        request.Headers.TryAddWithoutValidation("cache-control", "no-cache, no-store, max-age=0");
-        request.Headers.TryAddWithoutValidation("user-agent", UserAgent);
-        request.Headers.TryAddWithoutValidation("accept-language", "en-US,en;q=0.9");
-        request.Headers.TryAddWithoutValidation("client-token", clientToken);
-
-        TlsRequestOptions.For(request).HeaderOrder = Login5PostOrder;
+        request.AddHeader("content-type", "application/x-protobuf");
+        request.AddHeader("accept", "*/*");
+        request.AddHeader("priority", "u=3, i");
+        request.AddHeader("accept-encoding", "gzip, deflate, br");
+        request.AddHeader("x-retry-count", "0");
+        request.AddHeader("cache-control", "no-cache, no-store, max-age=0");
+        request.AddHeader("content-length", "-1");
+        request.AddHeader("user-agent", UserAgent);
+        request.AddHeader("accept-language", "en-US,en;q=0.9");
+        request.AddHeader("client-token", clientToken);
 
         return session.SendAsync(request, cancellationToken);
     }
 
-    /// <summary>A PUT with a JSON body, ordered from the request plus the content fields.</summary>
+    /// <summary>A PUT with a JSON body, with the content fields at either end.</summary>
     /// <remarks>
-    /// The derive-from-request idiom, corrected for a body: <c>request.Headers</c> cannot report
-    /// the content fields, so they are spliced in at the positions you want. Here
-    /// <c>content-type</c> leads and <c>content-length</c> trails.
+    /// <c>content-type</c> leads and <c>content-length</c> trails, both by insertion. Note that
+    /// the <c>StringContent</c> constructor's own <c>application/json; charset=utf-8</c> never
+    /// reaches the wire: <c>Content.Headers</c> is not read, so the exact bytes added here are
+    /// what ship.
     /// <para>PUT is idempotent, so it is eligible for the retry policy where POST is not.
     /// <c>TlsRequestOptions.EnableRetries</c> forces either answer per request.</para>
     /// </remarks>
@@ -211,18 +144,13 @@ public static class SpotifyHttp3Examples
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
         };
 
-        request.Headers.TryAddWithoutValidation("accept", "*/*");
-        request.Headers.TryAddWithoutValidation("priority", "u=3, i");
-        request.Headers.TryAddWithoutValidation("user-agent", UserAgent);
-        request.Headers.TryAddWithoutValidation("authorization", "Bearer " + bearerToken);
-        request.Headers.TryAddWithoutValidation("accept-language", "en-US,en;q=0.9");
-
-        TlsRequestOptions.For(request).HeaderOrder =
-        [
-            "content-type",
-            .. request.Headers.Select(header => header.Key),
-            "content-length",
-        ];
+        request.AddHeader("content-type", "application/json");
+        request.AddHeader("accept", "*/*");
+        request.AddHeader("priority", "u=3, i");
+        request.AddHeader("user-agent", UserAgent);
+        request.AddHeader("authorization", "Bearer " + bearerToken);
+        request.AddHeader("accept-language", "en-US,en;q=0.9");
+        request.AddHeader("content-length", "-1");
 
         return session.SendAsync(request, cancellationToken);
     }

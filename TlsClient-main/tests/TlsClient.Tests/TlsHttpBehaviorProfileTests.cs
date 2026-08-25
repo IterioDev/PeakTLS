@@ -9,9 +9,6 @@ public sealed class TlsHttpBehaviorProfileTests
     public void CaptureJsonImportApply_RoundTripsThePrefaceHpackStreamIdsOrderingAndPriority()
     {
         var source = new TlsSessionOptions();
-        // The vehicle used to be a preset, which brought a header order with it. The claim
-        // needs one - a round trip that carries null through cannot show the order survived.
-        source.HeaderOrder = ["user-agent", "accept", "accept-encoding"];
         source.Http2.HeaderPriority = new TlsHttp2Priority
         {
             StreamDependency = 1,
@@ -30,7 +27,6 @@ public sealed class TlsHttpBehaviorProfileTests
         var recaptured = TlsHttpBehaviorProfile.Capture("firefox-custom", target);
 
         Assert.Equal(json, recaptured.ExportJson());
-        Assert.Equal(source.HeaderOrder, imported.HeaderOrder);
         Assert.Equal("u=3, i", imported.Http2.PriorityUpdate);
         Assert.Equal(201, imported.Http2.HeaderPriority?.Weight);
         Assert.Equal(3, imported.Http2.InitialStreamId);
@@ -265,7 +261,6 @@ public sealed class TlsHttpBehaviorProfileTests
                 [
                     new TlsHttp2SettingsFrame { Settings = [new(0x1, 65_536), new(0x4, 6_291_456)] },
                 ];
-                options.HeaderOrder = ["user-agent", "accept"];
                 break;
 
             case "priority-and-odd-steps":
@@ -281,7 +276,6 @@ public sealed class TlsHttpBehaviorProfileTests
                 };
                 options.Http2.InitialStreamId = 3;
                 options.Http2.StreamIdStep = 4;
-                options.HeaderOrder = ["accept", "user-agent"];
                 break;
 
             default:

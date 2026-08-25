@@ -385,8 +385,6 @@ TlsClient.TlsRequestOptions.FramesAfterHeaders.get -> System.Collections.Generic
 TlsClient.TlsRequestOptions.FramesAfterHeaders.set -> void
 TlsClient.TlsRequestOptions.FramesBeforeHeaders.get -> System.Collections.Generic.IReadOnlyList<TlsClient.TlsHttp2RequestFrame!>!
 TlsClient.TlsRequestOptions.FramesBeforeHeaders.set -> void
-TlsClient.TlsRequestOptions.HeaderOrder.get -> System.Collections.Generic.IReadOnlyList<string!>?
-TlsClient.TlsRequestOptions.HeaderOrder.set -> void
 TlsClient.TlsRequestOptions.HeaderPriority.get -> TlsClient.TlsHttp2Priority?
 TlsClient.TlsRequestOptions.HeaderPriority.set -> void
 TlsClient.TlsRequestOptions.Headers.get -> TlsClient.TlsHeaders!
@@ -414,4 +412,3 @@ static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte
 static TlsClient.TlsQuicTransportParameterEntry.Literal(ulong id, System.ReadOnlySpan<byte> value) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Placed(ulong id) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsRequestHeaderExtensions.AddHeader(this System.Net.Http.HttpRequestMessage! request, string! name, string! value) -> void
-static TlsClient.TlsRequestOptions.HeaderNamesOf(System.Net.Http.HttpRequestMessage! request) -> string![]!

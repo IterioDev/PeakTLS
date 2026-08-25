@@ -31,12 +31,6 @@ internal sealed record BufferedRequest(
     /// <summary>Frames written immediately after the HTTP/2 header block. Ignored on HTTP/1.1.</summary>
     public TlsHttp2RequestFrameConfiguration[] FramesAfterHeaders { get; init; } = [];
 
-    /// <summary>
-    /// Header order for this request, or null for the session value. The one per-request
-    /// override that applies to HTTP/1.1 as well, because both writers share one routine.
-    /// </summary>
-    public string[]? HeaderOrder { get; init; }
-
     /// <summary>Pseudo-header order, or null for the session value. Ignored on HTTP/1.1.</summary>
     public string[]? PseudoHeaderOrder { get; init; }
 
@@ -182,7 +176,6 @@ internal sealed record BufferedRequest(
             EnableRetries = requestConfiguration.EnableRetries,
             FramesBeforeHeaders = requestConfiguration.FramesBeforeHeaders,
             FramesAfterHeaders = requestConfiguration.FramesAfterHeaders,
-            HeaderOrder = requestConfiguration.HeaderOrder,
             PseudoHeaderOrder = requestConfiguration.PseudoHeaderOrder,
             HeaderPriority = requestConfiguration.HeaderPriority,
             PriorityUpdate = requestConfiguration.PriorityUpdate,
@@ -233,7 +226,6 @@ internal sealed record BufferedRequest(
             EnableRetries = requestConfiguration.EnableRetries,
             FramesBeforeHeaders = requestConfiguration.FramesBeforeHeaders,
             FramesAfterHeaders = requestConfiguration.FramesAfterHeaders,
-            HeaderOrder = requestConfiguration.HeaderOrder,
             PseudoHeaderOrder = requestConfiguration.PseudoHeaderOrder,
             HeaderPriority = requestConfiguration.HeaderPriority,
             PriorityUpdate = requestConfiguration.PriorityUpdate,

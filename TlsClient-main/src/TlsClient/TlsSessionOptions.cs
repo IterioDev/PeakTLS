@@ -140,12 +140,6 @@ public sealed class TlsSessionOptions
     /// </summary>
     public Action<TlsHandshakeDiagnostic>? HandshakeObserver { get; set; }
 
-    /// <summary>
-    /// Gets or sets an optional preferred regular-header order. Names not listed here follow
-    /// in insertion order. This does not reorder the request line.
-    /// </summary>
-    public IReadOnlyList<string>? HeaderOrder { get; set; }
-
     /// <summary>Gets additional certificate SPKI pins.</summary>
     public TlsCertificatePins CertificatePins { get; } = new();
 
@@ -258,8 +252,6 @@ public sealed class TlsSessionOptions
                 nameof(RequestPolicies));
         }
 
-        var headerOrder = ValidateHeaderOrder(HeaderOrder, nameof(HeaderOrder));
-
         return new TlsSessionConfiguration(
             Profile,
             EchDnsResolver,
@@ -289,31 +281,12 @@ public sealed class TlsSessionOptions
             DnsResolver,
             ConnectObserver,
             HandshakeObserver,
-            headerOrder,
             CertificatePins.Snapshot(),
             DangerouslySkipServerCertificateValidation,
             ClientCertificates.Snapshot(),
             ConfigureTls);
     }
 
-    /// <summary>
-    /// Validates a header order, session-wide or per request. Shared so a
-    /// <see cref="TlsRequestOptions.HeaderOrder"/> override is held to the same rule.
-    /// </summary>
-    internal static string[] ValidateHeaderOrder(
-        IReadOnlyList<string>? order,
-        string parameterName)
-    {
-        var declared = order?.ToArray() ?? [];
-        if (declared.Any(string.IsNullOrWhiteSpace) ||
-            declared.Distinct(StringComparer.OrdinalIgnoreCase).Count() != declared.Length)
-        {
-            throw new ArgumentException(
-                "HeaderOrder must contain distinct, non-empty names.",
-                parameterName);
-        }
-        return declared;
-    }
 }
 
 internal sealed record TlsSessionConfiguration(
@@ -345,7 +318,6 @@ internal sealed record TlsSessionConfiguration(
     Func<string, CancellationToken, ValueTask<IReadOnlyList<IPAddress>>>? DnsResolver,
     Action<TlsConnectEvent>? ConnectObserver,
     Action<TlsHandshakeDiagnostic>? HandshakeObserver,
-    string[] HeaderOrder,
     TlsCertificatePins CertificatePins,
     bool DangerouslySkipServerCertificateValidation,
     TlsClientCertificateConfiguration ClientCertificates,
