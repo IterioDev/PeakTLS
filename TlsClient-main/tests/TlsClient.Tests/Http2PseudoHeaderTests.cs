@@ -323,7 +323,7 @@ public sealed class Http2PseudoHeaderTests
             _ => { },
             message =>
             {
-                message.Headers.TryAddWithoutValidation("Host", "elsewhere.test");
+                message.AddHeader("Host", "elsewhere.test");
                 TlsRequestOptions.For(message).AuthorityMode = TlsHttp2AuthorityMode.Both;
             },
             HttpMethod.Get);
@@ -485,7 +485,7 @@ public sealed class Http2PseudoHeaderTests
                 async (session, url, cancellationToken) =>
                 {
                     using var request = new HttpRequestMessage(method, url);
-                    request.Headers.TryAddWithoutValidation("Host", authority);
+                    request.AddHeader("Host", authority);
                     // A rejected request is not a transport failure, so the session would
                     // replay it onto a second connection the single-accept harness cannot
                     // provide, and the test would hang for the harness's full timeout.
@@ -522,10 +522,10 @@ public sealed class Http2PseudoHeaderTests
             async (session, url, cancellationToken) =>
             {
                 using var request = new HttpRequestMessage(method ?? HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("Host", authority);
+                request.AddHeader("Host", authority);
                 foreach (var header in extraHeaders ?? [])
                 {
-                    request.Headers.TryAddWithoutValidation(header.Name, header.Value);
+                    request.AddHeader(header.Name, header.Value);
                 }
                 configureRequest(TlsRequestOptions.For(request));
                 return await session.SendAsync(request, cancellationToken);

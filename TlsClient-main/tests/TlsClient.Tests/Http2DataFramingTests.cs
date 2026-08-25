@@ -147,6 +147,7 @@ public sealed class Http2DataFramingTests
                 {
                     Content = new ByteArrayContent(body),
                 };
+                request.AddHeader("content-length", "-1");
                 var requestOptions = TlsRequestOptions.For(request);
                 requestOptions.DataPadding = 64;
                 // The rejection lands after HEADERS, so a retry would open a second stream
@@ -270,6 +271,7 @@ public sealed class Http2DataFramingTests
                 {
                     Content = content,
                 };
+                message.AddHeader("transfer-encoding", "chunked");
                 Assert.Null(content.Headers.ContentLength);
                 await using var responseBody = new MemoryStream();
                 return await session.SendStreamingAsync(
@@ -355,6 +357,7 @@ public sealed class Http2DataFramingTests
                 {
                     Content = new ByteArrayContent(NewBody(BodyOctets)),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).DataPadding = 8;
                 return await session.SendAsync(request, cancellationToken);
             });
@@ -383,6 +386,7 @@ public sealed class Http2DataFramingTests
         {
             Content = new ByteArrayContent(NewBody(BodyOctets)),
         };
+        request.AddHeader("content-length", "-1");
         return session.SendAsync(request, cancellationToken);
     }
 
@@ -393,6 +397,7 @@ public sealed class Http2DataFramingTests
     {
         using var content = new StreamContent(new MemoryStream(NewBody(BodyOctets)));
         using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+        message.AddHeader("transfer-encoding", "chunked");
         await using var responseBody = new MemoryStream();
         return await session.SendStreamingAsync(
             message,
@@ -503,6 +508,7 @@ public sealed class Http2DataFramingTests
                 {
                     Content = new ByteArrayContent(body),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).DataPadding = padding;
                 return await session.SendAsync(request, cancellationToken);
             },
