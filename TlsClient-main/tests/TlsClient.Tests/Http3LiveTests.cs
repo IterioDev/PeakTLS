@@ -78,7 +78,6 @@ public sealed class Http3LiveTests
         var response = await connection.SendAsync(
             Get(new HeaderEntry("User-Agent", ["TlsClient-Http3-Live"])),
             null,
-            null,
             configuration,
             CancellationToken.None);
 
@@ -115,11 +114,11 @@ public sealed class Http3LiveTests
         await using var connection = await ConnectAsync(configuration);
 
         var first = await connection.SendAsync(
-            Get(), null, null, configuration, CancellationToken.None);
+            Get(), null, configuration, CancellationToken.None);
         Assert.True(connection.IsReusable);
 
         var second = await connection.SendAsync(
-            Get(), null, null, configuration, CancellationToken.None);
+            Get(), null, configuration, CancellationToken.None);
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
@@ -172,7 +171,6 @@ public sealed class Http3LiveTests
                 payload,
                 HasContent: true),
             null,
-            null,
             configuration,
             CancellationToken.None);
 
@@ -213,7 +211,6 @@ public sealed class Http3LiveTests
                 [],
                 Encoding.UTF8.GetBytes("peaktls-h3-post"),
                 HasContent: true),
-            null,
             null,
             configuration,
             CancellationToken.None);
@@ -257,7 +254,7 @@ public sealed class Http3LiveTests
 
         var exception = await Assert.ThrowsAsync<TlsHttpProtocolException>(async () =>
             await connection.SendAsync(
-                request, null, null, configuration, CancellationToken.None));
+                request, null, configuration, CancellationToken.None));
 
         Assert.Contains("content-length", exception.Message, StringComparison.Ordinal);
         Assert.Contains("4.1.2", exception.Message, StringComparison.Ordinal);
@@ -291,7 +288,7 @@ public sealed class Http3LiveTests
 
         var exception = await Assert.ThrowsAsync<TlsHttpProtocolException>(async () =>
             await connection.SendAsync(
-                request, null, null, configuration, CancellationToken.None));
+                request, null, configuration, CancellationToken.None));
 
         Assert.Contains(
             "initial_max_stream_data_bidi_remote",
@@ -337,13 +334,19 @@ public sealed class Http3LiveTests
             new BufferedRequest(
                 "POST",
                 new Uri($"https://{FingerprintHost}{FingerprintPath}"),
-                [new HeaderEntry("Content-Type", ["text/plain"])],
+                [
+                    new HeaderEntry("Content-Type", ["text/plain"]),
+                    // Trailers force chunked framing, so the slot names Transfer-Encoding —
+                    // dropped over HTTP/3 by RFC 9114 section 4.2. The Trailer field is added
+                    // too, because nothing generates one from the trailer list.
+                    new HeaderEntry("Transfer-Encoding", ["chunked"]),
+                    new HeaderEntry("Trailer", ["Checksum"]),
+                ],
                 payload,
                 HasContent: true)
             {
                 Trailers = [new HeaderEntry("Checksum", ["abc123"])],
             },
-            null,
             null,
             configuration,
             CancellationToken.None);
@@ -379,7 +382,6 @@ public sealed class Http3LiveTests
 
         var response = await connection.SendAsync(
             Get(),
-            null,
             streaming,
             configuration,
             CancellationToken.None);
@@ -414,7 +416,6 @@ public sealed class Http3LiveTests
 
         async Task<ParsedHttpResponse> OneAsync() => await connection.SendAsync(
             Get(new HeaderEntry("User-Agent", ["TlsClient-Http3-Live"])),
-            null,
             null,
             configuration,
             CancellationToken.None);

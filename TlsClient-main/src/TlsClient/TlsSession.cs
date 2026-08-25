@@ -251,6 +251,14 @@ public sealed class TlsSession : IAsyncDisposable, IDisposable
         CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, url) { Content = content };
+        if (content is not null)
+        {
+            // This overload builds the request, so it is the one adding the fields. A body needs
+            // a framing slot; the value is a placeholder, since the real length is always
+            // computed. Callers who care where the field sits build the request themselves and
+            // add the slot where the client they are reproducing puts it.
+            request.AddHeader("Content-Length", "-1");
+        }
         return await SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 

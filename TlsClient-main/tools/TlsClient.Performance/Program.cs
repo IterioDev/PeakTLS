@@ -40,10 +40,10 @@ var clientHello = TlsClientHello.BuildSnapshotForTesting(
 var results = new[]
 {
     Measure("http1-parse", 10_000, () => ParseHttp11(response)),
-    Measure("http1-serialize", 30_000, () => Http11RequestWriter.SerializeHeaders(
-        request,
-        ["Host", "User-Agent", "Accept", "Accept-Encoding"],
-        null).Length),
+    Measure(
+        "http1-serialize",
+        30_000,
+        () => Http11RequestWriter.SerializeHeaders(request).Length),
     Measure("hpack-decode", 30_000, () =>
         new HpackDecoder(4096).Decode(hpackBlock, 16 * 1024).Count),
     Measure("clienthello-diagnostics", 10_000, () =>

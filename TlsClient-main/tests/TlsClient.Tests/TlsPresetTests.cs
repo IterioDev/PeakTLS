@@ -71,11 +71,6 @@ public sealed class TlsPresetTests
             options.Http3.Settings[2].Draw!().Identifier % 0x1FUL);
         Assert.DoesNotContain(options.Http3.Settings, s => s.Identifier == 0x06);
 
-        // NO header order. Insertion order is what reaches the wire, so a preset declaring one
-        // would re-sort headers the caller had already put in order and append anything it did
-        // not name. The measured images are recorded in USAGE.md instead.
-        Assert.Empty(options.HeaderOrder!);
-
         // Control, encoder, decoder — measured in 4 of 4 proxy captures. NOTE WHAT THIS CANNOT
         // DO: SharpTls's default is currently the same order, so deleting the preset's pin today
         // would NOT fail this. What it does catch is the dangerous case — a later change to the

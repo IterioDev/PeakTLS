@@ -8,18 +8,13 @@ internal static class Http11RequestWriter
     private static readonly SearchValues<char> InvalidMethodCharacters = SearchValues.Create(
         "()<>@,;:\\\"/[]?={} \t\r\n");
 
-    public static byte[] SerializeHeaders(
-        BufferedRequest request,
-        string[] preferredOrder,
-        string? cookieHeader)
+    public static byte[] SerializeHeaders(BufferedRequest request)
     {
-        var headers = MergeHeaders(request, cookieHeader);
-        if (!Contains(headers, "Connection"))
-        {
-            headers.Add(new HeaderEntry("Connection", ["keep-alive"]));
-        }
+        // No Connection field is generated. RFC 9112 section 9.3 makes HTTP/1.1 persistent by
+        // default, so a request that does not add one simply does not send one — and an
+        // unrequested keep-alive is a field no capture shows.
+        var headers = MergeHeaders(request);
 
-        headers = Order(headers, preferredOrder);
         // RFC 9112 section 3.2.3: "When making a CONNECT request to establish a tunnel through
         // one or more proxies, a client MUST send only the host and port of the tunnel
         // destination as the request-target ... except that it sends the scheme's default port
@@ -58,15 +53,10 @@ internal static class Http11RequestWriter
         return Encoding.Latin1.GetBytes(builder.ToString());
     }
 
-    // emitTrailerHeader decides whether a request carrying trailers also gets a Trailer
-    // field naming them, the field RFC 9110 section 6.6.2 defines for that purpose. Only the
-    // HTTP/2 header builder ever passes false: the switch lives on
-    // TlsHttp2Options.EmitTrailerHeader because it is HTTP/2 clients that generally omit the
-    // field, and the HTTP/1.1 callers here have no HTTP/2 session to read it from.
-    internal static List<HeaderEntry> MergeHeaders(
-        BufferedRequest request,
-        string? cookieHeader,
-        bool emitTrailerHeader = true)
+    // No Trailer field is generated either. RFC 9110 section 6.6.2 defines one for announcing
+    // trailers, and a request that wants it adds it — which is also why the session-level
+    // switch that used to decide this is gone.
+    internal static List<HeaderEntry> MergeHeaders(BufferedRequest request)
     {
         // Every field is the request's own, in the order the caller added it. There is no
         // session-level header set to merge over, so nothing can silently take a position the
@@ -87,75 +77,49 @@ internal static class Http11RequestWriter
 
         Remove(headers, "Proxy-Authorization");
 
-        // A caller may reserve the body-framing field's POSITION by declaring Content-Length or
-        // Transfer-Encoding with any value at all — the value is always recomputed, so a
-        // placeholder like "-1" is fine and only the slot survives. Without this the generated
-        // field is appended, which no captured client does: real ones interleave it.
-        var framingAnchor = FramingAnchor(headers);
-        Remove(headers, "Content-Length");
-        Remove(headers, "Transfer-Encoding");
-
-        if (!Contains(headers, "Host"))
-        {
-            // RFC 9113 section 8.5 defines a plain CONNECT's ":authority" as "the host and port
-            // to connect to (equivalent to the authority-form of the request-target of CONNECT
-            // requests; see Section 3.2.3 of [HTTP/1.1])", and RFC 9112 section 3.2.3 makes the
-            // port mandatory in that form. Http2Connection.BuildRequestHeaders reads
-            // ":authority" out of this very field, so a default port elided here reaches the
-            // wire as a CONNECT that "does not conform to these restrictions" and is therefore
-            // malformed (section 8.5). RFC 8441 section 4 hands ":authority" back to ordinary
-            // section 8.3.1 semantics once ":protocol" is present, so extended CONNECT elides a
-            // default port like every other method.
-            var connectAuthority =
-                string.Equals(request.Method, "CONNECT", StringComparison.Ordinal) &&
-                request.Protocol is null;
-            headers.Insert(
-                0,
-                new HeaderEntry("Host", [FormatAuthority(request.Url, connectAuthority)]));
-        }
-        if (!Contains(headers, "Cookie") && !string.IsNullOrEmpty(cookieHeader))
-        {
-            headers.Add(new HeaderEntry("Cookie", [cookieHeader]));
-        }
+        // No Host is synthesised and no Cookie is injected. A request sends the fields it added
+        // and no others, so an absent Host — malformed over HTTP/1.1 by RFC 9112 section 3.2 —
+        // is the caller's to fix rather than this routine's to paper over, and the session's
+        // cookie container records Set-Cookie without ever contributing a request field.
+        // FormatAuthority survives for the HTTP/2 and HTTP/3 :authority fallback, which reads
+        // the Host field when one was added and derives the authority from the URL when not.
         if (request.HasPayload)
         {
-            if (!request.HasTrailers && request.ContentLength is { } contentLength)
+            // The caller reserves the body-framing field's POSITION by adding Content-Length or
+            // Transfer-Encoding with any value at all — the value is always recomputed, so a
+            // placeholder like "-1" is fine and only the slot survives. Without a slot the field
+            // would have to be appended, which no captured client does: real ones interleave it,
+            // so an appended one is a distinguisher. The NAME chosen there decides the framing.
+            var index = IndexOfFraming(headers);
+            if (index < 0)
             {
-                InsertFraming(
-                    headers,
-                    framingAnchor,
-                    new HeaderEntry(
-                        "Content-Length",
-                        [contentLength.ToString(System.Globalization.CultureInfo.InvariantCulture)]));
+                throw new InvalidOperationException(
+                    "The request has a body, but its header list names neither Content-Length " +
+                    "nor Transfer-Encoding. Call request.AddHeader with one of them to place " +
+                    "the body-framing field.");
             }
-            else
+            var lengthKnown = !request.HasTrailers && request.ContentLength is not null;
+            var chunked = headers[index].Name.Equals(
+                "Transfer-Encoding", StringComparison.OrdinalIgnoreCase);
+            if (!chunked && !lengthKnown)
             {
-                InsertFraming(
-                    headers,
-                    framingAnchor,
-                    new HeaderEntry("Transfer-Encoding", ["chunked"]));
+                throw new InvalidOperationException(
+                    "The request names Content-Length, but its body length is not known in " +
+                    "advance. Name Transfer-Encoding instead.");
             }
-            if (request.HasTrailers)
-            {
-                // Dropped whether or not one is generated, so a caller-supplied Trailer field
-                // cannot survive the suppression and reach the wire in its place.
-                Remove(headers, "Trailer");
-                if (emitTrailerHeader)
-                {
-                    headers.Add(new HeaderEntry(
-                        "Trailer",
-                        [string.Join(", ", request.Trailers.Select(trailer => trailer.Name))]));
-                }
-            }
+            headers[index] = chunked
+                ? new HeaderEntry("Transfer-Encoding", ["chunked"])
+                : new HeaderEntry(
+                    "Content-Length",
+                    [request.ContentLength!.Value.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture)]);
         }
         return headers;
     }
 
-    internal static bool Has100Continue(
-        BufferedRequest request,
-        string? cookieHeader)
+    internal static bool Has100Continue(BufferedRequest request)
     {
-        var headers = MergeHeaders(request, cookieHeader);
+        var headers = MergeHeaders(request);
         return headers
             .Where(header => header.Name.Equals("Expect", StringComparison.OrdinalIgnoreCase))
             .SelectMany(header => header.Values)
@@ -206,73 +170,36 @@ internal static class Http11RequestWriter
         return uri.IsDefaultPort && !includeDefaultPort ? host : $"{host}:{uri.Port}";
     }
 
-    internal static List<HeaderEntry> Order(List<HeaderEntry> headers, string[] preferredOrder)
-    {
-        if (preferredOrder.Length == 0)
-        {
-            return headers;
-        }
-
-        var ordered = new List<HeaderEntry>(headers.Count);
-        foreach (var name in preferredOrder)
-        {
-            var index = headers.FindIndex(header =>
-                string.Equals(header.Name, name, StringComparison.OrdinalIgnoreCase));
-            if (index < 0)
-            {
-                continue;
-            }
-            ordered.Add(headers[index]);
-            headers.RemoveAt(index);
-        }
-        ordered.AddRange(headers);
-        return ordered;
-    }
+    /// <summary>
+    /// The authority a request conveys when it added no Host field of its own — the value the
+    /// HTTP/2 and HTTP/3 <c>:authority</c> fallback uses.
+    /// </summary>
+    /// <remarks>
+    /// RFC 9113 section 8.5 defines a plain CONNECT's <c>:authority</c> as "the host and port to
+    /// connect to (equivalent to the authority-form of the request-target of CONNECT requests;
+    /// see Section 3.2.3 of [HTTP/1.1])", and RFC 9112 section 3.2.3 makes the port mandatory in
+    /// that form, so a default port elided here reaches the wire as a CONNECT that "does not
+    /// conform to these restrictions" and is therefore malformed. RFC 8441 section 4 hands
+    /// <c>:authority</c> back to ordinary section 8.3.1 semantics once <c>:protocol</c> is
+    /// present, so an extended CONNECT elides a default port like every other method.
+    /// <para>The rule lives here rather than in the field section because <c>:authority</c> is a
+    /// pseudo-header: nothing synthesises a Host field, so a request that wants one adds it, and
+    /// the value it added wins over this.</para>
+    /// </remarks>
+    internal static string AuthorityFor(BufferedRequest request) => FormatAuthority(
+        request.Url,
+        string.Equals(request.Method, "CONNECT", StringComparison.Ordinal) &&
+            request.Protocol is null);
 
     /// <summary>
-    /// Reports the slot a caller reserved for the body-framing field: the name of the header it
-    /// sat behind, or null when it was first. <c>Reserved</c> is false when no slot was declared,
-    /// in which case the generated field is appended as before.
+    /// Reports the index of the framing slot the caller reserved, or -1. The NAME chosen there
+    /// decides the framing, not only the position: Transfer-Encoding forces chunked whatever the
+    /// body's length, and Content-Length takes the computed length.
     /// </summary>
-    private static (bool Reserved, string? Behind) FramingAnchor(List<HeaderEntry> headers)
-    {
-        for (var index = 0; index < headers.Count; index++)
-        {
-            var name = headers[index].Name;
-            if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
-            {
-                return (true, index == 0 ? null : headers[index - 1].Name);
-            }
-        }
-        return (false, null);
-    }
-
-    /// <summary>
-    /// Places the generated body-framing field in the slot <see cref="FramingAnchor"/> found, or
-    /// appends it when the caller reserved none.
-    /// </summary>
-    private static void InsertFraming(
-        List<HeaderEntry> headers,
-        (bool Reserved, string? Behind) anchor,
-        HeaderEntry entry)
-    {
-        if (!anchor.Reserved)
-        {
-            headers.Add(entry);
-            return;
-        }
-        if (anchor.Behind is null)
-        {
-            // The slot was first. Host is synthesised at index 0 for HTTP/1.1 and must stay
-            // there, so land immediately after it when it is present.
-            headers.Insert(Contains(headers, "Host") ? 1 : 0, entry);
-            return;
-        }
-        var behind = headers.FindIndex(header =>
-            string.Equals(header.Name, anchor.Behind, StringComparison.OrdinalIgnoreCase));
-        headers.Insert(behind < 0 ? headers.Count : behind + 1, entry);
-    }
+    private static int IndexOfFraming(List<HeaderEntry> headers) =>
+        headers.FindIndex(header =>
+            header.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) ||
+            header.Name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase));
 
     internal static bool Contains(List<HeaderEntry> headers, string name) => headers.Any(
         header => string.Equals(header.Name, name, StringComparison.OrdinalIgnoreCase));

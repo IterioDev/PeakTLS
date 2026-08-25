@@ -29,14 +29,20 @@ public sealed class Http3RequestContentTests
         return options.Snapshot();
     }
 
+    // A body needs a framing slot, and the NAME chosen there decides the framing. The value is
+    // a placeholder: only the position survives, and the real one is always computed.
+    private static HeaderEntry Length => new("Content-Length", ["-1"]);
+
+    private static HeaderEntry Chunked => new("Transfer-Encoding", ["chunked"]);
+
     private static BufferedRequest Buffered(byte[] body, bool hasContent = true) =>
-        new("POST", Url, [], body, hasContent);
+        new("POST", Url, hasContent ? [Length] : [], body, hasContent);
 
     private static BufferedRequest Streaming(byte[] body, int bufferSize = 8) =>
         new(
             "POST",
             Url,
-            [],
+            [Chunked],
             [],
             HasContent: true,
             TlsHttpVersionPolicy.PreferHttp2,
@@ -181,7 +187,7 @@ public sealed class Http3RequestContentTests
         TlsSessionConfiguration? configuration = null)
     {
         configuration ??= Configuration();
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, configuration, CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, configuration, CancellationToken.None);
 
         var encoded = new List<byte>();
         var succeeded = encodable.TryEncode(encoded, new TlsQuicHttp3Spec(), out var error);
@@ -220,14 +226,14 @@ public sealed class Http3RequestContentTests
         var request = new BufferedRequest(
             "PUT",
             new Uri("https://example.com/deep/path?q=1"),
-            [],
+            [Chunked],
             payload,
             HasContent: true)
         {
             Trailers = [new HeaderEntry("Checksum", ["abc"])],
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("PUT", encodable.Method);
         Assert.Equal("https", encodable.Scheme);
@@ -254,7 +260,7 @@ public sealed class Http3RequestContentTests
             PathOverride = string.Empty,
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("/", encodable.Path);
         Assert.Empty(encodable.Body);
@@ -270,7 +276,7 @@ public sealed class Http3RequestContentTests
             PathOverride = "*",
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("*", encodable.Path);
     }
@@ -312,7 +318,7 @@ public sealed class Http3RequestContentTests
     [Fact]
     public async Task TrailersFollowTheBodyAsASecondHeadersFrame()
     {
-        var request = new BufferedRequest("POST", Url, [], "body"u8.ToArray(), HasContent: true)
+        var request = new BufferedRequest("POST", Url, [Chunked], "body"u8.ToArray(), HasContent: true)
         {
             Trailers = [new HeaderEntry("Checksum", ["abc"])],
         };
@@ -353,14 +359,14 @@ public sealed class Http3RequestContentTests
         var request = new BufferedRequest(
             "POST",
             Url,
-            [],
+            [Length],
             [],
             HasContent: true,
             TlsHttpVersionPolicy.PreferHttp2,
             content);
         var configuration = Configuration();
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, configuration, CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, configuration, CancellationToken.None);
         Assert.Contains(
             encodable.Fields, field => field is { Name: "content-length", Value: "500" });
         Assert.Equal(4, encodable.Body.Length);

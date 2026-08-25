@@ -54,7 +54,7 @@ public sealed class Http3BoringSslInteropTests
             await using var session = new TlsSession(options);
 
             var request = new HttpRequestMessage(HttpMethod.Get, $"https://{host}/");
-            request.Headers.TryAddWithoutValidation("accept", "*/*");
+            request.AddHeader("accept", "*/*");
             var response = await session.SendAsync(request);
 
             Assert.Equal("3", response.HttpVersion.ToString().Split('.')[0]);

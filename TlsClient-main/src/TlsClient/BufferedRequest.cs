@@ -31,12 +31,6 @@ internal sealed record BufferedRequest(
     /// <summary>Frames written immediately after the HTTP/2 header block. Ignored on HTTP/1.1.</summary>
     public TlsHttp2RequestFrameConfiguration[] FramesAfterHeaders { get; init; } = [];
 
-    /// <summary>
-    /// Header order for this request, or null for the session value. The one per-request
-    /// override that applies to HTTP/1.1 as well, because both writers share one routine.
-    /// </summary>
-    public string[]? HeaderOrder { get; init; }
-
     /// <summary>Pseudo-header order, or null for the session value. Ignored on HTTP/1.1.</summary>
     public string[]? PseudoHeaderOrder { get; init; }
 
@@ -149,14 +143,16 @@ internal sealed record BufferedRequest(
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
 
-        var entries = new List<HeaderEntry>();
-        AddOrReplace(entries, request.Headers.NonValidated);
+        // The field section, whole. request.Headers and request.Content.Headers are not read:
+        // .NET rejects the Content-* family on the former and appends the latter, so neither can
+        // express the position a captured client puts a content field in, and both reflow values
+        // on the way in.
+        var entries = new List<HeaderEntry>(requestConfiguration.Headers);
 
         byte[] body = [];
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            AddOrReplace(entries, request.Content.Headers.NonValidated);
             body = await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
             if (body.Length > maximumBodyBytes)
             {
@@ -180,7 +176,6 @@ internal sealed record BufferedRequest(
             EnableRetries = requestConfiguration.EnableRetries,
             FramesBeforeHeaders = requestConfiguration.FramesBeforeHeaders,
             FramesAfterHeaders = requestConfiguration.FramesAfterHeaders,
-            HeaderOrder = requestConfiguration.HeaderOrder,
             PseudoHeaderOrder = requestConfiguration.PseudoHeaderOrder,
             HeaderPriority = requestConfiguration.HeaderPriority,
             PriorityUpdate = requestConfiguration.PriorityUpdate,
@@ -202,11 +197,11 @@ internal sealed record BufferedRequest(
         var requestConfiguration = TlsRequestOptions.Snapshot(request);
         var (method, url, entries, versionPolicy) = ReadMetadata(
             request,
-            sessionVersionPolicy);
+            sessionVersionPolicy,
+            requestConfiguration.Headers);
         var hasContent = request.Content is not null;
         if (request.Content is not null)
         {
-            AddOrReplace(entries, request.Content.Headers.NonValidated);
             if (request.Content.Headers.ContentLength is { } declaredLength &&
                 declaredLength > maximumBodyBytes)
             {
@@ -231,7 +226,6 @@ internal sealed record BufferedRequest(
             EnableRetries = requestConfiguration.EnableRetries,
             FramesBeforeHeaders = requestConfiguration.FramesBeforeHeaders,
             FramesAfterHeaders = requestConfiguration.FramesAfterHeaders,
-            HeaderOrder = requestConfiguration.HeaderOrder,
             PseudoHeaderOrder = requestConfiguration.PseudoHeaderOrder,
             HeaderPriority = requestConfiguration.HeaderPriority,
             PriorityUpdate = requestConfiguration.PriorityUpdate,
@@ -287,7 +281,8 @@ internal sealed record BufferedRequest(
     private static (string Method, Uri Url, List<HeaderEntry> Entries,
         TlsHttpVersionPolicy VersionPolicy) ReadMetadata(
         HttpRequestMessage request,
-        TlsHttpVersionPolicy sessionVersionPolicy)
+        TlsHttpVersionPolicy sessionVersionPolicy,
+        HeaderEntry[] configuredHeaders)
     {
         ArgumentNullException.ThrowIfNull(request);
         var url = request.RequestUri ??
@@ -303,9 +298,7 @@ internal sealed record BufferedRequest(
         var versionPolicy = ResolveVersionPolicy(request, sessionVersionPolicy);
         var method = request.Method.Method;
         Http11RequestWriter.ValidateMethod(method);
-        var entries = new List<HeaderEntry>();
-        AddOrReplace(entries, request.Headers.NonValidated);
-        return (method, url, entries, versionPolicy);
+        return (method, url, new List<HeaderEntry>(configuredHeaders), versionPolicy);
     }
 
     internal static void AddOrReplace(List<HeaderEntry> destination, HeaderEntry incoming)
@@ -320,18 +313,6 @@ internal sealed record BufferedRequest(
         else
         {
             destination[index] = copy;
-        }
-    }
-
-    private static void AddOrReplace(
-        List<HeaderEntry> destination,
-        HttpHeadersNonValidated headers)
-    {
-        foreach (var header in headers)
-        {
-            AddOrReplace(
-                destination,
-                new HeaderEntry(header.Key, header.Value.ToArray()));
         }
     }
 

@@ -170,6 +170,7 @@ public sealed class Http2WriteBatchTests
                 {
                     Content = content,
                 };
+                message.AddHeader("content-length", "-1");
                 await using var responseBody = new MemoryStream();
                 return await session.SendStreamingAsync(
                     message,
@@ -245,7 +246,8 @@ public sealed class Http2WriteBatchTests
                 {
                     Content = content,
                 };
-                message.Headers.ExpectContinue = true;
+                message.AddHeader("content-length", "-1");
+                message.AddHeader("Expect", "100-continue");
                 await using var responseBody = new MemoryStream();
                 return await session.SendStreamingAsync(
                     message,
@@ -444,6 +446,7 @@ public sealed class Http2WriteBatchTests
     {
         using var content = new StreamContent(new MemoryStream(body));
         using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+        message.AddHeader("content-length", "-1");
         await using var responseBody = new MemoryStream();
         return await session.SendStreamingAsync(
             message,

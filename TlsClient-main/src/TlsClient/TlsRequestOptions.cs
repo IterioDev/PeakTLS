@@ -9,6 +9,22 @@ public sealed class TlsRequestOptions
     private TlsProxy? _proxy;
     private bool _hasProxyOverride;
 
+    /// <summary>
+    /// Gets the request's header fields. This collection is the sole source of the wire's field
+    /// section: a field reaches the wire if and only if it appears here, in the order it was
+    /// added. Nothing is synthesised — an absent <c>Host</c> means no <c>Host</c> field, and an
+    /// absent <c>Cookie</c> means the session container contributes nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>Values are stored verbatim. Nothing passes through <c>HttpRequestHeaders</c>, which
+    /// is what keeps <c>accept-encoding: gzip, deflate, br</c> a single field line carrying
+    /// those exact bytes rather than the three that collection's reflow produces.</para>
+    /// <para><c>Content-Length</c> and <c>Transfer-Encoding</c> are the one exception, and it
+    /// covers the value only: whichever of the two is added reserves the position, and the
+    /// computed framing field replaces it there.</para>
+    /// </remarks>
+    public TlsHeaders Headers { get; } = new();
+
     /// <summary>Gets request trailer fields sent after the content body.</summary>
     public TlsHeaders Trailers { get; } = new();
 
@@ -74,17 +90,6 @@ public sealed class TlsRequestOptions
     /// here identically.
     /// </remarks>
     public IReadOnlyList<TlsHttp2RequestFrame> FramesAfterHeaders { get; set; } = [];
-
-    /// <summary>
-    /// Gets or sets the preferred header order for this request. Null inherits
-    /// <see cref="TlsSessionOptions.HeaderOrder"/>.
-    /// </summary>
-    /// <remarks>
-    /// Unlike the other overrides here, this one applies to HTTP/1.1 as well as HTTP/2: the
-    /// HTTP/1.1 writer and the HTTP/2 header builder already share one ordering routine, and
-    /// splitting the semantics by protocol would be surprising.
-    /// </remarks>
-    public IReadOnlyList<string>? HeaderOrder { get; set; }
 
     /// <summary>
     /// Gets or sets the pseudo-header wire order for this request. Null inherits
@@ -239,67 +244,6 @@ public sealed class TlsRequestOptions
         _hasProxyOverride = false;
     }
 
-    /// <summary>
-    /// The request's header names, in the order they were added, read WITHOUT parsing the
-    /// values.
-    /// </summary>
-    /// <remarks>
-    /// <para>USE THIS INSTEAD OF <c>request.Headers.Select(header =&gt; header.Key)</c>, which
-    /// silently rewrites the request. Enumerating <see cref="HttpRequestMessage.Headers"/> is
-    /// the VALIDATED view, and .NET parses every known structured header the first time that
-    /// view is read - then keeps the parsed form and discards the string you supplied. One
-    /// caller value becomes several, and the request goes out with several field lines where a
-    /// real client sends one:</para>
-    /// <code>
-    /// accept-encoding: gzip, deflate, br    -&gt; "gzip" "deflate" "br"      (3 field lines)
-    /// user-agent: Spotify/9.1.76 iOS/27.0   -&gt; "Spotify/9.1.76" "iOS/27.0" (2 field lines)
-    /// accept-language: en-US,en;q=0.9       -&gt; "en-US" "en; q=0.9"         (2, and a space
-    ///                                                                        appears inside
-    ///                                                                        the second)
-    /// </code>
-    /// <para>IT CANNOT BE UNDONE AFTERWARDS, which is why this exists rather than a repair.
-    /// The separators differ per header - a comma for Accept-Encoding, a space for User-Agent -
-    /// and the Accept-Language case above shows .NET also reflows whitespace INSIDE a value, so
-    /// no rejoin reproduces the bytes that were handed in. The only fix is not to lose them.
-    /// </para>
-    /// <para>This reads <c>NonValidated</c>, which returns the stored strings and leaves them
-    /// stored, so a request whose names are taken this way still sends exactly what its caller
-    /// wrote. Content headers follow the request's own, and a name appearing in both is listed
-    /// once - <see cref="TlsSessionOptions.HeaderOrder"/> requires distinct names.</para>
-    /// </remarks>
-    /// <param name="request">The request whose header names are wanted.</param>
-    /// <returns>The header names, in insertion order.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="request"/> is
-    /// <see langword="null"/>.</exception>
-    public static string[] HeaderNamesOf(HttpRequestMessage request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-
-        var names = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var header in request.Headers.NonValidated)
-        {
-            if (seen.Add(header.Key))
-            {
-                names.Add(header.Key);
-            }
-        }
-
-        if (request.Content is { } content)
-        {
-            foreach (var header in content.Headers.NonValidated)
-            {
-                if (seen.Add(header.Key))
-                {
-                    names.Add(header.Key);
-                }
-            }
-        }
-
-        return [.. names];
-    }
-
     /// <summary>Gets or creates the TlsClient options attached to a request.</summary>
     public static TlsRequestOptions For(HttpRequestMessage request)
     {
@@ -319,13 +263,13 @@ public sealed class TlsRequestOptions
         {
             return new TlsRequestConfiguration(
                 [],
+                [],
                 TlsRequestReplayPolicy.Never,
                 false,
                 null,
                 null,
                 [],
                 [],
-                null,
                 null,
                 null,
                 null,
@@ -343,6 +287,7 @@ public sealed class TlsRequestOptions
         }
         return new TlsRequestConfiguration(
             trailers,
+            options.Headers.Snapshot(),
             options.ReplayPolicy,
             options._hasProxyOverride,
             options._proxy,
@@ -356,11 +301,6 @@ public sealed class TlsRequestOptions
             // Null stays null all the way to the send path, where it selects the session
             // value. Validating a declared override here rather than at the connection means
             // an illegal one is rejected whichever protocol the request ends up on.
-            options.HeaderOrder is null
-                ? null
-                : TlsSessionOptions.ValidateHeaderOrder(
-                    options.HeaderOrder,
-                    nameof(HeaderOrder)),
             options.PseudoHeaderOrder is null
                 ? null
                 : TlsHttp2PseudoHeaderOptions.ValidateOrder(
@@ -459,13 +399,13 @@ public enum TlsRequestReplayPolicy
 
 internal sealed record TlsRequestConfiguration(
     HeaderEntry[] Trailers,
+    HeaderEntry[] Headers,
     TlsRequestReplayPolicy ReplayPolicy,
     bool HasProxyOverride,
     TlsProxy? Proxy,
     bool? EnableRetries,
     TlsHttp2RequestFrameConfiguration[] FramesBeforeHeaders,
     TlsHttp2RequestFrameConfiguration[] FramesAfterHeaders,
-    string[]? HeaderOrder,
     string[]? PseudoHeaderOrder,
     TlsHttp2PriorityConfiguration? HeaderPriority,
     string? PriorityUpdate,

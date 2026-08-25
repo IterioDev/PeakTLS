@@ -179,6 +179,7 @@ public sealed class Http2LoopbackTests
         {
             Content = content,
         };
+        request.AddHeader("transfer-encoding", "chunked");
         await using var destination = new MemoryStream();
 
         var response = await session.SendStreamingAsync(
@@ -316,6 +317,7 @@ public sealed class Http2LoopbackTests
         {
             Content = content,
         };
+        request.AddHeader("transfer-encoding", "chunked");
         await using var destination = new MemoryStream();
 
         // The header block is already on the wire when the body throws, which is the

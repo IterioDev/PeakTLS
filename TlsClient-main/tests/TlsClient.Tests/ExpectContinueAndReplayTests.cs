@@ -33,7 +33,8 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
-        request.Headers.ExpectContinue = true;
+        request.AddHeader("content-length", "-1");
+        request.AddHeader("Expect", "100-continue");
         await using var destination = new MemoryStream();
 
         var response = await session.SendStreamingAsync(
@@ -69,7 +70,8 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
-        request.Headers.ExpectContinue = true;
+        request.AddHeader("content-length", "-1");
+        request.AddHeader("Expect", "100-continue");
         await using var destination = new MemoryStream();
 
         var response = await session.SendStreamingAsync(
@@ -108,7 +110,8 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
-        rejected.Headers.ExpectContinue = true;
+        rejected.AddHeader("content-length", "-1");
+        rejected.AddHeader("Expect", "100-continue");
 
         var first = await session.SendAsync(rejected, timeout.Token);
         Exception? secondFailure = null;
@@ -156,7 +159,8 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
-        request.Headers.ExpectContinue = true;
+        request.AddHeader("transfer-encoding", "chunked");
+        request.AddHeader("Expect", "100-continue");
         TlsRequestOptions.For(request).Trailers.Set("X-Checksum", "done");
         await using var destination = new MemoryStream();
 
@@ -197,6 +201,10 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
+        request.AddHeader("transfer-encoding", "chunked");
+        // Nothing generates RFC 9110 section 6.6.2's Trailer field from the trailer list, so a
+        // request that wants to announce its trailers adds the field itself.
+        request.AddHeader("Trailer", "X-Checksum");
         TlsRequestOptions.For(request).Trailers.Set("X-Checksum", "complete");
         await using var destination = new MemoryStream();
 
@@ -242,6 +250,7 @@ public sealed class ExpectContinueAndReplayTests
         {
             Content = content,
         };
+        request.AddHeader("content-length", "-1");
         TlsRequestOptions.For(request).ReplayPolicy = replayPolicy;
         await using var destination = new MemoryStream();
 

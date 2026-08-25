@@ -126,7 +126,6 @@ TlsClient.TlsHttp2Priority.Weight.set -> void
 TlsClient.TlsHttpBehaviorProfile
 TlsClient.TlsHttpBehaviorProfile.ApplyTo(TlsClient.TlsSessionOptions! options) -> void
 TlsClient.TlsHttpBehaviorProfile.ExportJson(bool writeIndented = true) -> string!
-TlsClient.TlsHttpBehaviorProfile.HeaderOrder.get -> System.Collections.Generic.IReadOnlyList<string!>!
 TlsClient.TlsHttpBehaviorProfile.Http2.get -> TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior!
 TlsClient.TlsHttpBehaviorProfile.HttpVersionPolicy.get -> TlsClient.TlsHttpVersionPolicy
 TlsClient.TlsHttpBehaviorProfile.Name.get -> string!
@@ -303,8 +302,6 @@ TlsClient.TlsSessionOptions.HandshakeObserver.get -> System.Action<TlsClient.Tls
 TlsClient.TlsSessionOptions.HandshakeObserver.set -> void
 TlsClient.TlsSessionOptions.HappyEyeballsDelay.get -> System.TimeSpan
 TlsClient.TlsSessionOptions.HappyEyeballsDelay.set -> void
-TlsClient.TlsSessionOptions.HeaderOrder.get -> System.Collections.Generic.IReadOnlyList<string!>?
-TlsClient.TlsSessionOptions.HeaderOrder.set -> void
 TlsClient.TlsSessionOptions.Http2.get -> TlsClient.TlsHttp2Options!
 TlsClient.TlsSessionOptions.HttpVersionPolicy.get -> TlsClient.TlsHttpVersionPolicy
 TlsClient.TlsSessionOptions.HttpVersionPolicy.set -> void

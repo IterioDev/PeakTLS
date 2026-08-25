@@ -164,6 +164,7 @@ public sealed class StreamingLoopbackTests
         {
             Content = content,
         };
+        request.AddHeader("transfer-encoding", "chunked");
         await using var responseBody = new MemoryStream();
 
         var response = await session.SendStreamingAsync(
@@ -209,6 +210,7 @@ public sealed class StreamingLoopbackTests
         {
             Content = content,
         };
+        request.AddHeader("content-length", "-1");
         await using var responseBody = new MemoryStream();
 
         var response = await session.SendStreamingAsync(

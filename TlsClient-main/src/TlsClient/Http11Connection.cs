@@ -35,20 +35,17 @@ internal sealed class Http11Connection : IHttpConnection
 
     public async ValueTask<ParsedHttpResponse> SendAsync(
         BufferedRequest request,
-        string? cookieHeader,
         StreamingResponseContext? streamingResponse,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(IsDisposed, this);
-        var serializedHeaders = Http11RequestWriter.SerializeHeaders(
-            request,
-            // One of the two per-request overrides HTTP/1.1 honours; PathOverride is the other,
-            // and SerializeHeaders reads it straight off the request. The remaining
-            // pseudo-header, priority and PRIORITY_UPDATE overrides have no HTTP/1.1 meaning and
-            // are ignored rather than rejected, so a persona survives a version fallback.
-            request.HeaderOrder ?? configuration.HeaderOrder,
-            cookieHeader);
+        // The field section is the request's own list, so there is no order to resolve here.
+        // PathOverride is the one per-request override HTTP/1.1 still honours, and
+        // SerializeHeaders reads it straight off the request. The pseudo-header, priority and
+        // PRIORITY_UPDATE overrides have no HTTP/1.1 meaning and are ignored rather than
+        // rejected, so a persona survives a version fallback.
+        var serializedHeaders = Http11RequestWriter.SerializeHeaders(request);
         if (serializedHeaders.Length > configuration.MaximumRequestHeaderBytes)
         {
             throw new HttpRequestException(
@@ -69,9 +66,7 @@ internal sealed class Http11Connection : IHttpConnection
                 .ConfigureAwait(false);
             ParsedHttpResponse response;
             var bodySent = true;
-            var expectContinue = request.HasContent && Http11RequestWriter.Has100Continue(
-                request,
-                cookieHeader);
+            var expectContinue = request.HasContent && Http11RequestWriter.Has100Continue(request);
             if (expectContinue)
             {
                 await _transport.Stream.FlushAsync(cancellationToken).ConfigureAwait(false);

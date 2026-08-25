@@ -29,13 +29,15 @@ public sealed class Http3FieldMapperTests
         fields.Select(field => $"{field.Name}: {field.Value}").ToArray();
 
     /// <summary>
-    /// With no declared HeaderOrder and no session headers, the request's own insertion order
-    /// is what reaches the wire, Content-Length included. Its declared VALUE is ignored — the
-    /// real one is always computed — but the slot it was declared in is kept, so a caller can
-    /// write a placeholder to reserve the position a captured client puts it in.
+    /// The login5 captured POST order, pinned offline — a live observer is not enough here,
+    /// because tls3.peet.ws reports HTTP/3 field lines in an order that varies run to run, so
+    /// only the bytes this mapper produces settle what reaches the wire.
+    /// <para>The request's own list is that order, Content-Length included. Its declared VALUE
+    /// is ignored — the real one is always computed — but the slot it was added in is kept, so
+    /// the placeholder reserves the position the captured client puts it in.</para>
     /// </summary>
     [Fact]
-    public void RequestFields_KeepInsertionOrderWhenNoHeaderOrderIsDeclared()
+    public void RequestFields_FollowTheLogin5CapturedOrderIncludingContentFields()
     {
         var request = new BufferedRequest(
             "POST",
@@ -55,11 +57,7 @@ public sealed class Http3FieldMapperTests
             [],
             HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request,
-            null,
-            Configuration(options => options.HeaderOrder = null),
-            out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Equal(
             [
@@ -75,67 +73,11 @@ public sealed class Http3FieldMapperTests
         Assert.Equal("0", fields.First(field => field.Name == "content-length").Value);
     }
 
-#pragma warning disable TLSCLIENT3
-    /// <summary>
-    /// The login5 preset's captured POST order, pinned offline. A live observer is not enough
-    /// here: tls3.peet.ws reports HTTP/3 field lines in an order that varies run to run, so
-    /// only the bytes this mapper produces settle what reaches the wire.
-    /// </summary>
-    [Fact]
-    public void RequestFields_FollowTheLogin5PresetOrderIncludingContentFields()
-    {
-        // The login5 v4 image, set explicitly. It used to come from a preset; presets no longer
-        // declare a header order (one QUIC/TLS shape serves every endpoint, and header order is
-        // the caller's), so the order under test is stated here where the expectation is.
-        var options = TlsPresets.Spotify.CreateOptions();
-        options.HeaderOrder =
-        [
-            "content-type", "accept", "priority", "accept-encoding", "x-retry-count",
-            "cache-control", "content-length", "user-agent", "accept-language", "client-token",
-        ];
-
-        // Deliberately added in the WRONG order: the preset's declared header order is what
-        // has to put them right, so scrambling the input is the whole point.
-        var request = new BufferedRequest(
-            "POST",
-            new Uri("https://login5.spotify.com/v4/login"),
-            [
-                new HeaderEntry("Client-Token", ["token"]),
-                new HeaderEntry("User-Agent", ["Spotify/9.1.76 iOS/27.0 (iPhone17,2)"]),
-                new HeaderEntry("Content-Length", ["-1"]),
-                new HeaderEntry("Accept-Language", ["en-US,en;q=0.9"]),
-                new HeaderEntry("Content-Type", ["application/x-protobuf"]),
-                new HeaderEntry("Cache-Control", ["no-cache, no-store, max-age=0"]),
-                new HeaderEntry("Accept", ["*/*"]),
-                new HeaderEntry("X-Retry-Count", ["0"]),
-                new HeaderEntry("Priority", ["u=3, i"]),
-                new HeaderEntry("Accept-Encoding", ["gzip, deflate, br"]),
-            ],
-            [],
-            HasContent: true);
-
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request,
-            null,
-            options.Snapshot(),
-            out _);
-
-        Assert.Equal(
-            [
-                "content-type", "accept", "priority", "accept-encoding", "x-retry-count",
-                "cache-control", "content-length", "user-agent", "accept-language",
-                "client-token",
-            ],
-            fields.Select(field => field.Name));
-    }
-#pragma warning restore TLSCLIENT3
-
     [Fact]
     public void RequestFields_LowercaseEveryName()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Accept-Encoding", ["gzip"])]),
-            null,
             Configuration(),
             out _);
 
@@ -148,7 +90,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Host", ["cdn.example.com:8443"])]),
-            null,
             Configuration(),
             out var authority);
 
@@ -161,7 +102,6 @@ public sealed class Http3FieldMapperTests
     {
         _ = Http3FieldMapper.BuildRequestFields(
             Request(url: "https://example.com:4433/"),
-            null,
             Configuration(),
             out var authority);
 
@@ -179,7 +119,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry(name, ["whatever"])]),
-            null,
             Configuration(),
             out _);
 
@@ -197,7 +136,6 @@ public sealed class Http3FieldMapperTests
         var exception = Assert.Throws<HttpRequestException>(() =>
             Http3FieldMapper.BuildRequestFields(
                 Request(headers: [new HeaderEntry("TE", ["gzip"])]),
-                null,
                 Configuration(),
                 out _));
 
@@ -209,23 +147,25 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("TE", ["trailers"])]),
-            null,
             Configuration(),
             out _);
 
         Assert.Contains("te: trailers", Rendered(fields));
     }
 
+    /// <summary>
+    /// A cookie reaches the wire because the request added one, not because the session's
+    /// container contributed it. Nothing injects a Cookie field any more.
+    /// </summary>
     [Fact]
-    public void RequestFields_JoinCookieCrumbsWithTheRfc6265Separator()
+    public void RequestFields_CarryTheCookieTheRequestAddedAndNoOther()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            Request(),
-            "a=1; b=2",
+            Request(headers: [new HeaderEntry("Cookie", ["a=1; b=2"])]),
             Configuration(),
             out _);
 
-        Assert.Contains("cookie: a=1; b=2", Rendered(fields));
+        Assert.Equal(["cookie: a=1; b=2"], Rendered(fields).Where(line => line.StartsWith("cookie:", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -233,7 +173,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Accept", ["text/html", "application/json"])]),
-            null,
             Configuration(),
             out _);
 
@@ -242,28 +181,26 @@ public sealed class Http3FieldMapperTests
             fields.Count(field => field.Name == "accept"));
     }
 
+    /// <summary>
+    /// There is no declared order to honour: the request's list IS the order. This used to
+    /// scramble the input and prove a declared order array put it right; with that array gone, what
+    /// is left to prove is that nothing reorders the list on the way through.
+    /// </summary>
     [Fact]
-    public void RequestFields_HonourTheDeclaredHeaderOrder()
+    public void RequestFields_KeepTheRequestsOwnOrder()
     {
         var request = Request(headers:
         [
             new HeaderEntry("B-Header", ["2"]),
             new HeaderEntry("A-Header", ["1"]),
-        ]) with
-        {
-            HeaderOrder = ["a-header", "b-header"],
-        };
+        ]);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request,
-            null,
-            Configuration(),
-            out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         var names = fields.Select(field => field.Name).ToArray();
         Assert.True(
-            Array.IndexOf(names, "a-header") < Array.IndexOf(names, "b-header"),
-            $"expected a-header before b-header, got [{string.Join(", ", names)}]");
+            Array.IndexOf(names, "b-header") < Array.IndexOf(names, "a-header"),
+            $"expected b-header before a-header, got [{string.Join(", ", names)}]");
     }
 
     [Fact]
@@ -276,7 +213,7 @@ public sealed class Http3FieldMapperTests
         ]);
 
         Assert.Throws<HttpRequestException>(() =>
-            Http3FieldMapper.BuildRequestFields(request, null, configuration, out _));
+            Http3FieldMapper.BuildRequestFields(request, configuration, out _));
     }
 
     // ------------------------------------------------------------------------------------
@@ -295,10 +232,13 @@ public sealed class Http3FieldMapperTests
     {
         var body = "twenty-four characters!!"u8.ToArray();
         var request = new BufferedRequest(
-            "POST", new Uri("https://example.com/upload"), [], body, HasContent: true);
+            "POST",
+            new Uri("https://example.com/upload"),
+            [new HeaderEntry("Content-Length", ["-1"])],
+            body,
+            HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request, null, Configuration(), out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Contains($"content-length: {body.Length}", Rendered(fields));
     }
@@ -307,7 +247,7 @@ public sealed class Http3FieldMapperTests
     public void RequestFields_DeclareNoContentLengthForARequestWithoutContent()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            Request(), null, Configuration(), out _);
+            Request(), Configuration(), out _);
 
         Assert.DoesNotContain(
             Rendered(fields), line => line.StartsWith("content-length:", StringComparison.Ordinal));
@@ -316,8 +256,9 @@ public sealed class Http3FieldMapperTests
     }
 
     /// <summary>
-    /// A caller's own Content-Length never survives into the field section — MergeHeaders drops
-    /// it and re-derives it — so it cannot contradict the body octets that follow.
+    /// A caller's own Content-Length VALUE never survives into the field section — MergeHeaders
+    /// substitutes the computed one in place — so it cannot contradict the body octets that
+    /// follow. Only the position the caller chose survives.
     /// </summary>
     [Fact]
     public void RequestFields_ReplaceACallerDeclaredContentLengthWithTheRealOne()
@@ -330,8 +271,7 @@ public sealed class Http3FieldMapperTests
             body,
             HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request, null, Configuration(), out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Contains("content-length: 4", Rendered(fields));
         Assert.DoesNotContain("content-length: 99999", Rendered(fields));
@@ -346,7 +286,7 @@ public sealed class Http3FieldMapperTests
     public void RequestFields_CarryNeitherContentLengthNorTransferEncodingWhenTrailersFollow()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            RequestWithTrailers(), null, Configuration(), out _);
+            RequestWithTrailers(), Configuration(), out _);
 
         Assert.DoesNotContain(
             Rendered(fields), line => line.StartsWith("content-length:", StringComparison.Ordinal));
@@ -355,29 +295,33 @@ public sealed class Http3FieldMapperTests
             line => line.StartsWith("transfer-encoding:", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// RFC 9110 section 6.6.2's Trailer field is announced when — and only when — the request
+    /// added one. Nothing generates it from the trailer list, and there is no session switch
+    /// deciding it: a persona that omits the field simply does not add it.
+    /// </summary>
     [Fact]
-    public void RequestFields_AnnounceTrailersWhenTheSessionEmitsTheTrailerField()
+    public void RequestFields_AnnounceTrailersOnlyWhenTheRequestAddedATrailerField()
     {
-        var fields = Http3FieldMapper.BuildRequestFields(
-            RequestWithTrailers(),
-            null,
-            Configuration(options => options.Http2.EmitTrailerHeader = true),
+        var announced = Http3FieldMapper.BuildRequestFields(
+            RequestWithTrailers() with
+            {
+                Headers =
+                [
+                    new HeaderEntry("Transfer-Encoding", ["chunked"]),
+                    new HeaderEntry("Trailer", ["Checksum"]),
+                ],
+            },
+            Configuration(),
             out _);
 
-        Assert.Contains("trailer: Checksum", Rendered(fields));
-    }
+        Assert.Contains("trailer: Checksum", Rendered(announced));
 
-    [Fact]
-    public void RequestFields_OmitTheTrailerFieldWhenTheSessionSuppressesIt()
-    {
-        var fields = Http3FieldMapper.BuildRequestFields(
-            RequestWithTrailers(),
-            null,
-            Configuration(options => options.Http2.EmitTrailerHeader = false),
-            out _);
+        var silent = Http3FieldMapper.BuildRequestFields(
+            RequestWithTrailers(), Configuration(), out _);
 
         Assert.DoesNotContain(
-            Rendered(fields), line => line.StartsWith("trailer:", StringComparison.Ordinal));
+            Rendered(silent), line => line.StartsWith("trailer:", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -440,11 +384,14 @@ public sealed class Http3FieldMapperTests
         Assert.Equal([":status: 200"], Rendered(trailers));
     }
 
+    // Trailers force chunked, so the framing slot has to name Transfer-Encoding. RFC 9114
+    // section 4.2 forbids that field over HTTP/3, so the mapper drops it and the field section
+    // carries neither it nor a content-length — which is what one of the tests below asserts.
     private static BufferedRequest RequestWithTrailers(params HeaderEntry[] trailers) =>
         new(
             "POST",
             new Uri("https://example.com/upload"),
-            [],
+            [new HeaderEntry("Transfer-Encoding", ["chunked"])],
             "body"u8.ToArray(),
             HasContent: true)
         {

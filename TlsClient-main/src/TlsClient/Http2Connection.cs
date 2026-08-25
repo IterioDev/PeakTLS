@@ -158,7 +158,6 @@ internal sealed class Http2Connection : IHttpConnection
 
     public async ValueTask<ParsedHttpResponse> SendAsync(
         BufferedRequest request,
-        string? cookieHeader,
         StreamingResponseContext? streamingResponse,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
@@ -210,7 +209,6 @@ internal sealed class Http2Connection : IHttpConnection
                     await SendRequestAsync(
                         state,
                         request,
-                        cookieHeader,
                         cancellationToken).ConfigureAwait(false);
                 }
                 catch (Http2ResponseCompletedException)
@@ -352,19 +350,16 @@ internal sealed class Http2Connection : IHttpConnection
     private async ValueTask SendRequestAsync(
         Http2StreamState state,
         BufferedRequest request,
-        string? cookieHeader,
         CancellationToken cancellationToken)
     {
-        var headers = BuildRequestHeaders(request, cookieHeader);
+        var headers = BuildRequestHeaders(request);
         // Where END_STREAM lands is the persona's decision, not the body-supplying code
         // path's. An empty body ends on HEADERS only when the persona says so; when it does
         // not, the zero-length DATA frame written after the body loop carries the flag.
         var data = _configuration.Http2.Data;
         var headerBlockEndsStream = data.EmptyBodyEndsOnHeaders &&
             (!request.HasPayload || request.ContentLength == 0 && !request.HasTrailers);
-        var expectsContinue = request.HasContent && Http11RequestWriter.Has100Continue(
-            request,
-            cookieHeader);
+        var expectsContinue = request.HasContent && Http11RequestWriter.Has100Continue(request);
         // Both lists are checked before a byte is written, so a rejected script cannot leave a
         // half-open stream behind.
         ValidateRequestFrames(request.FramesBeforeHeaders, state.StreamId);
@@ -804,22 +799,14 @@ internal sealed class Http2Connection : IHttpConnection
         }
     }
 
-    private List<HpackHeader> BuildRequestHeaders(
-        BufferedRequest request,
-        string? cookieHeader)
+    private List<HpackHeader> BuildRequestHeaders(BufferedRequest request)
     {
-        var regular = Http11RequestWriter.MergeHeaders(
-            request,
-            cookieHeader,
-            _configuration.Http2.EmitTrailerHeader);
-        regular = Http11RequestWriter.Order(
-            regular,
-            request.HeaderOrder ?? _configuration.HeaderOrder);
+        var regular = Http11RequestWriter.MergeHeaders(request);
         var pseudoHeaders = _configuration.Http2.PseudoHeaders;
         var authorityMode = request.AuthorityMode ?? pseudoHeaders.AuthorityMode;
         var host = regular.FirstOrDefault(header =>
             string.Equals(header.Name, "Host", StringComparison.OrdinalIgnoreCase));
-        var authority = host?.Values.FirstOrDefault() ?? Http11RequestWriter.FormatAuthority(request.Url);
+        var authority = host?.Values.FirstOrDefault() ?? Http11RequestWriter.AuthorityFor(request);
         // A declared override reaches the wire verbatim, which is the only way to express the
         // asterisk form RFC 9113 section 8.3.1 requires of an OPTIONS request whose target URI
         // has no path component. No URI can produce that string.

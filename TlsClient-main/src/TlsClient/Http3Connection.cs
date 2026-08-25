@@ -334,7 +334,6 @@ internal sealed class Http3Connection : IHttpConnection
 
     public async ValueTask<ParsedHttpResponse> SendAsync(
         BufferedRequest request,
-        string? cookieHeader,
         StreamingResponseContext? streamingResponse,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
@@ -345,7 +344,7 @@ internal sealed class Http3Connection : IHttpConnection
         // field section this connection would refuse to encode, or a caller's own content
         // stream failing, should not have spent a stream ordinal first.
         var encodable = await BuildRequestAsync(
-            request, cookieHeader, configuration, cancellationToken)
+            request, configuration, cancellationToken)
             .ConfigureAwait(false);
 
         Http3StreamState? state = null;
@@ -425,12 +424,11 @@ internal sealed class Http3Connection : IHttpConnection
     /// </remarks>
     internal static async ValueTask<TlsQuicHttp3Request> BuildRequestAsync(
         BufferedRequest request,
-        string? cookieHeader,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            request, cookieHeader, configuration, out var authority);
+            request, configuration, out var authority);
         var trailers = Http3FieldMapper.BuildTrailerFields(request, configuration);
         var body = await ReadRequestBodyAsync(request, configuration, cancellationToken)
             .ConfigureAwait(false);
