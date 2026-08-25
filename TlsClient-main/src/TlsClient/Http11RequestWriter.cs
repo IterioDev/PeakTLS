@@ -14,7 +14,10 @@ internal static class Http11RequestWriter
         string? cookieHeader)
     {
         var headers = MergeHeaders(request, cookieHeader);
-        if (!Contains(headers, "Connection"))
+        // ponytail: the guard goes with the legacy path in Task 6 of the sealed-AddHeader plan,
+        // taking the injection with it. RFC 9112 section 9.3 makes HTTP/1.1 persistent by
+        // default, so a request that does not name Connection simply does not send it.
+        if (!request.SealedHeaders && !Contains(headers, "Connection"))
         {
             headers.Add(new HeaderEntry("Connection", ["keep-alive"]));
         }
@@ -87,7 +90,11 @@ internal static class Http11RequestWriter
 
         Remove(headers, "Proxy-Authorization");
 
-        if (!Contains(headers, "Host"))
+        // ponytail: both guards go with the legacy path in Task 6 of the sealed-AddHeader plan,
+        // taking the two injections with them. A sealed request sends the Host and Cookie fields
+        // it added, and no others — an absent Host is malformed over HTTP/1.1 (RFC 9112 section
+        // 3.2) and that is the caller's to fix, not this routine's to paper over.
+        if (!request.SealedHeaders && !Contains(headers, "Host"))
         {
             // RFC 9113 section 8.5 defines a plain CONNECT's ":authority" as "the host and port
             // to connect to (equivalent to the authority-form of the request-target of CONNECT
@@ -105,7 +112,9 @@ internal static class Http11RequestWriter
                 0,
                 new HeaderEntry("Host", [FormatAuthority(request.Url, connectAuthority)]));
         }
-        if (!Contains(headers, "Cookie") && !string.IsNullOrEmpty(cookieHeader))
+        if (!request.SealedHeaders &&
+            !Contains(headers, "Cookie") &&
+            !string.IsNullOrEmpty(cookieHeader))
         {
             headers.Add(new HeaderEntry("Cookie", [cookieHeader]));
         }
@@ -156,7 +165,10 @@ internal static class Http11RequestWriter
             {
                 headers[index] = framing;
             }
-            if (request.HasTrailers)
+            // ponytail: the guard goes with the legacy path in Task 6 of the sealed-AddHeader
+            // plan, taking the whole block with it. A sealed request's Trailer field is one the
+            // caller added, so nothing here may drop or generate one.
+            if (!request.SealedHeaders && request.HasTrailers)
             {
                 // Dropped whether or not one is generated, so a caller-supplied Trailer field
                 // cannot survive the suppression and reach the wire in its place.

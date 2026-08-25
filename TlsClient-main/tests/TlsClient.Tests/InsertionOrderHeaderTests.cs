@@ -52,6 +52,26 @@ public sealed class InsertionOrderHeaderTests
     }
 
     [Fact]
+    public async Task NothingTheCallerDidNotAddReachesTheWire()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/")
+        {
+            Content = new StringContent("body", Encoding.UTF8, "application/json"),
+        };
+        request.Headers.TryAddWithoutValidation("x-ignored", "1");
+        request.AddHeader("content-type", "application/json");
+        request.AddHeader("content-length", "-1");
+
+        // No Host, no Connection, no Cookie, no x-ignored — and StringContent's own
+        // "application/json; charset=utf-8" never appears, only the caller's exact bytes.
+        var wire = await WireAsync(request);
+        Assert.Equal(
+            ["content-type", "content-length"],
+            wire.Select(header => header.Name.ToLowerInvariant()));
+        Assert.Equal(["application/json"], wire[0].Values);
+    }
+
+    [Fact]
     public async Task ABodyWithNoFramingNameThrows()
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/")
