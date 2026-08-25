@@ -422,7 +422,7 @@ public sealed class Http2RequestLifecycleTests
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 // Larger than the 16384-octet default maximum frame size however it compresses,
                 // so the block cannot fit in one frame.
-                request.Headers.TryAddWithoutValidation("x-filler", new string('a', 60_000));
+                request.AddHeader("x-filler", new string('a', 60_000));
                 TlsRequestOptions.For(request).FramesAfterHeaders =
                 [
                     new TlsHttp2StreamPriorityFrame
@@ -729,8 +729,8 @@ public sealed class Http2RequestLifecycleTests
                 {
                     Content = new StringContent("body"),
                 };
-                request.Headers.TryAddWithoutValidation("x-alpha", "1");
-                request.Headers.TryAddWithoutValidation("x-beta", "2");
+                request.AddHeader("x-alpha", "1");
+                request.AddHeader("x-beta", "2");
                 var requestOptions = TlsRequestOptions.For(request);
                 requestOptions.HeaderOrder = ["x-alpha", "x-beta"];
                 requestOptions.HeaderPriority = new TlsHttp2Priority { Weight = 200 };
@@ -874,8 +874,8 @@ public sealed class Http2RequestLifecycleTests
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
             $"https://127.0.0.1:{port}/order");
-        request.Headers.TryAddWithoutValidation("x-alpha", "1");
-        request.Headers.TryAddWithoutValidation("x-beta", "2");
+        request.AddHeader("x-alpha", "1");
+        request.AddHeader("x-beta", "2");
         configure(TlsRequestOptions.For(request));
 
         var response = await session.SendAsync(request, timeout.Token);

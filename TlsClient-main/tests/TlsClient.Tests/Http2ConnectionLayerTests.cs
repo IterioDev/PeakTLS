@@ -245,7 +245,7 @@ public sealed class Http2ConnectionLayerTests
                 // Large enough to force CONTINUATION. It rides on the request now, because a
                 // session carries no headers of its own.
                 var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("x-large", new string('a', 40_000));
+                request.AddHeader("x-large", new string('a', 40_000));
                 return session.SendAsync(request, cancellationToken);
             },
             async (server, cancellationToken) =>

@@ -130,7 +130,10 @@ public sealed class Http2HeaderFieldPolicyTests
                 var request = new HttpRequestMessage(HttpMethod.Get, url);
                 foreach (var header in requestHeaders)
                 {
-                    request.Headers.TryAddWithoutValidation(header.Name, header.Values);
+                    foreach (var value in header.Values)
+                    {
+                        request.AddHeader(header.Name, value);
+                    }
                 }
                 return session.SendAsync(request, cancellationToken);
             },

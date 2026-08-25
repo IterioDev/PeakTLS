@@ -89,7 +89,7 @@ public sealed class Http2PaddingTests
             async (session, url, cancellationToken) =>
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("Host", FixedAuthority);
+                request.AddHeader("Host", FixedAuthority);
                 TlsRequestOptions.For(request).HeadersPadding = padding;
                 return await session.SendAsync(request, cancellationToken);
             });
@@ -157,6 +157,7 @@ public sealed class Http2PaddingTests
                 {
                     Content = new ByteArrayContent(body),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).DataPadding = Padding;
                 return await session.SendAsync(request, cancellationToken);
             },
@@ -193,10 +194,10 @@ public sealed class Http2PaddingTests
             async (session, url, cancellationToken) =>
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("Host", FixedAuthority);
+                request.AddHeader("Host", FixedAuthority);
                 // Larger than the 16384-octet default maximum frame size however it
                 // compresses, so the block cannot fit in one frame.
-                request.Headers.TryAddWithoutValidation("x-filler", new string('a', 60_000));
+                request.AddHeader("x-filler", new string('a', 60_000));
                 TlsRequestOptions.For(request).HeadersPadding = Padding;
                 return await session.SendAsync(request, cancellationToken);
             });
@@ -258,6 +259,7 @@ public sealed class Http2PaddingTests
                 {
                     Content = new ByteArrayContent(body),
                 };
+                request.AddHeader("content-length", "-1");
                 TlsRequestOptions.For(request).DataPadding = Padding;
                 return await session.SendAsync(request, cancellationToken);
             },

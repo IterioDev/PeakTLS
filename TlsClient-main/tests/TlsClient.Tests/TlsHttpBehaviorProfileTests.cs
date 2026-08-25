@@ -312,7 +312,7 @@ public sealed class TlsHttpBehaviorProfileTests
         CancellationToken cancellationToken)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Host", "profile.example:443");
+        request.AddHeader("Host", "profile.example:443");
         return session.SendAsync(request, cancellationToken);
     }
 

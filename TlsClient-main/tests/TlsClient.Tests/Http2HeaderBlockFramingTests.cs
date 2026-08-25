@@ -38,7 +38,7 @@ public sealed class Http2HeaderBlockFramingTests
             session => session.Http2.HeaderBlockFragmentSize = FragmentSize,
             // A bare GET encodes to well under one fragment, so the block is padded out with a
             // field long enough to need several.
-            request => request.Headers.TryAddWithoutValidation("x-filler", new string('a', 300)));
+            request => request.AddHeader("x-filler", new string('a', 300)));
 
         Assert.True(fragments.Length > 2, $"expected CONTINUATION, got {fragments.Length} frame(s)");
         Assert.Equal(Http2FrameType.Headers, fragments[0].Type);
@@ -69,7 +69,7 @@ public sealed class Http2HeaderBlockFramingTests
 
         var fragments = await CaptureHeaderBlockAsync(
             session => session.Http2.HeaderBlockFragmentSize = FragmentSize,
-            request => request.Headers.TryAddWithoutValidation(
+            request => request.AddHeader(
                 "x-large",
                 new string('a', 40_000)));
 
@@ -171,7 +171,7 @@ public sealed class Http2HeaderBlockFramingTests
     {
         var headers = await CaptureTrailingRequestAsync(
             session => session.Http2.EmitTrailerHeader = false,
-            request => request.Headers.TryAddWithoutValidation("Trailer", "x-forged"));
+            request => request.AddHeader("Trailer", "x-forged"));
 
         Assert.Null(Value(headers, "trailer"));
     }
@@ -195,7 +195,7 @@ public sealed class Http2HeaderBlockFramingTests
                 {
                     Content = new StringContent("body"),
                 };
-                request.Headers.TryAddWithoutValidation("Host", FixedAuthority);
+                request.AddHeader("Host", FixedAuthority);
                 configureRequest?.Invoke(request);
                 var trailers = TlsRequestOptions.For(request).Trailers;
                 trailers.Set("x-checksum", "0");
@@ -255,7 +255,7 @@ public sealed class Http2HeaderBlockFramingTests
             async (session, url, cancellationToken) =>
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("Host", FixedAuthority);
+                request.AddHeader("Host", FixedAuthority);
                 configureRequest(request);
                 return await session.SendAsync(request, cancellationToken);
             });
