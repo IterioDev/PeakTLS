@@ -136,44 +136,24 @@ public sealed class Http2HeaderBlockFramingTests
     }
 
     /// <summary>
-    /// The default names the trailers in a <c>trailer</c> field, which is today's behaviour.
-    /// RFC 9113 section 8.2.1 lowercases every field name, so the emitted name is
-    /// <c>trailer</c> rather than <c>Trailer</c>.
+    /// Nothing generates RFC 9110 section 6.6.2's <c>trailer</c> field from the trailer list.
+    /// A request that announces its trailers adds the field; one that does not — which is what
+    /// real HTTP/2 clients generally do — simply sends none. The session switch that used to
+    /// decide this is gone: it could only ever have contradicted the request's own list.
+    /// <para>RFC 9113 section 8.2.1 lowercases every field name, so the added <c>Trailer</c>
+    /// reaches the block as <c>trailer</c>.</para>
     /// </summary>
     [Fact]
-    public async Task EmitTrailerHeaderByDefault_NamesTheTrailersInTheRequestBlock()
+    public async Task TheTrailerFieldIsTheOneTheRequestAddedOrNoneAtAll()
     {
-        var headers = await CaptureTrailingRequestAsync(_ => { });
+        var announced = await CaptureTrailingRequestAsync(
+            request => request.AddHeader("Trailer", "x-checksum, x-elapsed"));
 
-        Assert.Equal("x-checksum, x-elapsed", Value(headers, "trailer"));
-    }
+        Assert.Equal("x-checksum, x-elapsed", Value(announced, "trailer"));
 
-    /// <summary>
-    /// Suppressed, the field is absent even though the trailers themselves still go out —
-    /// real HTTP/2 clients generally do not announce them.
-    /// </summary>
-    [Fact]
-    public async Task EmitTrailerHeaderFalse_LeavesNoTrailerFieldInTheRequestBlock()
-    {
-        var headers = await CaptureTrailingRequestAsync(
-            session => session.Http2.EmitTrailerHeader = false);
+        var silent = await CaptureTrailingRequestAsync();
 
-        Assert.Null(Value(headers, "trailer"));
-    }
-
-    /// <summary>
-    /// The switch is HTTP/2's alone, so a caller-supplied <c>Trailer</c> field is dropped
-    /// either way rather than surviving suppression and reaching the wire as if the writer
-    /// had generated it.
-    /// </summary>
-    [Fact]
-    public async Task EmitTrailerHeaderFalse_AlsoDropsACallerSuppliedTrailerField()
-    {
-        var headers = await CaptureTrailingRequestAsync(
-            session => session.Http2.EmitTrailerHeader = false,
-            request => request.AddHeader("Trailer", "x-forged"));
-
-        Assert.Null(Value(headers, "trailer"));
+        Assert.Null(Value(silent, "trailer"));
     }
 
     /// <summary>
@@ -181,11 +161,9 @@ public sealed class Http2HeaderBlockFramingTests
     /// request block, which is the first HEADERS frame — the trailers are a second one.
     /// </summary>
     private static async Task<IReadOnlyList<HpackHeader>> CaptureTrailingRequestAsync(
-        Action<TlsSessionOptions> configureSession,
         Action<HttpRequestMessage>? configureRequest = null)
     {
         var options = new TlsSessionOptions { Profile = TlsProfiles.Modern };
-        configureSession(options);
 
         var result = await Http2WireCapture.RunAsync(
             options,
@@ -196,6 +174,10 @@ public sealed class Http2HeaderBlockFramingTests
                     Content = new StringContent("body"),
                 };
                 request.AddHeader("Host", FixedAuthority);
+                // Trailers force chunked, so the framing slot has to name Transfer-Encoding.
+                // RFC 9113 section 8.2.2 forbids that field over HTTP/2, so it never reaches
+                // the block — the slot exists to satisfy the framing rule, not the wire.
+                request.AddHeader("transfer-encoding", "chunked");
                 configureRequest?.Invoke(request);
                 var trailers = TlsRequestOptions.For(request).Trailers;
                 trailers.Set("x-checksum", "0");

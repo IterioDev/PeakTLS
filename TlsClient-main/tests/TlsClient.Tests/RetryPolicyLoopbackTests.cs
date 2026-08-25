@@ -65,6 +65,7 @@ public sealed class RetryPolicyLoopbackTests
         {
             Content = content,
         };
+        request.AddHeader("content-length", "-1");
         TlsRequestOptions.For(request).ReplayPolicy = TlsRequestReplayPolicy.Buffer;
         await using var destination = new MemoryStream();
 

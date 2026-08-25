@@ -89,18 +89,6 @@ public sealed class TlsHttp2Options
     /// </remarks>
     public int? HeaderBlockFragmentSize { get; set; }
 
-    /// <summary>
-    /// Gets or sets whether a request carrying trailers also emits a <c>trailer</c> field
-    /// naming them. The default, <see langword="true"/>, is today's behaviour; real HTTP/2
-    /// clients generally do not send it.
-    /// </summary>
-    /// <remarks>
-    /// HTTP/2 only, by scope rather than by exception: this type configures the HTTP/2
-    /// connection, and an HTTP/1.1 request reaches
-    /// <see cref="Http11RequestWriter.MergeHeaders"/> with no session to read the flag from,
-    /// so it keeps emitting the field RFC 9110 section 6.6.2 defines for the purpose.
-    /// </remarks>
-    public bool EmitTrailerHeader { get; set; } = true;
 
     /// <summary>Gets or sets optional RFC 7540 priority data embedded in HEADERS.</summary>
     public TlsHttp2Priority? HeaderPriority { get; set; }
@@ -256,7 +244,6 @@ public sealed class TlsHttp2Options
             pseudoHeaders,
             data,
             HeaderBlockFragmentSize,
-            EmitTrailerHeader,
             HeaderPriority?.Snapshot(),
             PriorityUpdate,
             FlushAfterHeaderBlock,

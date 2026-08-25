@@ -97,8 +97,6 @@ TlsClient.TlsHttp2FlowControlOptions.TlsHttp2FlowControlOptions() -> void
 TlsClient.TlsHttp2FlowControlOptions.Trigger.get -> TlsClient.TlsHttp2WindowUpdateTrigger
 TlsClient.TlsHttp2FlowControlOptions.Trigger.set -> void
 TlsClient.TlsHttp2Options.Data.get -> TlsClient.TlsHttp2DataOptions!
-TlsClient.TlsHttp2Options.EmitTrailerHeader.get -> bool
-TlsClient.TlsHttp2Options.EmitTrailerHeader.set -> void
 TlsClient.TlsHttp2Options.FlowControl.get -> TlsClient.TlsHttp2FlowControlOptions!
 TlsClient.TlsHttp2Options.FlushAfterEveryDataFrame.get -> bool
 TlsClient.TlsHttp2Options.FlushAfterEveryDataFrame.set -> void

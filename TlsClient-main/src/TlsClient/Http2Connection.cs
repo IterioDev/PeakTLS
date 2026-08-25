@@ -158,7 +158,6 @@ internal sealed class Http2Connection : IHttpConnection
 
     public async ValueTask<ParsedHttpResponse> SendAsync(
         BufferedRequest request,
-        string? cookieHeader,
         StreamingResponseContext? streamingResponse,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
@@ -210,7 +209,6 @@ internal sealed class Http2Connection : IHttpConnection
                     await SendRequestAsync(
                         state,
                         request,
-                        cookieHeader,
                         cancellationToken).ConfigureAwait(false);
                 }
                 catch (Http2ResponseCompletedException)
@@ -352,10 +350,9 @@ internal sealed class Http2Connection : IHttpConnection
     private async ValueTask SendRequestAsync(
         Http2StreamState state,
         BufferedRequest request,
-        string? cookieHeader,
         CancellationToken cancellationToken)
     {
-        var headers = BuildRequestHeaders(request, cookieHeader);
+        var headers = BuildRequestHeaders(request);
         // Where END_STREAM lands is the persona's decision, not the body-supplying code
         // path's. An empty body ends on HEADERS only when the persona says so; when it does
         // not, the zero-length DATA frame written after the body loop carries the flag.
@@ -802,9 +799,7 @@ internal sealed class Http2Connection : IHttpConnection
         }
     }
 
-    private List<HpackHeader> BuildRequestHeaders(
-        BufferedRequest request,
-        string? cookieHeader)
+    private List<HpackHeader> BuildRequestHeaders(BufferedRequest request)
     {
         var regular = Http11RequestWriter.MergeHeaders(request);
         var pseudoHeaders = _configuration.Http2.PseudoHeaders;

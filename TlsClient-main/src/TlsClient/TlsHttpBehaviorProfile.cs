@@ -239,7 +239,6 @@ public sealed class TlsHttpBehaviorProfile
         FlowControlDocument FlowControl,
         ShutdownDocument Shutdown,
         int? HeaderBlockFragmentSize,
-        bool EmitTrailerHeader,
         bool FlushAfterHeaderBlock,
         bool FlushAfterEveryDataFrame);
 
@@ -321,7 +320,6 @@ public sealed class TlsHttpBehaviorProfile
         private readonly TlsHttp2FlowControlConfiguration _flowControl;
         private readonly TlsHttp2ShutdownConfiguration _shutdown;
         private readonly int? _headerBlockFragmentSize;
-        private readonly bool _emitTrailerHeader;
         private readonly bool _flushAfterHeaderBlock;
         private readonly bool _flushAfterEveryDataFrame;
 
@@ -338,7 +336,6 @@ public sealed class TlsHttpBehaviorProfile
             TlsHttp2FlowControlConfiguration flowControl,
             TlsHttp2ShutdownConfiguration shutdown,
             int? headerBlockFragmentSize,
-            bool emitTrailerHeader,
             bool flushAfterHeaderBlock,
             bool flushAfterEveryDataFrame)
         {
@@ -355,7 +352,6 @@ public sealed class TlsHttpBehaviorProfile
             _flowControl = flowControl;
             _shutdown = shutdown;
             _headerBlockFragmentSize = headerBlockFragmentSize;
-            _emitTrailerHeader = emitTrailerHeader;
             _flushAfterHeaderBlock = flushAfterHeaderBlock;
             _flushAfterEveryDataFrame = flushAfterEveryDataFrame;
         }
@@ -391,7 +387,6 @@ public sealed class TlsHttpBehaviorProfile
             value.FlowControl,
             value.Shutdown,
             value.HeaderBlockFragmentSize,
-            value.EmitTrailerHeader,
             value.FlushAfterHeaderBlock,
             value.FlushAfterEveryDataFrame);
 
@@ -423,7 +418,6 @@ public sealed class TlsHttpBehaviorProfile
                 FromDocument(value.FlowControl),
                 FromDocument(value.Shutdown),
                 value.HeaderBlockFragmentSize,
-                value.EmitTrailerHeader,
                 value.FlushAfterHeaderBlock,
                 value.FlushAfterEveryDataFrame);
         }
@@ -553,7 +547,6 @@ public sealed class TlsHttpBehaviorProfile
             options.HeaderPriority = HeaderPriority?.ToOptions();
             options.PriorityUpdate = PriorityUpdate;
             options.HeaderBlockFragmentSize = _headerBlockFragmentSize;
-            options.EmitTrailerHeader = _emitTrailerHeader;
             options.FlushAfterHeaderBlock = _flushAfterHeaderBlock;
             options.FlushAfterEveryDataFrame = _flushAfterEveryDataFrame;
 
@@ -698,7 +691,6 @@ public sealed class TlsHttpBehaviorProfile
                 _shutdown.LocalFailureResetCode,
                 _shutdown.PushRejectionResetCode),
             _headerBlockFragmentSize,
-            _emitTrailerHeader,
             _flushAfterHeaderBlock,
             _flushAfterEveryDataFrame);
     }

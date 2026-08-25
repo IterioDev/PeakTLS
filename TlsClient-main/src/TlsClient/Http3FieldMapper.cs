@@ -50,7 +50,6 @@ internal static class Http3FieldMapper
     /// field section exceeds the configured request header limit.</exception>
     public static ImmutableArray<TlsQuicHttp3Field> BuildRequestFields(
         BufferedRequest request,
-        string? cookieHeader,
         TlsSessionConfiguration configuration,
         out string authority)
     {

@@ -403,15 +403,13 @@ public sealed class Http3ClientMachineryTests
     // ------------------------------------------------------------------------------
 
     /// <summary>
-    /// A Set-Cookie received over HTTP/3 is stored and sent back on the next HTTP/3 request to
-    /// that origin.
+    /// A Set-Cookie received over HTTP/3 is STORED, and is not replayed on the next request.
+    /// The container is a record of what the server said, not a source of request fields: a
+    /// field reaches the wire only when <c>AddHeader</c> put it there, so replaying the stored
+    /// value is the caller's to do.
     /// </summary>
-    /// <remarks>THE WITNESS IS THE ARGUMENT THE CONNECTION WAS HANDED, because that is the
-    /// value <c>Http3FieldMapper.BuildRequestFields</c> turns into the <c>cookie</c> field;
-    /// <see cref="AnHttp3RequestsCookieHeaderBecomesACookieField"/> below closes the other half
-    /// of that link.</remarks>
     [Fact]
-    public async Task ASetCookieFromAnHttp3ResponseIsReplayedOnTheNextHttp3Request()
+    public async Task ASetCookieFromAnHttp3ResponseIsStoredButNotReplayedOnItsOwn()
     {
         await using var fabric = new Http3Fabric
         {
@@ -427,18 +425,35 @@ public sealed class Http3ClientMachineryTests
         await session.GetAsync(First).WaitAsync(Bound);
         await session.GetAsync(First).WaitAsync(Bound);
 
-        // Nothing was sent on the first request, so the second's value cannot have come from
-        // the caller's own headers.
-        Assert.True(string.IsNullOrEmpty(fabric.Exchanges[0].CookieHeader));
-        Assert.Equal("sid=abc", fabric.Exchanges[1].CookieHeader);
+        Assert.True(string.IsNullOrEmpty(fabric.Exchanges[0].Cookie));
+        Assert.True(string.IsNullOrEmpty(fabric.Exchanges[1].Cookie));
         var stored = Assert.Single(session.Cookies.GetCookies(First).Cast<Cookie>());
         Assert.Equal("sid", stored.Name);
         Assert.Equal("abc", stored.Value);
     }
 
     /// <summary>
-    /// A cross-origin redirect does not carry the first origin's cookies to the second, over
-    /// HTTP/3 as over anything else.
+    /// A cookie the request added does reach the wire, and reaches it as RFC 9114 section
+    /// 4.2.1's <c>cookie</c> field.
+    /// </summary>
+    [Fact]
+    public async Task AnAddedCookieReachesTheHttp3Request()
+    {
+        await using var fabric = new Http3Fabric();
+        await using var session = Session(fabric);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, First);
+        request.AddHeader("cookie", "sid=abc");
+        await session.SendAsync(request).WaitAsync(Bound);
+
+        Assert.Equal("sid=abc", fabric.Exchanges[0].Cookie);
+    }
+
+    /// <summary>
+    /// A cross-origin redirect does not carry the first origin's cookie to the second, over
+    /// HTTP/3 as over anything else. The cookie under test is one the REQUEST added, because
+    /// that is now the only kind there is — and it is exactly the kind the origin-bound filter
+    /// exists to strip.
     /// </summary>
     [Fact]
     public async Task AnHttp3RedirectToAnotherOriginDoesNotCarryTheFirstOriginsCookies()
@@ -458,30 +473,15 @@ public sealed class Http3ClientMachineryTests
         };
         await using var session = Session(fabric);
 
-        await session.GetAsync(First).WaitAsync(Bound);
+        using var request = new HttpRequestMessage(HttpMethod.Get, First);
+        request.AddHeader("cookie", "sid=abc");
+        await session.SendAsync(request).WaitAsync(Bound);
 
         Assert.Equal(2, fabric.Exchanges.Count);
-        Assert.True(string.IsNullOrEmpty(fabric.Exchanges[1].CookieHeader));
+        Assert.Equal("sid=abc", fabric.Exchanges[0].Cookie);
+        Assert.True(string.IsNullOrEmpty(fabric.Exchanges[1].Cookie));
         Assert.Empty(session.Cookies.GetCookies(Second).Cast<Cookie>());
         Assert.Single(session.Cookies.GetCookies(First).Cast<Cookie>());
-    }
-
-    /// <summary>
-    /// The other half of the cookie link: the header the pool hands the connection really does
-    /// become RFC 9114 section 4.2.1's <c>cookie</c> field, through the production encoder.
-    /// </summary>
-    [Fact]
-    public void AnHttp3RequestsCookieHeaderBecomesACookieField()
-    {
-        var fields = Http3FieldMapper.BuildRequestFields(
-            new BufferedRequest("GET", First, [], [], HasContent: false),
-            "sid=abc",
-            new TlsSessionOptions().Snapshot(),
-            out _);
-
-        var cookie = Assert.Single(
-            fields.Where(field => field.Name == "cookie"));
-        Assert.Equal("sid=abc", cookie.Value);
     }
 
     // ------------------------------------------------------------------------------
@@ -696,11 +696,15 @@ public sealed class Http3ClientMachineryTests
     private readonly record struct Dial(Uri Origin, TlsHttpVersionPolicy VersionPolicy);
 
     /// <summary>Everything one request was handed on its way to the wire.</summary>
+    /// <remarks>The cookie witness is the request's OWN field list, not an argument the pool
+    /// computed: nothing injects a Cookie field any more, so a value that never reached the
+    /// list never reaches the wire, and asserting on the argument would pass vacuously.
+    /// </remarks>
     private sealed record Exchange(
         int ConnectionOrdinal,
         string Method,
         Uri Url,
-        string? CookieHeader,
+        string? Cookie,
         Version Version);
 
     /// <summary>
@@ -848,7 +852,6 @@ public sealed class Http3ClientMachineryTests
 
         public async ValueTask<ParsedHttpResponse> SendAsync(
             BufferedRequest request,
-            string? cookieHeader,
             StreamingResponseContext? streamingResponse,
             TlsSessionConfiguration configuration,
             CancellationToken cancellationToken)
@@ -867,7 +870,10 @@ public sealed class Http3ClientMachineryTests
                     Ordinal,
                     request.Method,
                     request.Url,
-                    cookieHeader,
+                    request.Headers
+                        .FirstOrDefault(header => header.Name.Equals(
+                            "Cookie", StringComparison.OrdinalIgnoreCase))
+                        ?.Values.FirstOrDefault(),
                     _version)).ConfigureAwait(false);
             }
             catch (Exception exception)

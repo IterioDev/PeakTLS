@@ -74,7 +74,6 @@ internal sealed record TlsHttp2Configuration(
     TlsHttp2PseudoHeaderConfiguration PseudoHeaders,
     TlsHttp2DataConfiguration Data,
     int? HeaderBlockFragmentSize,
-    bool EmitTrailerHeader,
     TlsHttp2PriorityConfiguration? HeaderPriority,
     string? PriorityUpdate,
     bool FlushAfterHeaderBlock,

@@ -110,12 +110,9 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
             request.Url,
             proxy,
             request.HttpVersionPolicy);
-        string cookieHeader;
-        lock (cookieSync)
-        {
-            cookieHeader = cookies.GetCookieHeader(request.Url);
-        }
-
+        // No cookie is read for the request. The container still records Set-Cookie, and a
+        // request that wants to send one adds it with request.AddHeader — a field the caller
+        // did not add is a field that does not reach the wire.
         var lease = await RentAsync(key, request.Url, proxy, cancellationToken)
             .ConfigureAwait(false);
         var connection = lease.Entry.Connection;
@@ -123,7 +120,6 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
         {
             var response = await connection.SendAsync(
                 request,
-                cookieHeader,
                 streamingResponse,
                 _configuration,
                 cancellationToken).ConfigureAwait(false);

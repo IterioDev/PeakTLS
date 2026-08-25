@@ -57,11 +57,7 @@ public sealed class Http3FieldMapperTests
             [],
             HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request,
-            null,
-            Configuration(),
-            out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Equal(
             [
@@ -82,7 +78,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Accept-Encoding", ["gzip"])]),
-            null,
             Configuration(),
             out _);
 
@@ -95,7 +90,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Host", ["cdn.example.com:8443"])]),
-            null,
             Configuration(),
             out var authority);
 
@@ -108,7 +102,6 @@ public sealed class Http3FieldMapperTests
     {
         _ = Http3FieldMapper.BuildRequestFields(
             Request(url: "https://example.com:4433/"),
-            null,
             Configuration(),
             out var authority);
 
@@ -126,7 +119,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry(name, ["whatever"])]),
-            null,
             Configuration(),
             out _);
 
@@ -144,7 +136,6 @@ public sealed class Http3FieldMapperTests
         var exception = Assert.Throws<HttpRequestException>(() =>
             Http3FieldMapper.BuildRequestFields(
                 Request(headers: [new HeaderEntry("TE", ["gzip"])]),
-                null,
                 Configuration(),
                 out _));
 
@@ -156,7 +147,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("TE", ["trailers"])]),
-            null,
             Configuration(),
             out _);
 
@@ -172,7 +162,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Cookie", ["a=1; b=2"])]),
-            "ignored=1",
             Configuration(),
             out _);
 
@@ -184,7 +173,6 @@ public sealed class Http3FieldMapperTests
     {
         var fields = Http3FieldMapper.BuildRequestFields(
             Request(headers: [new HeaderEntry("Accept", ["text/html", "application/json"])]),
-            null,
             Configuration(),
             out _);
 
@@ -207,11 +195,7 @@ public sealed class Http3FieldMapperTests
             new HeaderEntry("A-Header", ["1"]),
         ]);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request,
-            null,
-            Configuration(),
-            out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         var names = fields.Select(field => field.Name).ToArray();
         Assert.True(
@@ -229,7 +213,7 @@ public sealed class Http3FieldMapperTests
         ]);
 
         Assert.Throws<HttpRequestException>(() =>
-            Http3FieldMapper.BuildRequestFields(request, null, configuration, out _));
+            Http3FieldMapper.BuildRequestFields(request, configuration, out _));
     }
 
     // ------------------------------------------------------------------------------------
@@ -254,8 +238,7 @@ public sealed class Http3FieldMapperTests
             body,
             HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request, null, Configuration(), out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Contains($"content-length: {body.Length}", Rendered(fields));
     }
@@ -264,7 +247,7 @@ public sealed class Http3FieldMapperTests
     public void RequestFields_DeclareNoContentLengthForARequestWithoutContent()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            Request(), null, Configuration(), out _);
+            Request(), Configuration(), out _);
 
         Assert.DoesNotContain(
             Rendered(fields), line => line.StartsWith("content-length:", StringComparison.Ordinal));
@@ -288,8 +271,7 @@ public sealed class Http3FieldMapperTests
             body,
             HasContent: true);
 
-        var fields = Http3FieldMapper.BuildRequestFields(
-            request, null, Configuration(), out _);
+        var fields = Http3FieldMapper.BuildRequestFields(request, Configuration(), out _);
 
         Assert.Contains("content-length: 4", Rendered(fields));
         Assert.DoesNotContain("content-length: 99999", Rendered(fields));
@@ -304,7 +286,7 @@ public sealed class Http3FieldMapperTests
     public void RequestFields_CarryNeitherContentLengthNorTransferEncodingWhenTrailersFollow()
     {
         var fields = Http3FieldMapper.BuildRequestFields(
-            RequestWithTrailers(), null, Configuration(), out _);
+            RequestWithTrailers(), Configuration(), out _);
 
         Assert.DoesNotContain(
             Rendered(fields), line => line.StartsWith("content-length:", StringComparison.Ordinal));
@@ -330,14 +312,13 @@ public sealed class Http3FieldMapperTests
                     new HeaderEntry("Trailer", ["Checksum"]),
                 ],
             },
-            null,
             Configuration(),
             out _);
 
         Assert.Contains("trailer: Checksum", Rendered(announced));
 
         var silent = Http3FieldMapper.BuildRequestFields(
-            RequestWithTrailers(), null, Configuration(), out _);
+            RequestWithTrailers(), Configuration(), out _);
 
         Assert.DoesNotContain(
             Rendered(silent), line => line.StartsWith("trailer:", StringComparison.Ordinal));

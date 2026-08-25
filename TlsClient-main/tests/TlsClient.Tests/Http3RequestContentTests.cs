@@ -187,7 +187,7 @@ public sealed class Http3RequestContentTests
         TlsSessionConfiguration? configuration = null)
     {
         configuration ??= Configuration();
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, configuration, CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, configuration, CancellationToken.None);
 
         var encoded = new List<byte>();
         var succeeded = encodable.TryEncode(encoded, new TlsQuicHttp3Spec(), out var error);
@@ -233,7 +233,7 @@ public sealed class Http3RequestContentTests
             Trailers = [new HeaderEntry("Checksum", ["abc"])],
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("PUT", encodable.Method);
         Assert.Equal("https", encodable.Scheme);
@@ -260,7 +260,7 @@ public sealed class Http3RequestContentTests
             PathOverride = string.Empty,
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("/", encodable.Path);
         Assert.Empty(encodable.Body);
@@ -276,7 +276,7 @@ public sealed class Http3RequestContentTests
             PathOverride = "*",
         };
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, Configuration(), CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, Configuration(), CancellationToken.None);
 
         Assert.Equal("*", encodable.Path);
     }
@@ -366,7 +366,7 @@ public sealed class Http3RequestContentTests
             content);
         var configuration = Configuration();
 
-        var encodable = await Http3Connection.BuildRequestAsync(request, null, configuration, CancellationToken.None);
+        var encodable = await Http3Connection.BuildRequestAsync(request, configuration, CancellationToken.None);
         Assert.Contains(
             encodable.Fields, field => field is { Name: "content-length", Value: "500" });
         Assert.Equal(4, encodable.Body.Length);

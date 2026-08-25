@@ -147,7 +147,6 @@ public sealed class TlsHttpBehaviorProfileTests
         declared.Shutdown.LocalFailureResetCode = Http2ErrorCode.ConnectError;
         declared.Shutdown.PushRejectionResetCode = Http2ErrorCode.RefusedStream;
         declared.HeaderBlockFragmentSize = 512;
-        declared.EmitTrailerHeader = false;
         declared.FlushAfterHeaderBlock = false;
         declared.FlushAfterEveryDataFrame = false;
 
@@ -186,7 +185,6 @@ public sealed class TlsHttpBehaviorProfileTests
         Assert.Equal(Http2ErrorCode.RefusedStream, actual.Shutdown.PushRejectionResetCode);
 
         Assert.Equal(512, actual.HeaderBlockFragmentSize);
-        Assert.False(actual.EmitTrailerHeader);
         Assert.False(actual.FlushAfterHeaderBlock);
         Assert.False(actual.FlushAfterEveryDataFrame);
 

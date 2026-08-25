@@ -35,7 +35,6 @@ internal sealed class Http11Connection : IHttpConnection
 
     public async ValueTask<ParsedHttpResponse> SendAsync(
         BufferedRequest request,
-        string? cookieHeader,
         StreamingResponseContext? streamingResponse,
         TlsSessionConfiguration configuration,
         CancellationToken cancellationToken)
