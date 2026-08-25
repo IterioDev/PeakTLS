@@ -183,7 +183,7 @@ public sealed class Http3FieldMapperTests
 
     /// <summary>
     /// There is no declared order to honour: the request's list IS the order. This used to
-    /// scramble the input and prove a HeaderOrder array put it right; with that array gone, what
+    /// scramble the input and prove a declared order array put it right; with that array gone, what
     /// is left to prove is that nothing reorders the list on the way through.
     /// </summary>
     [Fact]

@@ -72,10 +72,25 @@ grep -E "^    public " src/TlsClient/TlsSessionOptions.cs   | sed 's/^    public
 `EchDnsResolver` and `HandshakeObserver` are null unless you set them; the three collections are
 get-only, so you add to them rather than assigning.
 
-**Headers are yours, all of them.** There is no `DefaultHeaders` on a session or an options
-object, and no preset supplies one either — not even a `User-Agent`. Whatever you put on the
-request is exactly what goes on the wire. `options.HeaderOrder` decides only WHERE a field
-lands when you send it; set it to `null` and your insertion order is the wire order.
+**Headers are yours, all of them.** One rule governs the field section: **a field reaches the
+wire if and only if `request.AddHeader(name, value)` added it, in the order it was added.**
+There is no `DefaultHeaders`, no session or per-request header order, and no preset supplies a
+field either — not even a `User-Agent`. Nothing is synthesised to fill a gap:
+
+- `request.Headers` and `request.Content.Headers` are **not read**. Adding a field there is a
+  no-op, and so is a `Content-Type` that `StringContent` set on your behalf.
+- No `Host` is generated. RFC 9112 §3.2 makes an absent one malformed over HTTP/1.1, so add it
+  yourself; over HTTP/2 and HTTP/3 the authority travels as `:authority` and no field is needed.
+- No `Cookie` is injected. The session container still records `Set-Cookie`; sending one back
+  means adding it.
+- No `Connection`, and no `Trailer`. HTTP/1.1 is persistent by default (RFC 9112 §9.3), and a
+  request announces its trailers by adding the field.
+- A request with a body **must** add `Content-Length` or `Transfer-Encoding` or the send throws.
+  Only the framing field's VALUE is the library's; the slot you added it in is where it lands.
+
+Values are stored verbatim. Nothing round-trips through `HttpRequestHeaders`, so
+`AddHeader("accept-encoding", "gzip, deflate, br")` emits one field line with exactly those
+bytes rather than the three that collection's reflow produces.
 
 ```csharp
 using System.Net;
@@ -478,23 +493,23 @@ var request = new HttpRequestMessage(HttpMethod.Get, "https://fp.impersonate.pro
 // ORDER MATTERS HERE. The preset declares no header order, so these reach the wire in the order
 // they are added - which is why the credential fields are added in their captured slots rather
 // than at the end. Leave one unset and the rest keep their relative order.
-request.Headers.TryAddWithoutValidation("accept", "*/*");
+request.AddHeader("accept", "*/*");
 if (Environment.GetEnvironmentVariable("SPOTIFY_CLIENT_ID") is { } clientId)
 {
-    request.Headers.TryAddWithoutValidation("x-client-id", clientId);
+    request.AddHeader("x-client-id", clientId);
 }
 
-request.Headers.TryAddWithoutValidation("accept-encoding", "gzip, deflate, br");
-request.Headers.TryAddWithoutValidation("priority", "u=3, i");
-request.Headers.TryAddWithoutValidation("app-platform", "iOS");
-request.Headers.TryAddWithoutValidation("user-agent", "Spotify/9.1.76 iOS/27.0 (iPhone17,2)");
+request.AddHeader("accept-encoding", "gzip, deflate, br");
+request.AddHeader("priority", "u=3, i");
+request.AddHeader("app-platform", "iOS");
+request.AddHeader("user-agent", "Spotify/9.1.76 iOS/27.0 (iPhone17,2)");
 if (Environment.GetEnvironmentVariable("SPOTIFY_BEARER") is { } bearer)
 {
-    request.Headers.TryAddWithoutValidation("authorization", "Bearer " + bearer);
+    request.AddHeader("authorization", "Bearer " + bearer);
 }
 
-request.Headers.TryAddWithoutValidation("accept-language", "en-US,en;q=0.9");
-request.Headers.TryAddWithoutValidation("spotify-app-version", "9.1.76.2050");
+request.AddHeader("accept-language", "en-US,en;q=0.9");
+request.AddHeader("spotify-app-version", "9.1.76.2050");
 
 var response = await session.SendAsync(request);
 Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
@@ -516,15 +531,14 @@ endpoint, because the QUIC and TLS shape is per-connection: across 41 QUIC captu
 seven hostnames, every cipher, extension, group, signature algorithm and transport-parameter set
 was identical. Only the rotation offset and the GREASE values differ.
 
-Set the order per endpoint yourself, or add the headers in the order you want and set nothing:
+Add the headers in the order the endpoint's capture shows. That order is the wire order — there
+is nothing else to set:
 
 ```csharp
-// Insertion order reaches the wire when no HeaderOrder is set. Nothing else needed.
-request.Headers.Add("content-type", "application/x-protobuf");
-request.Headers.Add("accept", "*/*");
-
-// Or state it explicitly, per request or per session:
-options.HeaderOrder = ["content-type", "accept", "priority", "accept-encoding"];
+request.AddHeader("content-type", "application/x-protobuf");
+request.AddHeader("accept", "*/*");
+request.AddHeader("priority", "u=3, i");
+request.AddHeader("accept-encoding", "gzip, deflate, br");
 ```
 
 The measured images for each captured leg are listed in §7.
@@ -532,17 +546,24 @@ The measured images for each captured leg are listed in §7.
 ### Reserving the Content-Length slot
 
 `Content-Length` is always recomputed from the body, so you cannot set its value — but you can
-set its POSITION. Declare it with any placeholder:
+set its POSITION, and a request with a body **must**: naming neither it nor `Transfer-Encoding`
+throws. Add it with any placeholder:
 
 ```csharp
-request.Headers.TryAddWithoutValidation("content-type", "application/x-protobuf");
-request.Headers.TryAddWithoutValidation("content-length", "-1");   // slot, not value
+request.AddHeader("content-type", "application/x-protobuf");
+request.AddHeader("accept", "*/*");
+request.AddHeader("content-length", "-1");   // slot, not value
+request.AddHeader("user-agent", "...");
 ```
 
 This matters because captured clients interleave it: the login POST puts `content-length`
-seventh of ten, between `cache-control` and `user-agent`. Without the placeholder the generated
-field is appended, which no captured client does. `Transfer-Encoding` reserves the same slot for
-a chunked body.
+seventh of ten, between `cache-control` and `user-agent`. An appended framing field is a
+distinguisher, because no captured client appends one.
+
+The NAME you choose there decides the framing, not just the position. `Transfer-Encoding` forces
+chunked whatever the body's length; `Content-Length` takes the computed length, and naming it
+for a body whose length is not known in advance — trailers, or a streaming source — throws
+rather than quietly emitting the other field.
 
 ### The transport parameters rotate — do not "fix" this
 
@@ -782,13 +803,9 @@ drive the ClientHello at all (§3b). Two clients are reproduced exactly and veri
 ### Header images measured, and why none of them ship as presets
 
 Header order is per **endpoint**, not per host, so a preset carrying one is only ever right for a
-single path. It is also **not needed**: when no `HeaderOrder` is set anywhere, fields reach the
-wire in the order you added them (`Http11RequestWriter.Order` is a pass-through on an empty
-order). A preset that declared one would silently *re-sort* the headers you supplied, which is
-the opposite of useful. So the presets declare none, and the measured images live here.
-
-Set one explicitly only if you want to reorder what you added:
-`options.HeaderOrder = [...]`, or per request via `TlsRequestOptions.HeaderOrder`.
+single path. It is also **not expressible**: there is no header-order knob anywhere any more.
+Fields reach the wire in the order you added them, so the images below are the sequences to feed
+to `AddHeader` — not arrays to assign.
 
 `spclient` GET, confirmed from two independent capture paths:
 

@@ -17,10 +17,10 @@ var options = TlsPresets.Firefox148.CreateOptions();
 await using var customized = new TlsSession(options);
 
 var request = new HttpRequestMessage(HttpMethod.Get, url);
-request.Headers.TryAddWithoutValidation("accept-language", "tr-TR,tr;q=0.9");
+request.AddHeader("accept-language", "tr-TR,tr;q=0.9");
 var response = await customized.SendAsync(request);
 
-// Set options.HeaderOrder = null and the order you added them in is the order on the wire.
+// The order you add them in is the order on the wire. There is nothing else to set.
 ```
 
 `CreateOptions()` always returns an independent mutable object. The short aliases
@@ -140,11 +140,11 @@ Two more honest limits:
   **HTTP/2** the same app's `login5` leg uses
   `Spotify/917602050 CFNetwork/3892.100.1 Darwin/27.0.0` instead — that string belongs to
   the TCP path and is not what either h3 preset sends.
-- The **header order** is the captured h3 `GET` order. `Authorization` and `X-Client-Id`
-  are per-account credentials the preset leaves empty; set them on the session and they
-  take their captured positions, because `HeaderOrder` places headers rather than
-  insertion order. `Accept-Language: en-US,en;q=0.9` is the captured device's UI language,
-  not a fingerprint axis: change it freely.
+- The **header order** below is the captured h3 `GET` order, and it is a sequence to feed to
+  `AddHeader` rather than an array to assign — the preset carries none. `Authorization` and
+  `X-Client-Id` are per-account credentials; add them at the captured positions shown, because
+  insertion order IS the wire order. `Accept-Language: en-US,en;q=0.9` is the captured device's
+  UI language, not a fingerprint axis: change it freely.
 
 ## The preface is a script, not a fixed set of settings
 
@@ -199,7 +199,7 @@ it can set its POSITION. Declare it with any placeholder and the generated field
 that slot instead of at the end:
 
 ```csharp
-request.Headers.TryAddWithoutValidation("content-length", "-1");   // slot, not value
+request.AddHeader("content-length", "-1");   // slot, not value
 ```
 
 This matters because captured clients interleave it: Spotify's HTTP/3 login POST puts it
@@ -258,9 +258,10 @@ These are per-*request* knobs, and a `TlsHttpBehaviorProfile` deliberately does 
 them — a profile describes a session, and two requests on one connection may each declare
 their own script. Capture them alongside the profile if a persona needs them.
 
-`HeaderOrder`, `PseudoHeaderOrder`, `HeaderPriority`, `PriorityUpdate`, `HeadersPadding`,
-`DataPadding`, `Scheme`, `Protocol`, `PathOverride` and `AuthorityMode` are nullable
-per-request overrides on the same object; null falls back to the session value.
+`PseudoHeaderOrder`, `HeaderPriority`, `PriorityUpdate`, `HeadersPadding`, `DataPadding`,
+`Scheme`, `Protocol`, `PathOverride` and `AuthorityMode` are nullable per-request overrides on
+the same object; null falls back to the session value. There is no header-order override,
+because there is no header order: `AddHeader` decides both membership and position.
 
 ## Pseudo-headers
 

@@ -13,26 +13,26 @@ await using var session = new TlsSession(options);
 
 var request = new HttpRequestMessage(HttpMethod.Get, "https://fp.impersonate.pro/api/http3");
 
-// ORDER MATTERS HERE. The preset declares no header order, so these reach the wire in the order
-// they are added - which is why the credential fields are added in their captured slots rather
+// ORDER MATTERS HERE. A field reaches the wire only when AddHeader put it there, in the order
+// they were added — which is why the credential fields are added in their captured slots rather
 // than at the end. Leave one unset and the rest keep their relative order.
-request.Headers.TryAddWithoutValidation("accept", "*/*");
+request.AddHeader("accept", "*/*");
 if (Environment.GetEnvironmentVariable("SPOTIFY_CLIENT_ID") is { } clientId)
 {
-    request.Headers.TryAddWithoutValidation("x-client-id", clientId);
+    request.AddHeader("x-client-id", clientId);
 }
 
-request.Headers.TryAddWithoutValidation("accept-encoding", "gzip, deflate, br");
-request.Headers.TryAddWithoutValidation("priority", "u=3, i");
-request.Headers.TryAddWithoutValidation("app-platform", "iOS");
-request.Headers.TryAddWithoutValidation("user-agent", "Spotify/9.1.76 iOS/27.0 (iPhone17,2)");
+request.AddHeader("accept-encoding", "gzip, deflate, br");
+request.AddHeader("priority", "u=3, i");
+request.AddHeader("app-platform", "iOS");
+request.AddHeader("user-agent", "Spotify/9.1.76 iOS/27.0 (iPhone17,2)");
 if (Environment.GetEnvironmentVariable("SPOTIFY_BEARER") is { } bearer)
 {
-    request.Headers.TryAddWithoutValidation("authorization", "Bearer " + bearer);
+    request.AddHeader("authorization", "Bearer " + bearer);
 }
 
-request.Headers.TryAddWithoutValidation("accept-language", "en-US,en;q=0.9");
-request.Headers.TryAddWithoutValidation("spotify-app-version", "9.1.76.2050");
+request.AddHeader("accept-language", "en-US,en;q=0.9");
+request.AddHeader("spotify-app-version", "9.1.76.2050");
 
 var response = await session.SendAsync(request);
 Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
