@@ -9,6 +9,22 @@ public sealed class TlsRequestOptions
     private TlsProxy? _proxy;
     private bool _hasProxyOverride;
 
+    /// <summary>
+    /// Gets the request's header fields. This collection is the sole source of the wire's field
+    /// section: a field reaches the wire if and only if it appears here, in the order it was
+    /// added. Nothing is synthesised — an absent <c>Host</c> means no <c>Host</c> field, and an
+    /// absent <c>Cookie</c> means the session container contributes nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>Values are stored verbatim. Nothing passes through <c>HttpRequestHeaders</c>, which
+    /// is what keeps <c>accept-encoding: gzip, deflate, br</c> a single field line carrying
+    /// those exact bytes rather than the three that collection's reflow produces.</para>
+    /// <para><c>Content-Length</c> and <c>Transfer-Encoding</c> are the one exception, and it
+    /// covers the value only: whichever of the two is added reserves the position, and the
+    /// computed framing field replaces it there.</para>
+    /// </remarks>
+    public TlsHeaders Headers { get; } = new();
+
     /// <summary>Gets request trailer fields sent after the content body.</summary>
     public TlsHeaders Trailers { get; } = new();
 

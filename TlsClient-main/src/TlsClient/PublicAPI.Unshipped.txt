@@ -378,6 +378,7 @@ TlsClient.TlsQuicVarintWidth.FourBytes = 4 -> TlsClient.TlsQuicVarintWidth
 TlsClient.TlsQuicVarintWidth.Minimal = 0 -> TlsClient.TlsQuicVarintWidth
 TlsClient.TlsQuicVarintWidth.OneByte = 1 -> TlsClient.TlsQuicVarintWidth
 TlsClient.TlsQuicVarintWidth.TwoBytes = 2 -> TlsClient.TlsQuicVarintWidth
+TlsClient.TlsRequestHeaderExtensions
 TlsClient.TlsRequestOptions.AuthorityMode.get -> TlsClient.TlsHttp2AuthorityMode?
 TlsClient.TlsRequestOptions.AuthorityMode.set -> void
 TlsClient.TlsRequestOptions.DataPadding.get -> int?
@@ -390,6 +391,7 @@ TlsClient.TlsRequestOptions.HeaderOrder.get -> System.Collections.Generic.IReadO
 TlsClient.TlsRequestOptions.HeaderOrder.set -> void
 TlsClient.TlsRequestOptions.HeaderPriority.get -> TlsClient.TlsHttp2Priority?
 TlsClient.TlsRequestOptions.HeaderPriority.set -> void
+TlsClient.TlsRequestOptions.Headers.get -> TlsClient.TlsHeaders!
 TlsClient.TlsRequestOptions.HeadersPadding.get -> int?
 TlsClient.TlsRequestOptions.HeadersPadding.set -> void
 TlsClient.TlsRequestOptions.PathOverride.get -> string?
@@ -413,4 +415,5 @@ static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byt
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Literal(ulong id, System.ReadOnlySpan<byte> value) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Placed(ulong id) -> TlsClient.TlsQuicTransportParameterEntry!
+static TlsClient.TlsRequestHeaderExtensions.AddHeader(this System.Net.Http.HttpRequestMessage! request, string! name, string! value) -> void
 static TlsClient.TlsRequestOptions.HeaderNamesOf(System.Net.Http.HttpRequestMessage! request) -> string![]!
