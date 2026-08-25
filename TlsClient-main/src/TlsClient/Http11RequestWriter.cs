@@ -87,14 +87,6 @@ internal static class Http11RequestWriter
 
         Remove(headers, "Proxy-Authorization");
 
-        // A caller may reserve the body-framing field's POSITION by declaring Content-Length or
-        // Transfer-Encoding with any value at all — the value is always recomputed, so a
-        // placeholder like "-1" is fine and only the slot survives. Without this the generated
-        // field is appended, which no captured client does: real ones interleave it.
-        var framingAnchor = FramingAnchor(headers);
-        Remove(headers, "Content-Length");
-        Remove(headers, "Transfer-Encoding");
-
         if (!Contains(headers, "Host"))
         {
             // RFC 9113 section 8.5 defines a plain CONNECT's ":authority" as "the host and port
@@ -119,21 +111,50 @@ internal static class Http11RequestWriter
         }
         if (request.HasPayload)
         {
-            if (!request.HasTrailers && request.ContentLength is { } contentLength)
+            // The caller reserves the body-framing field's POSITION by adding Content-Length or
+            // Transfer-Encoding with any value at all — the value is always recomputed, so a
+            // placeholder like "-1" is fine and only the slot survives. Without a slot the field
+            // would have to be appended, which no captured client does: real ones interleave it,
+            // so an appended one is a distinguisher. The NAME chosen there decides the framing.
+            var index = IndexOfFraming(headers);
+            var lengthKnown = !request.HasTrailers && request.ContentLength is not null;
+            // ponytail: the SealedHeaders branches go in Task 6 of the sealed-AddHeader plan,
+            // leaving only the sealed arm. A legacy request's Content-Length entry came from
+            // HttpContent.Headers rather than from the caller, so its name decides nothing.
+            var chunked = !lengthKnown;
+            if (request.SealedHeaders)
             {
-                InsertFraming(
-                    headers,
-                    framingAnchor,
-                    new HeaderEntry(
-                        "Content-Length",
-                        [contentLength.ToString(System.Globalization.CultureInfo.InvariantCulture)]));
+                if (index < 0)
+                {
+                    throw new InvalidOperationException(
+                        "The request has a body, but its header list names neither " +
+                        "Content-Length nor Transfer-Encoding. Call request.AddHeader with one " +
+                        "of them to place the body-framing field.");
+                }
+                chunked = headers[index].Name.Equals(
+                    "Transfer-Encoding", StringComparison.OrdinalIgnoreCase);
+                if (!chunked && !lengthKnown)
+                {
+                    throw new InvalidOperationException(
+                        "The request names Content-Length, but its body length is not known in " +
+                        "advance. Name Transfer-Encoding instead.");
+                }
+            }
+            var framing = chunked
+                ? new HeaderEntry("Transfer-Encoding", ["chunked"])
+                : new HeaderEntry(
+                    "Content-Length",
+                    [request.ContentLength!.Value.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture)]);
+            if (index < 0)
+            {
+                // ponytail: transitional, deleted in Task 6 of the sealed-AddHeader plan. A
+                // legacy request never carries a framing slot, so appending is what it did.
+                headers.Add(framing);
             }
             else
             {
-                InsertFraming(
-                    headers,
-                    framingAnchor,
-                    new HeaderEntry("Transfer-Encoding", ["chunked"]));
+                headers[index] = framing;
             }
             if (request.HasTrailers)
             {
@@ -230,49 +251,14 @@ internal static class Http11RequestWriter
     }
 
     /// <summary>
-    /// Reports the slot a caller reserved for the body-framing field: the name of the header it
-    /// sat behind, or null when it was first. <c>Reserved</c> is false when no slot was declared,
-    /// in which case the generated field is appended as before.
+    /// Reports the index of the framing slot the caller reserved, or -1. The NAME chosen there
+    /// decides the framing, not only the position: Transfer-Encoding forces chunked whatever the
+    /// body's length, and Content-Length takes the computed length.
     /// </summary>
-    private static (bool Reserved, string? Behind) FramingAnchor(List<HeaderEntry> headers)
-    {
-        for (var index = 0; index < headers.Count; index++)
-        {
-            var name = headers[index].Name;
-            if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
-            {
-                return (true, index == 0 ? null : headers[index - 1].Name);
-            }
-        }
-        return (false, null);
-    }
-
-    /// <summary>
-    /// Places the generated body-framing field in the slot <see cref="FramingAnchor"/> found, or
-    /// appends it when the caller reserved none.
-    /// </summary>
-    private static void InsertFraming(
-        List<HeaderEntry> headers,
-        (bool Reserved, string? Behind) anchor,
-        HeaderEntry entry)
-    {
-        if (!anchor.Reserved)
-        {
-            headers.Add(entry);
-            return;
-        }
-        if (anchor.Behind is null)
-        {
-            // The slot was first. Host is synthesised at index 0 for HTTP/1.1 and must stay
-            // there, so land immediately after it when it is present.
-            headers.Insert(Contains(headers, "Host") ? 1 : 0, entry);
-            return;
-        }
-        var behind = headers.FindIndex(header =>
-            string.Equals(header.Name, anchor.Behind, StringComparison.OrdinalIgnoreCase));
-        headers.Insert(behind < 0 ? headers.Count : behind + 1, entry);
-    }
+    private static int IndexOfFraming(List<HeaderEntry> headers) =>
+        headers.FindIndex(header =>
+            header.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) ||
+            header.Name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase));
 
     internal static bool Contains(List<HeaderEntry> headers, string name) => headers.Any(
         header => string.Equals(header.Name, name, StringComparison.OrdinalIgnoreCase));

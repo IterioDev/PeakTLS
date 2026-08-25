@@ -19,6 +19,68 @@ public sealed class InsertionOrderHeaderTests
         return [.. Http11RequestWriter.Order(merged, order).Select(h => h.Name.ToLowerInvariant())];
     }
 
+    private static async Task<List<HeaderEntry>> WireAsync(HttpRequestMessage request)
+    {
+        var buffered = await BufferedRequest.CreateAsync(
+            request, maximumBodyBytes: 4096, TlsHttpVersionPolicy.PreferHttp2, CancellationToken.None);
+        return Http11RequestWriter.MergeHeaders(buffered, cookieHeader: null);
+    }
+
+    [Fact]
+    public async Task TheComputedLengthLandsInTheSlotTheCallerNamed()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/")
+        {
+            Content = new ReadOnlyMemoryContent(Encoding.UTF8.GetBytes("body")),
+        };
+        request.AddHeader("host", "example.com");
+        request.AddHeader("content-type", "application/x-protobuf");
+        request.AddHeader("accept", "*/*");
+        request.AddHeader("content-length", "-1");
+        request.AddHeader("user-agent", "agent");
+
+        // The captured POST puts content-type first and content-length mid-block. The value
+        // added there is a placeholder — only the position survives.
+        var wire = await WireAsync(request);
+        Assert.Equal(
+            ["host", "content-type", "accept", "content-length", "user-agent"],
+            wire.Select(header => header.Name.ToLowerInvariant()));
+        Assert.Equal(
+            ["4"],
+            wire.Single(header =>
+                header.Name.Equals("content-length", StringComparison.OrdinalIgnoreCase)).Values);
+    }
+
+    [Fact]
+    public async Task ABodyWithNoFramingNameThrows()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/")
+        {
+            Content = new ReadOnlyMemoryContent(Encoding.UTF8.GetBytes("body")),
+        };
+        request.AddHeader("accept", "*/*");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WireAsync(request));
+    }
+
+    [Fact]
+    public async Task NamingTransferEncodingForcesChunkedEvenWhenTheLengthIsKnown()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://example.com/")
+        {
+            Content = new ReadOnlyMemoryContent(Encoding.UTF8.GetBytes("body")),
+        };
+        request.AddHeader("host", "example.com");
+        request.AddHeader("transfer-encoding", "chunked");
+        request.AddHeader("accept", "*/*");
+
+        var wire = await WireAsync(request);
+        Assert.Equal(
+            ["host", "transfer-encoding", "accept"],
+            wire.Select(header => header.Name.ToLowerInvariant()));
+        Assert.Equal(["chunked"], wire[1].Values);
+    }
+
     [Fact]
     public async Task WithNoHeaderOrderTheCallersInsertionOrderSurvivesBehindASynthesisedHost()
     {

@@ -25,6 +25,14 @@ internal sealed record BufferedRequest(
 
     public bool SuppressSensitiveSessionHeaders { get; init; }
 
+    /// <summary>
+    /// True when the fields came from <c>request.AddHeader</c> rather than the legacy
+    /// <c>request.Headers</c> read.
+    /// </summary>
+    // ponytail: transitional, deleted in Task 6 of the sealed-AddHeader plan along with the
+    // legacy path it distinguishes.
+    public bool SealedHeaders { get; init; }
+
     /// <summary>Frames written immediately before the HTTP/2 header block. Ignored on HTTP/1.1.</summary>
     public TlsHttp2RequestFrameConfiguration[] FramesBeforeHeaders { get; init; } = [];
 
@@ -183,6 +191,7 @@ internal sealed record BufferedRequest(
             hasContent,
             versionPolicy)
         {
+            SealedHeaders = !legacy,
             Trailers = requestConfiguration.Trailers,
             ReplayPolicy = requestConfiguration.ReplayPolicy,
             HasProxyOverride = requestConfiguration.HasProxyOverride,
@@ -239,6 +248,7 @@ internal sealed record BufferedRequest(
             request.Content,
             streamingBufferSize)
         {
+            SealedHeaders = !legacy,
             Trailers = requestConfiguration.Trailers,
             ReplayPolicy = requestConfiguration.ReplayPolicy,
             HasProxyOverride = requestConfiguration.HasProxyOverride,
