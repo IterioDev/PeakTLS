@@ -51,6 +51,8 @@ public sealed class TlsPresetTests
         Assert.Equal(ios27.Quic.PacketNumberEncodedLength, ios26.Quic.PacketNumberEncodedLength);
         Assert.Equal(ios27.Quic.PaddingTarget, ios26.Quic.PaddingTarget);
         Assert.Equal(ios27.Quic.MaximumPathMtu, ios26.Quic.MaximumPathMtu);
+        Assert.Equal(ios27.Quic.PathMtuDiscovery, ios26.Quic.PathMtuDiscovery);
+        Assert.False(ios26.Quic.PathMtuDiscovery);
         Assert.Equal(
             ios27.Quic.InitialCryptoFrameByteCounts,
             ios26.Quic.InitialCryptoFrameByteCounts);
@@ -91,6 +93,14 @@ public sealed class TlsPresetTests
         // which fills a 1500-byte MTU exactly and, with Don't Fragment set, fails the send with
         // WSAEMSGSIZE on any smaller path. Asserted because it is the kind of value a later
         // "align with the library default" tidy-up would silently undo.
+        // OFF, AND ASSERTED RATHER THAN LEFT TO THE DEFAULT. A probe is a datagram at a size
+        // nothing in the capture shows this client sending, so discovery is a fingerprint knob
+        // here before it is a transport one - and a later "align with the library default"
+        // tidy-up would put unmeasured datagrams back on the wire silently.
+        Assert.False(options.Quic.PathMtuDiscovery);
+
+        // Inert while discovery is off; pinned so a caller who turns it back on gets a
+        // tunnel-safe ceiling rather than the library's 1472.
         Assert.Equal(1392, options.Quic.MaximumPathMtu);
 
         Assert.Equal(16_777_216UL, options.Quic.FlowControl.InitialMaxData);

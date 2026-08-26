@@ -238,20 +238,33 @@ public static class TlsPresets
         quic.Token = ReadOnlyMemory<byte>.Empty;
         quic.PaddingTarget = 1200;
 
-        // NOT MEASURED — a deliberate accommodation, and the one value here that describes the
-        // local path rather than the captured client. The library default is 1472, the UDP
-        // payload that fills a 1500-byte Ethernet MTU exactly; on any smaller path — WireGuard
-        // 1420, PPPoE 1492, most VPNs, and a good many proxy egress links — that is a 1500-byte
-        // IP packet the interface will not carry, and because RFC 9000 s14 has the socket set
-        // Don't Fragment, Windows refuses the send with WSAEMSGSIZE (10040) rather than
-        // fragmenting. This preset is Http3Only and is used through a SOCKS5 UDP relay more
-        // often than not, so the tunnelled path is the common case rather than the exception.
-        // 1392 clears the usual tunnel MTUs with room for the relay's own RFC 1928 section 7
-        // header, which TlsQuicSocks5Transport charges on top of every datagram.
+        // OFF, AND THAT IS A FINGERPRINT DECISION BEFORE IT IS A PATH ONE. RFC 9000 s14.2 makes
+        // discovery a SHOULD and offers the same sentence's other half to anyone who declines -
+        // "In the absence of these mechanisms, QUIC endpoints SHOULD NOT send datagrams larger
+        // than the smallest allowed maximum datagram size" - so both answers conform and this
+        // one picks the half that puts nothing extra on the wire. A probe is a PING-and-PADDING
+        // datagram at a size nothing else in the flight uses, on a schedule this library
+        // invented, and NO CAPTURE IN THIS REPOSITORY RECORDS WHETHER THE IMITATED CLIENT SENDS
+        // ONE, at what size, or how often. TlsQuicConnectionSpec.PathMtuDiscovery's own remarks
+        // name that cost and say a connection which has to match a capture byte for byte should
+        // set this false. This is that connection.
         //
-        // It costs a little throughput on a genuine 1500-byte path. It is not a fingerprint
-        // axis worth defending: the captured Initial datagrams are 1200 either way, and a real
-        // device's post-handshake datagram sizes follow whatever path it is on.
+        // THE PATH ARGUMENT AGREES WITH IT RATHER THAN DRIVING IT. Every datagram now stays at
+        // BasePathMtu's 1200, which is under every tunnel MTU worth naming - WireGuard 1420,
+        // Tailscale 1280, PPPoE 1492 - with room to spare for a SOCKS5 relay's RFC 1928 section
+        // 7 header on top. A ceiling ABOVE what the local interface carries is refused by a
+        // DF-set socket with WSAEMSGSIZE (10040), and RFC 9000 s14 requires that DF bit, so the
+        // only safe ceiling is one no route can undercut. 1200 is the only number with that
+        // property, because s14.1 already requires every path to carry it.
+        //
+        // It costs throughput on a genuine 1500-byte path, and that is the whole cost. The
+        // captured Initial datagrams are 1200 either way.
+        quic.PathMtuDiscovery = false;
+
+        // INERT WHILE THE LINE ABOVE IS FALSE, and kept rather than deleted so that a caller who
+        // turns discovery back on gets a tunnel-safe ceiling instead of the library's 1472 -
+        // which is the UDP payload of a 1500-byte Ethernet MTU exactly, and therefore too large
+        // for every tunnelled path this preset is usually dialled through.
         quic.MaximumPathMtu = 1392;
 
         quic.HeaderLengthVarintWidth = TlsQuicVarintWidth.TwoBytes;

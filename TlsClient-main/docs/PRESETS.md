@@ -138,14 +138,27 @@ seven. `CreateOptions()` redraws the rotation each time.
 - **The reserved SETTINGS redraw cadence.** `TlsHttp3Options.Settings` is a list of literal
   pairs with no drawn slot, so it is redrawn per options object; the real client redraws
   per connection.
-- **`Quic.MaximumPathMtu`, pinned to 1392 and not a captured value at all.** It describes the
-  local path rather than the client. The library default is 1472 — the UDP payload that fills
-  a 1500-byte Ethernet MTU exactly — and RFC 9000 §14 has the socket set Don't Fragment, so on
-  a smaller path (WireGuard 1420, PPPoE 1492, most VPNs, many proxy egress links) the send is
-  refused with `WSAEMSGSIZE` rather than fragmented. This preset is `Http3Only` and is usually
-  driven through a SOCKS5 UDP relay, whose RFC 1928 §7 header is charged on top of every
-  datagram, so the tunnelled path is the common case. Raise it to 1472 if you know your path
-  carries a full 1500-byte MTU and you want the throughput back.
+- **Whether the client probes its path MTU at all.** Both HTTP/3 presets set
+  `Quic.PathMtuDiscovery = false`, against a library default of `true`. That is a fingerprint
+  decision first: a probe is a PING-and-PADDING datagram at a size nothing else in the flight
+  uses, on a schedule this library invented, and **no capture here records whether the real
+  client sends one**, at what size, or how often. RFC 9000 §14.2 makes discovery a SHOULD and
+  offers the same sentence's other half — *"In the absence of these mechanisms, QUIC endpoints
+  SHOULD NOT send datagrams larger than the smallest allowed maximum datagram size"* — so both
+  answers conform, and these presets pick the one that puts nothing extra on the wire.
+
+  The path argument agrees rather than drives. Every datagram stays at `BasePathMtu`'s 1200,
+  which is under every tunnel MTU worth naming (WireGuard 1420, Tailscale 1280, PPPoE 1492)
+  with room for a SOCKS5 relay's RFC 1928 §7 header on top. A ceiling above what the local
+  interface carries is refused by a DF-set socket with `WSAEMSGSIZE` — RFC 9000 §14 requires
+  that DF bit — and 1200 is the only ceiling no route can undercut, because §14.1 already
+  requires every path to carry it. The cost is throughput on a genuine 1500-byte path.
+
+  `Quic.MaximumPathMtu` stays pinned at 1392 and is **inert** while discovery is off. It is
+  kept so a caller who turns discovery back on gets a tunnel-safe ceiling rather than the
+  library's 1472, which is the UDP payload of a 1500-byte Ethernet MTU exactly and therefore
+  too large for the tunnelled paths this preset is usually dialled through. Neither value is
+  captured; both describe the local path rather than the client.
 
 ### Two header images, one QUIC shape
 
