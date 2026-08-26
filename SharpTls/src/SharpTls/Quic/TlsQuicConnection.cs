@@ -1494,6 +1494,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             SocketErrorCode: SocketError.MessageSize,
         };
 
+    /// <summary>CRYPTO bytes still owed to a datagram, with the offset they go out at.</summary>
+    /// <remarks>A MUTABLE STAND-IN FOR <see cref="TlsQuicCryptoDataEvent"/>, which is public and
+    /// immutable and should stay both. What the send path needs is a queue it can take the front
+    /// of and put the remainder back into, which is a different thing from the event the TLS
+    /// stack raised.</remarks>
+    private readonly record struct PendingCrypto(
+        TlsQuicEncryptionLevel Level, ulong Offset, ReadOnlyMemory<byte> Data);
+
+    /// <summary>An upper bound on a CRYPTO frame's own framing, RFC 9000 s19.6.</summary>
+    /// <remarks>One type byte and two variable-length integers - Offset and Length - at s16
+    /// Table 4's widest eight bytes each. Pessimistic on purpose: it is subtracted from a
+    /// budget, so over-stating it costs a few bytes and under-stating it builds the datagram
+    /// that cannot be sent.</remarks>
+    private const int CryptoFrameOverheadBound = 1 + 8 + 8;
+
     /// <summary>An upper bound on what a long-header packet spends before its first frame.
     /// </summary>
     /// <remarks>A BOUND RATHER THAN THIS PACKET'S FIGURE, and deliberately the pessimistic one:
@@ -4725,25 +4740,55 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var crypto = new List<TlsQuicCryptoDataEvent>();
+        var crypto = new List<PendingCrypto>();
         foreach (var result in results)
         {
             foreach (var raised in result.Events)
             {
                 if (raised is TlsQuicCryptoDataEvent data)
                 {
-                    crypto.Add(data);
+                    crypto.Add(new PendingCrypto(data.Level, data.Offset, data.Data));
                 }
             }
         }
 
-        var written = BuildAnswerDatagram(
-            crypto, now, out var carriedHandshakePacket, out var carriedAckElicitingFrame);
-        if (written > 0)
+        // A LOOP, BECAUSE ONE ANSWER DOES NOT ALWAYS FIT ONE DATAGRAM. RFC 9000 s14.2 bounds
+        // the datagram and this method used to put every byte of CRYPTO the TLS stack raised
+        // into one - which is fine for a Finished and wrong for a SECOND ClientHello. A server
+        // that answers with HelloRetryRequest gets one back at Initial level, ~1500 bytes of it,
+        // and it went out as a single 1525-byte Initial packet that a DF-set socket refuses.
+        // s19.6 makes CRYPTO splittable - the frame carries its own offset - so the fix is to
+        // send what fits and come back for the rest, which is what SendInitialFlightAsync has
+        // always done for the FIRST ClientHello through InitialCryptoFrameByteCounts.
+        var carriedHandshakePacket = false;
+        var carriedAckElicitingFrame = false;
+        var sentAny = false;
+        while (true)
         {
+            var written = BuildAnswerDatagram(
+                crypto, now, out var carriedHandshake, out var carriedAckEliciting);
+            carriedHandshakePacket |= carriedHandshake;
+            carriedAckElicitingFrame |= carriedAckEliciting;
+            if (written <= 0)
+            {
+                break;
+            }
+
+            sentAny = true;
             await SendDatagramAsync(_sendBuffer.AsMemory(0, written), cancellationToken)
                 .ConfigureAwait(false);
 
+            // NO PROGRESS ENDS THE LOOP, and it is the guard that matters: a build that wrote
+            // bytes but consumed no CRYPTO would otherwise repeat forever. Every path that can
+            // leave CRYPTO behind consumes at least one byte of it first.
+            if (crypto.Count == 0)
+            {
+                break;
+            }
+        }
+
+        if (sentAny)
+        {
             // RFC 9000 s10.1's second restart, and the condition is what makes it a restart
             // rather than a reset. s2 makes every frame but ACK, PADDING and CONNECTION_CLOSE
             // ack-eliciting, so a datagram carrying CRYPTO or PATH_RESPONSE restarts the idle
@@ -4793,7 +4838,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         }
 
         ConfirmIfHandshakeDoneArrived();
-        return written > 0;
+        return sentAny;
     }
 
     private void ConfirmIfHandshakeDoneArrived()
@@ -4904,7 +4949,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     // NOT async, for the same ref struct reason as BuildInitialFlight.
     private int BuildAnswerDatagram(
-        IReadOnlyList<TlsQuicCryptoDataEvent> crypto,
+        List<PendingCrypto> crypto,
         DateTimeOffset now,
         out bool carriedHandshakePacket,
         out bool carriedAckElicitingFrame)
@@ -4921,6 +4966,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // the dimensions subsystem B varies, and the plan's design constraints put
         // "per-datagram flight plan" on the list of things nothing may read a literal for.
         // Reversing this loop used to leave 1043 of 1043 green.
+        var spentAcrossLevels = 0;
         foreach (var level in _options.Spec.CoalesceAscendingByLevel
             ? AscendingLevels
             : DescendingLevels)
@@ -4986,31 +5032,78 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // frames big enough for that to matter, because they are whole CRYPTO frames from a
             // flight that needed more than one datagram in the first place.
             //
-            // MEASURED BY BUILDING, for the reason the 1-RTT prefix below is: the encoded size
-            // of what is already committed depends on the long header, the Length varint that
-            // widens with what follows it, and s14.1's expansion. Passing a null sent-packet
-            // list records nothing and returns the exact figure.
-            var committed = packets.Count == 0
-                ? 0
-                : TlsQuicDatagramBuilder.BuildDatagram(_options.Spec, packets, now, _sendBuffer);
-
-            TakeRepairsInto(
-                level, frames, DatagramPayloadBudget - committed - LongHeaderPacketOverheadBound);
-
-            foreach (var data in crypto)
+            // CONTENT, NOT ENCODED SIZE, AND THE DIFFERENCE IS s14.1's PADDING. Measuring the
+            // prefix by building it looks more accurate and is wrong here: BuildDatagram
+            // EXPANDS an Initial-carrying datagram to PaddingTarget, so a tiny Initial ACK
+            // measured 1200 and left the Handshake level - the one carrying Finished - a
+            // negative budget. The padding is not a claim on the datagram; it is what fills the
+            // datagram when nothing else does, and every byte of it yields to real content.
+            // Measured that way, 62 tests stopped completing their handshake.
+            var spent = spentAcrossLevels + LongHeaderPacketOverheadBound;
+            foreach (var already in frames)
             {
-                if (data.Level != level)
+                spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
+            }
+
+            var spentFrames = frames.Count;
+
+            TakeRepairsInto(level, frames, DatagramPayloadBudget - spent);
+
+            // RFC 9000 s14.2 BOUNDS THIS ARM TOO, AND IT WAS THE ONE LEFT UNBOUNDED. The
+            // repairs above are capped and the 1-RTT stream take below is capped; this loop used
+            // to append every byte the TLS stack raised at this level, whatever that came to. It
+            // is harmless for a Finished and wrong for a SECOND ClientHello: a server answering
+            // HelloRetryRequest gets ~1500 bytes back at Initial level, and they went out as one
+            // Initial packet of 1525 bytes that a DF-set socket refuses with
+            // SocketError.MessageSize - immune to MaximumPathMtu, BasePathMtu and
+            // PathMtuDiscovery alike, because none of them is consulted on this path.
+            //
+            // s19.6 MAKES CRYPTO SPLITTABLE, WHICH IS WHY THIS CAN CHUNK WHERE THE REPAIR DRAIN
+            // COULD NOT: "The CRYPTO frame ... includes ... Offset", so a frame carrying the
+            // second half of a message is complete in itself. The remainder stays in the list
+            // and SendAnswerAsync builds another datagram for it.
+            var cryptoBudget = DatagramPayloadBudget - spent;
+            foreach (var repaired in frames.Skip(spentFrames))
+            {
+                cryptoBudget -= TlsQuicFrames.MeasureFrame(_frameMeasureScratch, repaired);
+            }
+
+            for (var c = 0; c < crypto.Count; c++)
+            {
+                if (crypto[c].Level != level)
                 {
                     continue;
                 }
 
-                // The offset is the TLS endpoint's and is never recomputed here.
+                var room = cryptoBudget - CryptoFrameOverheadBound;
+                if (room <= 0)
+                {
+                    break;
+                }
+
+                var entry = crypto[c];
+                var take = Math.Min(room, entry.Data.Length);
+
+                // The offset is the TLS endpoint's, advanced by what has already gone out and
+                // never recomputed from anything else.
                 frames.Add(new TlsQuicFrame
                 {
                     RawType = (ulong)TlsQuicFrameType.Crypto,
-                    Offset = data.Offset,
-                    Data = data.Data,
+                    Offset = entry.Offset,
+                    Data = entry.Data[..take],
                 });
+
+                cryptoBudget -= take + CryptoFrameOverheadBound;
+                if (take == entry.Data.Length)
+                {
+                    crypto.RemoveAt(c--);
+                }
+                else
+                {
+                    crypto[c] = new PendingCrypto(
+                        entry.Level, entry.Offset + (ulong)take, entry.Data[take..]);
+                    break;
+                }
             }
 
             if (hasAck && !_options.Spec.AckLeadsInPacket)
@@ -5052,6 +5145,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);
 
+            // WHAT THIS PACKET COSTS THE DATAGRAM, carried to the next level of the loop so
+            // that two coalesced packets cannot each spend the whole budget.
+            spentAcrossLevels += LongHeaderPacketOverheadBound;
+            foreach (var built in frames)
+            {
+                spentAcrossLevels += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, built);
+            }
+
             packets.Add(new TlsQuicPacketToSend
             {
                 Plan = PlanFor(level, _nextPacketNumber[(int)level]++),
@@ -5078,9 +5179,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // records nothing and returns the exact figure. It costs one extra encode, and only
         // while a handshake level still has something to send - zero passes out of every
         // connection's steady state.
-        var coalescedPrefixBytes = packets.Count == 0
-            ? 0
-            : TlsQuicDatagramBuilder.BuildDatagram(_options.Spec, packets, now, _sendBuffer);
+        var coalescedPrefixBytes = spentAcrossLevels;
 
         if (TryBuildApplicationPacket(now, coalescedPrefixBytes, out var oneRtt))
         {
