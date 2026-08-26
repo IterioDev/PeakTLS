@@ -1365,7 +1365,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             var overhead = _options.Transport.DatagramOverhead;
             throw new IOException(
                 $"[{origin}: {DescribeCoalescedPackets(payload.Span)}; "
-                + $"budget {DatagramPayloadBudget}] "
+                + $"budget {DatagramPayloadBudget}"
+                + (origin == nameof(SendAnswerAsync)
+                    ? $"; frames {_lastDatagramFrames}"
+                    : string.Empty)
+                + "] "
                 + $"The host refused a {payload.Length + overhead}-byte datagram "
                 + $"({payload.Length} bytes of QUIC plus {overhead} bytes of transport header) "
                 + $"to {_options.RemoteEndPoint}: the outgoing interface for that route carries "
@@ -1494,6 +1498,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         {
             SocketErrorCode: SocketError.MessageSize,
         };
+
+    /// <summary>What the last datagram this connection built was made of, for the refusal
+    /// message.</summary>
+    /// <remarks>THE ONE THING THE WIRE CANNOT BE ASKED. A refused datagram is already encrypted,
+    /// so <see cref="DescribeCoalescedPackets"/> can name its packets and their sizes and can
+    /// never name the FRAMES inside them - and a packet that is too large is too large because
+    /// of a frame that some arm of the builder put there. Four rounds of field reports narrowed
+    /// this to one Initial packet and could go no further. Recorded at build time, read only on
+    /// the refusal path.</remarks>
+    private string _lastDatagramFrames = "not recorded";
 
     /// <summary>CRYPTO bytes still owed to a datagram, with the offset they go out at.</summary>
     /// <remarks>A MUTABLE STAND-IN FOR <see cref="TlsQuicCryptoDataEvent"/>, which is public and
@@ -5145,6 +5159,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             }
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);
+
+            _lastDatagramFrames = $"{level}[" + string.Join(
+                ", ",
+                frames.Select(f =>
+                    $"{f.Type} {TlsQuicFrames.MeasureFrame(_frameMeasureScratch, f)}")) + "]";
 
             // WHAT THIS PACKET COSTS THE DATAGRAM, carried to the next level of the loop so
             // that two coalesced packets cannot each spend the whole budget.
