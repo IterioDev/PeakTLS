@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
 namespace SharpTls.Quic;
@@ -1341,9 +1342,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// </remarks>
     /// <param name="payload">The datagram to send.</param>
     /// <param name="cancellationToken">Cancels the send.</param>
+    /// <param name="origin">The build path that produced this datagram, filled in by the
+    /// compiler. THE FIELD REPORT'S MISSING HALF: a refusal names a size, and five builders in
+    /// this class can produce one - the Initial flight, the PTO probe, the path-MTU probe, the
+    /// ordinary answer, and the close. Three fixes were aimed at this error from the size
+    /// alone, each at a builder inferred by arithmetic, before it was worth one parameter to
+    /// have the datagram say which one built it.</param>
     /// <exception cref="IOException">The host refused the datagram for its size.</exception>
     private async ValueTask SendDatagramAsync(
-        ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+        ReadOnlyMemory<byte> payload,
+        CancellationToken cancellationToken,
+        [CallerMemberName] string origin = "")
     {
         try
         {
@@ -1355,7 +1364,8 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         {
             var overhead = _options.Transport.DatagramOverhead;
             throw new IOException(
-                $"The host refused a {payload.Length + overhead}-byte datagram "
+                $"[{origin}: {DescribeCoalescedPackets(payload.Span)}] "
+                + $"The host refused a {payload.Length + overhead}-byte datagram "
                 + $"({payload.Length} bytes of QUIC plus {overhead} bytes of transport header) "
                 + $"to {_options.RemoteEndPoint}: the outgoing interface for that route carries "
                 + "less than that and RFC 9000 s14 sets Don't Fragment. Lower "
@@ -1376,6 +1386,108 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// </summary>
     /// <remarks>The inner exception is the test rather than the message, so this keeps working
     /// if the wording above changes.</remarks>
+    /// <summary>
+    /// Names the packets inside one datagram and their sizes, from the CLEAR-TEXT header fields
+    /// only. RFC 9001 s5.4.2 protects the first byte's low bits and the packet number; the
+    /// version, the two connection IDs, the token length and s17.2's Length field are all in
+    /// the clear, which is exactly what a coalescing walk needs.
+    /// </summary>
+    /// <remarks>DIAGNOSTIC, AND DELIBERATELY TOTAL. It runs only on the refusal path and must
+    /// never throw there - an exception raised while building an exception message replaces a
+    /// diagnosable failure with an undiagnosable one. Anything it cannot parse it names as
+    /// such and stops, because a partial answer is worth more than none.</remarks>
+    private static string DescribeCoalescedPackets(ReadOnlySpan<byte> datagram)
+    {
+        var parts = new List<string>();
+        var i = 0;
+        while (i < datagram.Length)
+        {
+            var first = datagram[i];
+            if ((first & 0x80) == 0)
+            {
+                parts.Add($"1-RTT {datagram.Length - i}");
+                break;
+            }
+
+            var name = ((first & 0x30) >> 4) switch
+            {
+                0 => "Initial",
+                1 => "0-RTT",
+                2 => "Handshake",
+                _ => "Retry",
+            };
+
+            var at = i + 5;                                     // first byte plus the version
+            if (at >= datagram.Length)
+            {
+                parts.Add($"{name} <truncated>");
+                break;
+            }
+
+            at += 1 + datagram[at];                             // Destination Connection ID
+            if (at >= datagram.Length)
+            {
+                parts.Add($"{name} <truncated>");
+                break;
+            }
+
+            at += 1 + datagram[at];                             // Source Connection ID
+            if (name == "Initial")
+            {
+                if (!TryReadVarint(datagram, ref at, out var tokenLength))
+                {
+                    parts.Add($"{name} <truncated>");
+                    break;
+                }
+
+                at += (int)tokenLength;
+            }
+
+            if (!TryReadVarint(datagram, ref at, out var remainder))
+            {
+                parts.Add($"{name} <truncated>");
+                break;
+            }
+
+            var end = at + (int)remainder;
+            parts.Add($"{name} {end - i}");
+            if (end <= i || end > datagram.Length)
+            {
+                parts.Add("<length overruns the datagram>");
+                break;
+            }
+
+            i = end;
+        }
+
+        return parts.Count == 0 ? "empty" : string.Join(" + ", parts);
+    }
+
+    /// <summary>RFC 9000 s16's variable-length integer, bounds-checked.</summary>
+    private static bool TryReadVarint(ReadOnlySpan<byte> buffer, ref int offset, out ulong value)
+    {
+        value = 0;
+        if ((uint)offset >= (uint)buffer.Length)
+        {
+            return false;
+        }
+
+        var width = 1 << (buffer[offset] >> 6);
+        if (offset + width > buffer.Length)
+        {
+            return false;
+        }
+
+        value = (ulong)(buffer[offset] & 0x3F);
+        for (var k = 1; k < width; k++)
+        {
+            value = (value << 8) | buffer[offset + k];
+        }
+
+        offset += width;
+        return true;
+    }
+
     private static bool IsLocalDatagramRefusal(IOException exception) =>
         exception.InnerException is SocketException
         {

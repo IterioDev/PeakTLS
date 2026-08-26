@@ -127,6 +127,20 @@ public sealed partial class TlsQuicConnectionTests
             failure.Message,
             StringComparison.Ordinal);
 
+        // WHICH BUILDER, AND WHAT WAS IN THE DATAGRAM. Five builders in the connection can
+        // produce a refusal and the size alone does not say which; three fixes were aimed at
+        // this error from arithmetic before the message was made to name its own origin.
+        Assert.Contains(
+            "SendInitialFlightAsync", failure.Message, StringComparison.Ordinal);
+
+        // The coalescing walk, reading only clear-text header fields. An Initial flight is one
+        // Initial packet filling the datagram, so this is what the walk must say about it - and
+        // it is what makes a report of "Initial + Handshake" or "Initial + Initial" from the
+        // field a fact rather than an inference.
+        Assert.Contains("[SendInitialFlightAsync: Initial ", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("truncated", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("overruns", failure.Message, StringComparison.Ordinal);
+
         // ONE refusal, not a storm: the Initial flight stops at the first datagram it cannot
         // send rather than working through the rest of the flight.
         Assert.Equal(1, transport.RefusedSends);
