@@ -12,6 +12,58 @@ public sealed class TlsPresetTests
     }
 
 #pragma warning disable TLSCLIENT3
+    /// <summary>
+    /// The iOS 26 preset against the iOS 27 one. Two differences and no third: the profile it
+    /// names, and the vendor transport parameter. Everything the two captures agree on is shared
+    /// code, and this test is what notices if a later edit gives one of them a value the other
+    /// did not get.
+    /// </summary>
+    [Fact]
+    public void SpotifyIosHttp3_Ios26DiffersOnlyInProfileAndVendorParameter()
+    {
+        var ios26 = TlsPresets.Spotify917602050IOS260Http3.CreateOptions();
+        var ios27 = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
+
+        Assert.Same(TlsProfiles.Spotify917602050IOS260Quic, ios26.Profile);
+        Assert.Equal(TlsHttpVersionPolicy.Http3Only, ios26.HttpVersionPolicy);
+
+        // The vendor parameter is the whole transport-parameter difference: iOS 26 sends the
+        // seven known ones and stops.
+        Assert.Equal(
+            [0x04UL, 0x05, 0x06, 0x07, 0x09, 0x0E, 0x0F],
+            ios26.Quic.TransportParameters.Entries.Select(e => e.Id));
+        Assert.Equal(
+            [0x04UL, 0x05, 0x06, 0x07, 0x09, 0x0E, 0x0F, 0xFF08_0808],
+            ios27.Quic.TransportParameters.Entries.Select(e => e.Id));
+
+        // The rotation is INHERITED, not measured on iOS 26 - see the preset's remarks. Pinned
+        // so that inheritance is a decision on the record rather than an accident.
+        Assert.Equal(
+            ios27.Quic.TransportParameters.CyclicRotationLength,
+            ios26.Quic.TransportParameters.CyclicRotationLength);
+
+        // Everything else the two captures agree on.
+        Assert.Equal(ios27.Quic.AlpnProtocols, ios26.Quic.AlpnProtocols);
+        Assert.Equal(ios27.Quic.SourceConnectionIdLength, ios26.Quic.SourceConnectionIdLength);
+        Assert.Equal(
+            ios27.Quic.DestinationConnectionIdLength,
+            ios26.Quic.DestinationConnectionIdLength);
+        Assert.Equal(ios27.Quic.PacketNumberEncodedLength, ios26.Quic.PacketNumberEncodedLength);
+        Assert.Equal(ios27.Quic.PaddingTarget, ios26.Quic.PaddingTarget);
+        Assert.Equal(ios27.Quic.MaximumPathMtu, ios26.Quic.MaximumPathMtu);
+        Assert.Equal(
+            ios27.Quic.InitialCryptoFrameByteCounts,
+            ios26.Quic.InitialCryptoFrameByteCounts);
+        Assert.Equal(
+            ios27.Quic.FlowControl.InitialMaxData,
+            ios26.Quic.FlowControl.InitialMaxData);
+        Assert.Equal(ios27.Http3.PseudoHeaderOrder, ios26.Http3.PseudoHeaderOrder);
+        Assert.Equal(
+            ios27.Http3.UnidirectionalStreamOpenOrder,
+            ios26.Http3.UnidirectionalStreamOpenOrder);
+        Assert.Equal(ios27.Http3.Settings.Count, ios26.Http3.Settings.Count);
+    }
+
     [Fact]
     public void SpotifyIosHttp3_CarriesTheCapturedQuicAndHeaderImage()
     {

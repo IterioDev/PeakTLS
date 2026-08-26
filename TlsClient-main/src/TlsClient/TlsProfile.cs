@@ -125,6 +125,22 @@ public static class TlsProfiles
             ClientHelloProfiles.Spotify917602050IOS270Quic);
 
     /// <summary>
+    /// Gets the passively-captured Spotify 9.1.76.2050 on iOS 26 (iPhone17,2) QUIC profile,
+    /// paired with <see cref="TlsPresets.Spotify917602050IOS260Http3"/>.
+    /// </summary>
+    /// <remarks>The same app on the older OS, and a genuinely different hello: cipher order
+    /// 0x1302, 0x1301, 0x1303 and no vendor transport parameter, where
+    /// <see cref="Spotify917602050IOS270Quic"/> has 0x1302, 0x1303, 0x1301 and carries one.
+    /// JA3 splits, JA4 does not. Decoded from ONE capture against that one's 80 — see the
+    /// SharpTls profile's remarks for which of its fields are inherited rather than
+    /// measured.</remarks>
+    public static TlsProfile Spotify917602050IOS260Quic { get; } =
+        TlsProfile.CreateBuiltIn(
+            "spotify-9.1.76-ios-26.0-quic",
+            nameof(ClientHelloProfiles.Spotify917602050IOS260Quic),
+            ClientHelloProfiles.Spotify917602050IOS260Quic);
+
+    /// <summary>
     /// Gets the TCP ClientHello of the same Spotify 9.1.76.2050 iOS build — the hello its
     /// HTTP/2 legs dial with, paired with <see cref="TlsPresets.SpotifyH2"/>.
     /// </summary>
@@ -139,17 +155,18 @@ public static class TlsProfiles
             ClientHelloProfiles.Spotify917602050IOS270Tcp);
 
     /// <summary>Gets every built-in TlsClient profile in stable name order.</summary>
-    /// <remarks>THREE ENTRIES, AND THAT IS THE WHOLE CATALOGUE - one honest shape and the two
-    /// halves of one client. The browser transcriptions - Chrome, Firefox, Edge, Safari, iOS,
-    /// Android and their pinned versions - were removed along with the uTLS profiles they were
-    /// built on. <see cref="Modern"/> is not an impersonation: it is SharpTls's conservative
-    /// TLS 1.3 shape and exists so <c>TlsSessionOptions.Profile</c> has a default that
-    /// negotiates rather than imitates. Anything else you want to look like comes from a
-    /// capture, through <c>ClientHelloProfiles.Custom</c>.</remarks>
+    /// <remarks>FOUR ENTRIES, AND THAT IS THE WHOLE CATALOGUE - one honest shape, the two halves
+    /// of one client, and that client's older OS build. The browser transcriptions - Chrome,
+    /// Firefox, Edge, Safari, iOS, Android and their pinned versions - were removed along with
+    /// the uTLS profiles they were built on. <see cref="Modern"/> is not an impersonation: it is
+    /// SharpTls's conservative TLS 1.3 shape and exists so <c>TlsSessionOptions.Profile</c> has a
+    /// default that negotiates rather than imitates. Anything else you want to look like comes
+    /// from a capture, through <c>ClientHelloProfiles.Custom</c>.</remarks>
     public static IReadOnlyList<TlsProfile> All { get; } = Array.AsReadOnly(
         new TlsProfile[]
         {
             Modern,
+            Spotify917602050IOS260Quic,
             Spotify917602050IOS270Quic,
             Spotify917602050IOS270Tcp,
         });

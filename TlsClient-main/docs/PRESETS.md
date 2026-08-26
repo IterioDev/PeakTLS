@@ -32,9 +32,10 @@ versioned property when reproducibility matters.
 | TlsClient preset | SharpTls TLS profile | Transport | Ordered HTTP/2 SETTINGS | WINDOW_UPDATE increment | Pseudo-header order |
 |---|---|---|---|---:|---|
 | `Spotify917602050IOS270Http2` | `Spotify917602050IOS270Tcp` | TCP, PreferHttp2 | `1:4096; 2:0; 3:100; 4:2097152; 5:16384; 6:4294967295; 8:0` | `15663105` | `m,s,p,a` |
-| `Spotify917602050IOS270Http3` | `Spotify917602050IOS270Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,a,s,p` (unmeasured) |
+| `Spotify917602050IOS270Http3` | `Spotify917602050IOS270Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,s,a,p` |
+| `Spotify917602050IOS260Http3` | `Spotify917602050IOS260Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,s,a,p` |
 
-**TWO PRESETS, ONE CLIENT, TWO FINGERPRINTS.** The same app dials HTTP/2 over TCP and
+**THREE PRESETS, ONE CLIENT.** The same app dials HTTP/2 over TCP and
 HTTP/3 over QUIC with genuinely different hellos — thirteen cipher suites against three, a
 different extension set, and even a different pseudo-header order. Neither is derivable from
 the other; pick the one matching the transport you are dialling.
@@ -56,6 +57,21 @@ matters when judging how far to trust each.
 
 `Spotify917602050IOS270Http3` is a **first-party passive capture of a real device**.
 
+`Spotify917602050IOS260Http3` is the same app on **iOS 26**, from one first-party
+capture. THE OS VERSION IN THESE NAMES IS LOAD-BEARING: the two builds send genuinely
+different hellos — cipher order `0x1302, 0x1301, 0x1303` and no vendor `0xff080808`
+transport parameter on iOS 26, against `0x1302, 0x1303, 0x1301` and the vendor parameter
+present on iOS 27. Exactly ten bytes and one swap; every other TLS field, every QUIC
+packet dimension and the whole HTTP/3 layer are byte-identical between them. JA3 splits,
+JA4 does not — it sorts the cipher list and cannot see either difference.
+
+This was once documented as a proxy-versus-direct capture artefact. It is not: the iOS 26
+capture came down the same proxy path that produced the iOS 27 image and still carries the
+other shape. Two of the iOS 26 preset's axes are INHERITED from the iOS 27 measurement
+rather than measured — the transport-parameter rotation and the GREASE equality pattern —
+because one hello lands on one of seven rotation offsets whatever the client does, and
+cannot tell a GREASE class pattern from a coincidence. Pin those against your own captures.
+
 `Spotify917602050IOS270Http2` is a **transcription of a supplied fingerprint record**, in
 bogdanfinn/tls-client's JSON format, whose collection method is not recorded here. Its TLS
 values — cipher suites, groups, key shares, signature algorithms, extension order — and its
@@ -75,7 +91,7 @@ than fingerprint.
 | Analysis | `scripts/quic_initial_analyze.py` |
 | Date | 2026-08-22 |
 | Sample size | 80 client connections to `*.spotify.com` across two captures |
-| Captured JA3 | `48d08f334704479db85d91df80039756` (proxy path; direct path is `2f9431e877b01e163774ae4ae0df9ded`) |
+| Captured JA3 | `48d08f334704479db85d91df80039756` on iOS 27; `2f9431e877b01e163774ae4ae0df9ded` on iOS 26 |
 | Captured JA4 | `q13d0311h3_55b375c5d22e_f2a83c8e78ae` |
 
 Nothing in the preset is inferred from a similar client or copied from another

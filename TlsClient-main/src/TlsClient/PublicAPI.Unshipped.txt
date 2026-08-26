@@ -404,7 +404,9 @@ TlsClient.TlsSessionOptions.Http3.get -> TlsClient.TlsHttp3Options!
 TlsClient.TlsSessionOptions.Quic.get -> TlsClient.TlsQuicOptions!
 static TlsClient.TlsHttp3Setting.Drawn(System.Func<TlsClient.TlsHttp3Setting>! draw) -> TlsClient.TlsHttp3Setting
 static TlsClient.TlsPresets.Spotify.get -> TlsClient.TlsPreset!
+static TlsClient.TlsPresets.Spotify917602050IOS260Http3.get -> TlsClient.TlsPreset!
 static TlsClient.TlsPresets.Spotify917602050IOS270Http3.get -> TlsClient.TlsPreset!
+static TlsClient.TlsProfiles.Spotify917602050IOS260Quic.get -> TlsClient.TlsProfile!
 static TlsClient.TlsProfiles.Spotify917602050IOS270Quic.get -> TlsClient.TlsProfile!
 static TlsClient.TlsQuicOptions.ApplyDefaultClientHello(SharpTls.ClientHelloBuilder! builder) -> void
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byte[]! Value)?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!

@@ -63,8 +63,14 @@ public static class TlsPresets
     /// CRYPTO frames of 80 first-party captured connections to <c>*.spotify.com</c>, with the
     /// HTTP/3 SETTINGS taken from proxy captures of the same handset. Reproduces the phone's
     /// JA3 <c>48d08f334704479db85d91df80039756</c> and JA4
-    /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>. That JA3 is the proxy-path image; the direct
-    /// captures hash to <c>2f9431e877b01e163774ae4ae0df9ded</c>. JA4 does not distinguish them.
+    /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>. A second image hashes to
+    /// <c>2f9431e877b01e163774ae4ae0df9ded</c>: a different cipher order that always travels with
+    /// the vendor transport parameter absent. JA4 does not distinguish them.
+    /// <para>THIS IS AN iOS 27 PRESET AND THE VERSION IN ITS NAME IS LOAD-BEARING. The second
+    /// image is what the same app sends on iOS 26 - measured on the same proxy path that produced
+    /// the first, which is what rules out the capture path as the explanation. Dialling this
+    /// preset while claiming an iOS 26 user agent ships a hello that build does not send. There
+    /// is no iOS 26 preset; author one with <see cref="TlsProfiles"/> if you need that shape.</para>
     /// <para>This preset is <see cref="TlsHttpVersionPolicy.Http3Only"/>: the shape it carries
     /// is QUIC's, and applying it to a TCP dial would impersonate nothing. The same app's
     /// HTTP/2 legs are a different ClientHello; over HTTP/2 its <c>login5.spotify.com</c> leg
@@ -81,14 +87,42 @@ public static class TlsPresets
     /// docs/PRESETS.md for what remains unmeasured — every value under
     /// <see cref="TlsQuicOptions.Recovery"/>, and the QPACK encoding choices.</para>
     /// </summary>
-#pragma warning disable TLSCLIENT3 // Http3Only: this preset exists to carry a QUIC shape.
+#pragma warning disable TLSCLIENT3 // Http3Only: these presets exist to carry a QUIC shape.
     public static TlsPreset Spotify917602050IOS270Http3 { get; } = new(
         "spotify-9.1.76-ios-27.0-h3",
         TlsProfiles.Spotify917602050IOS270Quic,
         static _ => { },
 
         TlsHttpVersionPolicy.Http3Only,
-        ConfigureSpotifyIosQuic);
+        ConfigureSpotifyIos270Quic);
+
+    /// <summary>
+    /// Gets the same Spotify 9.1.76.2050 client captured on iOS 26 (iPhone17,2) over HTTP/3.
+    /// JA3 <c>2f9431e877b01e163774ae4ae0df9ded</c>, JA4
+    /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE TLS SHAPE IS THE ONLY THING THAT MOVES. Against
+    /// <see cref="Spotify917602050IOS270Http3"/>: cipher order 0x1302, 0x1301, 0x1303 and no
+    /// vendor <c>0xff080808</c> transport parameter. Every QUIC packet dimension — connection-id
+    /// lengths, packet-number length, 1200-byte Initial padding, the 999-byte CRYPTO budget, the
+    /// varint widths — and the whole HTTP/3 layer — SETTINGS, the reserved-identifier draw, the
+    /// <c>m,s,a,p</c> pseudo-header order — are byte-identical in both captures, so they are
+    /// shared code here rather than a second copy.</para>
+    /// <para>ONE CAPTURE BEHIND IT, against the other preset's 80 plus 41. The
+    /// transport-parameter rotation and the GREASE class pattern are INHERITED from the iOS 27
+    /// measurement, not measured here: one hello lands on one of seven rotation offsets whatever
+    /// the client does, and cannot separate a GREASE class pattern from coincidence. Everything
+    /// under <see cref="TlsQuicOptions.Recovery"/> and the QPACK choices are unmeasured for both.
+    /// Pin this against your own captures before trusting those axes.</para>
+    /// </remarks>
+    public static TlsPreset Spotify917602050IOS260Http3 { get; } = new(
+        "spotify-9.1.76-ios-26.0-h3",
+        TlsProfiles.Spotify917602050IOS260Quic,
+        static _ => { },
+
+        TlsHttpVersionPolicy.Http3Only,
+        ConfigureSpotifyIos260Quic);
 
 #pragma warning restore TLSCLIENT3
 
@@ -168,13 +202,32 @@ public static class TlsPresets
         TlsQuicTransportParameterEntry.Placed(0x0F),  // initial_source_connection_id
     ];
 
+    private static void ConfigureSpotifyIos270Quic(TlsSessionOptions options) =>
+        ConfigureSpotifyIosQuic(
+            options,
+            ClientHelloProfiles.ApplySpotify917602050IOS270QuicClientHello,
+            vendorTransportParameter: true);
+
+    private static void ConfigureSpotifyIos260Quic(TlsSessionOptions options) =>
+        ConfigureSpotifyIosQuic(
+            options,
+            ClientHelloProfiles.ApplySpotify917602050IOS260QuicClientHello,
+            vendorTransportParameter: false);
+
     /// <summary>
     /// Applies the measured QUIC and HTTP/3 shape. Values not reachable from any capture we
     /// hold — everything under <c>Quic.Recovery</c> and the QPACK encoding choices — are
     /// deliberately left at their defaults rather than given invented numbers.
+    /// <para>ONE METHOD FOR BOTH OS BUILDS. The iOS 26 and iOS 27 captures agree on every
+    /// packet dimension, every flow-control value and the whole HTTP/3 layer; they differ in
+    /// the ClientHello callback and in whether <c>0xff080808</c> is appended. A second copy of
+    /// this method would let the agreeing 90% drift apart silently, which is the failure this
+    /// file has already had once.</para>
     /// </summary>
-
-    private static void ConfigureSpotifyIosQuic(TlsSessionOptions options)
+    private static void ConfigureSpotifyIosQuic(
+        TlsSessionOptions options,
+        Action<ClientHelloBuilder> configureClientHello,
+        bool vendorTransportParameter)
     {
         var quic = options.Quic;
 
@@ -235,17 +288,24 @@ public static class TlsPresets
         // appended after the rotated block rather than being an eighth rotating element.
         // Its 10 encoded bytes (8-byte varint id + length + one payload byte) are exactly the
         // 487 -> 497 growth measured in the second Initial CRYPTO frame, which is what
-        // identified it. Absent from all 80 direct connections; see the cipher-order note.
-        quic.TransportParameters.Entries =
-        [
-            .. SpotifyTransportParameters(),
-            TlsQuicTransportParameterEntry.Literal(0xFF08_0808, [0x09]),
-        ];
+        // identified it. iOS 26 does not send it at all, which is why it is a parameter here.
+        //
+        // THE ROTATION IS INHERITED BY iOS 26, NOT MEASURED THERE. The 91 connections are all
+        // iOS 27; the single iOS 26 capture landed on offset 0, which a rotating client produces
+        // one time in seven and a fixed-order client produces always. Neither reading is
+        // excluded, so the shape that is measured for the family is carried over rather than
+        // replaced with a guess in the other direction.
+        quic.TransportParameters.Entries = vendorTransportParameter
+            ?
+            [
+                .. SpotifyTransportParameters(),
+                TlsQuicTransportParameterEntry.Literal(0xFF08_0808, [0x09]),
+            ]
+            : [.. SpotifyTransportParameters()];
         quic.TransportParameters.CyclicRotationLength = SpotifyRotatingParameterCount;
 
         quic.AlpnProtocols = ["h3"];
-        quic.ConfigureClientHello =
-            ClientHelloProfiles.ApplySpotify917602050IOS270QuicClientHello;
+        quic.ConfigureClientHello = configureClientHello;
 
         // QPACK_MAX_TABLE_CAPACITY, QPACK_BLOCKED_STREAMS, then one reserved setting — that
         // order in 10 proxy captures out of 10. There is no SETTINGS_MAX_FIELD_SECTION_SIZE:

@@ -16,11 +16,20 @@ public static partial class ClientHelloProfiles
     /// s5.2 derives Initial keys from the clear-text Destination Connection ID. JA4
     /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>, reproduced live.
     /// <para>
-    /// JA3 is <c>48d08f334704479db85d91df80039756</c>, the PROXY-path image. The 80 direct
-    /// connections above hash to <c>2f9431e877b01e163774ae4ae0df9ded</c> instead: same phone,
-    /// same build, different cipher order and no vendor transport parameter. This profile ships
-    /// the proxy values; see the cipher-suite note below. JA4 is identical either way because it
+    /// JA3 is <c>48d08f334704479db85d91df80039756</c>. A second image,
+    /// <c>2f9431e877b01e163774ae4ae0df9ded</c>, differs in cipher order and carries no vendor
+    /// transport parameter; the 80 connections above are all of that second kind. This profile
+    /// ships the first; see the cipher-suite note below. JA4 is identical either way because it
     /// sorts the cipher list.
+    /// </para>
+    /// <para>
+    /// NOT A PROXY ARTEFACT, WHICH THIS TEXT USED TO SAY. A later proxy capture of
+    /// <c>login5.spotify.com</c> from the same app on iOS 26 carries the SECOND image - the
+    /// "direct" cipher order and no vendor parameter - on the same path that produced the first.
+    /// The two differences co-occur and the capture path does not predict them, so the profile
+    /// is an iOS 27 shape and an iOS 26 client is a DIFFERENT profile, not this one seen through
+    /// a different lens. The 80 connections' OS build was not recorded, so which side they
+    /// belong to is inference, not measurement.
     /// </para>
     /// <para>
     /// This is the QUIC half and differs from the same app's TCP hello in more than ALPN: three
@@ -33,47 +42,92 @@ public static partial class ClientHelloProfiles
         Custom(ApplySpotify917602050IOS270QuicClientHello);
 
     /// <summary>
-    /// Applies the Spotify 9.1.76.2050 iOS QUIC ClientHello shape to a builder.
+    /// Applies the Spotify 9.1.76.2050 iOS 27.0 QUIC ClientHello shape to a builder.
     /// </summary>
     /// <param name="builder">The builder to configure.</param>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
     /// <remarks>Public because a QUIC session configures its ClientHello through a builder
     /// callback rather than through a <see cref="ClientHelloProfile"/> — the profile above and
     /// that callback have to be the same shape, so they are the same method.</remarks>
-    public static void ApplySpotify917602050IOS270QuicClientHello(ClientHelloBuilder builder)
+    public static void ApplySpotify917602050IOS270QuicClientHello(ClientHelloBuilder builder) =>
+        ApplySpotifyIosQuicClientHello(
+            builder,
+            [
+                TlsCipherSuite.TlsAes256GcmSha384,
+                TlsCipherSuite.TlsChaCha20Poly1305Sha256,
+                TlsCipherSuite.TlsAes128GcmSha256,
+            ],
+            vendorTransportParameter: true);
+
+    /// <summary>
+    /// Gets the QUIC ClientHello of the same Spotify 9.1.76.2050 build on iOS 26, iPhone17,2.
+    /// Decoded from the Initial CRYPTO frames of a first-party capture to
+    /// <c>login5.spotify.com</c>. JA3 <c>2f9431e877b01e163774ae4ae0df9ded</c>, JA4
+    /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c> — the same JA4 as
+    /// <see cref="Spotify917602050IOS270Quic"/>, which sorts the cipher list and cannot see the
+    /// difference.
+    /// <para>
+    /// TWO DIFFERENCES FROM THE iOS 27 PROFILE, AND NOTHING ELSE. The cipher order is 0x1302,
+    /// 0x1301, 0x1303, and the vendor transport parameter <c>0xff080808</c> is absent — which is
+    /// exactly ten bytes, so this hello is 1481 where that one is 1491 for the same server name.
+    /// Extension order, the ten signature algorithms, groups, key-share sizes, status_request,
+    /// compress_certificate, psk_key_exchange_modes, supported_versions and the empty
+    /// legacy_session_id are byte-identical between the two.
+    /// </para>
+    /// <para>
+    /// ONE CAPTURE, AND THE THIN PARTS ARE NAMED RATHER THAN GUESSED. The GREASE class pattern
+    /// and the transport-parameter rotation are carried over from the iOS 27 measurement: a
+    /// single hello cannot separate a class pattern from coincidence, and it lands on one of
+    /// seven rotation offsets whatever the client does. This capture happens to show
+    /// cipher_suites and supported_versions drawing the same GREASE value and the second GREASE
+    /// extension drawing supported_groups', which independent draws produce about once in 256 —
+    /// suspicious, not decisive. Pin it against more captures before trusting those two axes.
+    /// </para>
+    /// </summary>
+    public static ClientHelloProfile Spotify917602050IOS260Quic { get; } =
+        Custom(ApplySpotify917602050IOS260QuicClientHello);
+
+    /// <summary>
+    /// Applies the Spotify 9.1.76.2050 iOS 26 QUIC ClientHello shape to a builder.
+    /// </summary>
+    /// <param name="builder">The builder to configure.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
+    /// <remarks>Public for the same reason as the iOS 27 one: a QUIC session configures its
+    /// ClientHello through a builder callback, not through a
+    /// <see cref="ClientHelloProfile"/>.</remarks>
+    public static void ApplySpotify917602050IOS260QuicClientHello(ClientHelloBuilder builder) =>
+        ApplySpotifyIosQuicClientHello(
+            builder,
+            [
+                TlsCipherSuite.TlsAes256GcmSha384,
+                TlsCipherSuite.TlsAes128GcmSha256,
+                TlsCipherSuite.TlsChaCha20Poly1305Sha256,
+            ],
+            vendorTransportParameter: false);
+
+    /// <summary>
+    /// The shape both Spotify QUIC profiles share. ONE METHOD RATHER THAN TWO COPIES: the two
+    /// captures differ in the cipher order and in whether the vendor transport parameter is
+    /// present, and in nothing else — so those are the parameters, and every other field cannot
+    /// drift between the profiles without drifting in both.
+    /// </summary>
+    private static void ApplySpotifyIosQuicClientHello(
+        ClientHelloBuilder builder,
+        TlsCipherSuite[] cipherSuites,
+        bool vendorTransportParameter)
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder
             .WithTls13()
 
-            // The seven known parameters plus the vendor 0xff080808, exactly as captured and
-            // encoded exactly as captured — note the
-            // two-byte 0x4040 for active_connection_id_limit and the EMPTY
-            // initial_source_connection_id, which follows from a zero-length source id.
-            // A live QUIC connection replaces these with its own per-connection set; they are
-            // here so this profile is complete on its own and so the extension is enabled,
-            // which is what lets it appear in the layout below.
             .WithQuicTransportParameters(new Quic.TlsQuicTransportParameters(
-            [
-                new Quic.TlsQuicTransportParameter(0x04, [0x81, 0x00, 0x00, 0x00]),
-                new Quic.TlsQuicTransportParameter(0x05, [0x80, 0x20, 0x00, 0x00]),
-                new Quic.TlsQuicTransportParameter(0x06, [0x80, 0x20, 0x00, 0x00]),
-                new Quic.TlsQuicTransportParameter(0x07, [0x80, 0x20, 0x00, 0x00]),
-                new Quic.TlsQuicTransportParameter(0x09, [0x08]),
-                new Quic.TlsQuicTransportParameter(0x0E, [0x40, 0x40]),
-                new Quic.TlsQuicTransportParameter(0x0F, []),
+                SpotifyIosQuicTransportParameters(vendorTransportParameter)))
 
-                // Vendor parameter, last in 4 of 4 proxy captures and absent from all 80 direct
-                // connections. Declared here as well as in the TlsClient preset: a live dial
-                // takes the preset's rotated list, but anything building this profile standalone
-                // reads THIS list, and the two disagreeing is how one path silently ships a
-                // different fingerprint from the other.
-                new Quic.TlsQuicTransportParameter(0xFF08_0808, [0x09]),
-            ]))
-
-            // GREASE value classes over all 80 hellos: supported_groups and key_share always
-            // carry the same value; cipher_suites, supported_versions and the two GREASE
+            // GREASE value classes over all 80 iOS 27 hellos: supported_groups and key_share
+            // always carry the same value; cipher_suites, supported_versions and the two GREASE
             // extension slots each draw their own, agreeing only at the 1-in-16 chance rate.
+            // The iOS 26 profile INHERITS this rather than measuring it — see that profile's
+            // remarks for the one capture that does not fit and why one capture cannot settle it.
             .WithGrease(ClientHelloGreasePolicy.CreateWithSecondaryExtension(0, 1, 2, 2, 3, 4))
             .WithSecondaryGreaseExtension([0x00])
             .WithGreaseKeyShareBody([0x00])
@@ -82,15 +136,13 @@ public static partial class ClientHelloProfiles
             // for every QUIC hello anyway; stated here so the profile matches the capture on
             // its own terms rather than relying on that.
             .WithSessionId([])
-            // 0x1302, 0x1303, 0x1301 — the order in 4 of 4 proxy captures. The 80 pcapng
-            // connections decrypted from Initials show 0x1302, 0x1301, 0x1303 instead, from the
-            // same phone on the same build. The split is real and unexplained; the proxy path is
-            // taken as authoritative because it is the path this library actually dials through.
+            // 0x1302, 0x1303, 0x1301 on iOS 27; 0x1302, 0x1301, 0x1303 on iOS 26 and in the 80
+            // pcapng connections decrypted from Initials. The capture path does not predict which
+            // one appears and the OS build does, which is why this is a parameter and not a
+            // constant. The second order always travels with the vendor transport parameter being
+            // ABSENT; the two never split apart, so they are one difference wearing two faces.
             // Only JA3 moves: JA4 sorts the cipher list, so both orders hash alike there.
-            .WithCipherSuites(
-                TlsCipherSuite.TlsAes256GcmSha384,
-                TlsCipherSuite.TlsChaCha20Poly1305Sha256,
-                TlsCipherSuite.TlsAes128GcmSha256)
+            .WithCipherSuites(cipherSuites)
             .WithSupportedGroups(
                 NamedGroup.X25519MlKem768,
                 NamedGroup.X25519,
@@ -119,7 +171,11 @@ public static partial class ClientHelloProfiles
                 SignatureScheme.RsaPkcs1Sha1)
             .WithAlpn("h3")
 
-            // No padding extension: the hello is 1488 bytes and the client adds none.
+            // No padding extension: the client adds none, whatever the hello weighs. The length
+            // is not a constant to check against — it moves with the server name and with the
+            // vendor transport parameter, so the same shape is 1491 bytes to
+            // login5.spotify.com on iOS 27, 1481 on iOS 26, and 1488 to the 25-character
+            // gew1-spclient.spotify.com.
             .WithExtensionLayout(
                 ClientHelloExtensionSpec.BuiltIn(ClientHelloExtensionKind.Grease),
                 ClientHelloExtensionSpec.BuiltIn(ClientHelloExtensionKind.ServerName),
@@ -136,6 +192,49 @@ public static partial class ClientHelloProfiles
                     ClientHelloExtensionKind.QuicTransportParameters),
                 ClientHelloExtensionSpec.Raw(27, [0x02, 0x00, 0x01]),            // zlib
                 ClientHelloExtensionSpec.BuiltIn(ClientHelloExtensionKind.SecondaryGrease));
+    }
+
+    /// <summary>
+    /// The seven known transport parameters, each encoded exactly as captured — note the
+    /// two-byte 0x4040 for active_connection_id_limit and the EMPTY
+    /// initial_source_connection_id, which follows from a zero-length source id — optionally
+    /// followed by the vendor <c>0xff080808</c> that only iOS 27 sends.
+    /// <para>
+    /// THE ORDER IS THE ROTATION BASE, NOT ANY ONE CAPTURE'S ORDER. The real client ships a
+    /// cyclic rotation of these seven, redrawn per connection, with the vendor entry pinned
+    /// last: an iOS 27 capture to login5.spotify.com reads 0x0e, 0x0f, 0x04, 0x05, 0x06, 0x07,
+    /// 0x09 — offset 5 of this list, not this list. A live QUIC connection replaces these with
+    /// its own per-connection set and TlsQuicTransportParameterSpec draws the offset there, so a
+    /// standalone build of either profile emits offset 0 and matches one connection in seven.
+    /// That is the price of a profile being complete on its own; the extension being present is
+    /// also what lets it appear in the layout above.
+    /// </para>
+    /// <para>
+    /// The vendor parameter is last in 4 of 4 iOS 27 captures, absent from all 80 of the others
+    /// and absent from the iOS 26 capture — the observation that ties it to the OS build rather
+    /// than to the capture path. Declared here as well as in the TlsClient preset: a live dial
+    /// takes the preset's rotated list, but anything building a profile standalone reads THIS
+    /// one, and the two disagreeing is how one path silently ships a different fingerprint from
+    /// the other.
+    /// </para>
+    /// </summary>
+    private static Quic.TlsQuicTransportParameter[] SpotifyIosQuicTransportParameters(
+        bool vendorTransportParameter)
+    {
+        Quic.TlsQuicTransportParameter[] known =
+        [
+            new(0x04, [0x81, 0x00, 0x00, 0x00]),
+            new(0x05, [0x80, 0x20, 0x00, 0x00]),
+            new(0x06, [0x80, 0x20, 0x00, 0x00]),
+            new(0x07, [0x80, 0x20, 0x00, 0x00]),
+            new(0x09, [0x08]),
+            new(0x0E, [0x40, 0x40]),
+            new(0x0F, []),
+        ];
+
+        return vendorTransportParameter
+            ? [.. known, new Quic.TlsQuicTransportParameter(0xFF08_0808, [0x09])]
+            : known;
     }
 
     /// <summary>
