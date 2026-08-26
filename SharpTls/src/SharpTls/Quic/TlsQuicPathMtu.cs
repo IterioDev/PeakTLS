@@ -357,6 +357,48 @@ internal sealed class TlsQuicPathMtu
     // the PROBE_TIMER, the PROBE_COUNT is incremented, and a new probe packet is transmitted.
     // The state is exited to enter SEARCH_COMPLETE when the PROBE_COUNT reaches MAX_PROBES".
     //
+    /// <summary>
+    /// Takes RFC 8899 section 4.6.2's local send failure: the probe never reached the network
+    /// because this host's own interface refused it - Windows WSAEMSGSIZE, .NET
+    /// <c>SocketError.MessageSize</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>NOT A LOST PROBE, AND THAT IS WHY THIS IS NOT <c>OnProbeFailed</c>. A lost probe is
+    /// AMBIGUOUS - the size may be fine and the datagram merely dropped - which is the whole
+    /// reason MAX_PROBES exists: retry the SAME size three times before believing it. A local
+    /// refusal is DETERMINISTIC. The datagram did not leave the host and never will at that
+    /// size, so retrying it three times buys three more refusals and nothing else. s4.6.2 puts a
+    /// local failure in the same class as a PTB message - "the PL can use this information to
+    /// reduce the PLPMTU" - so the ceiling moves on the FIRST one.
+    /// </para>
+    /// <para>WITHOUT THIS THE SEARCH CANNOT DESCEND AT ALL. The refusal throws out of the send,
+    /// so <c>OnProbeSent</c> never runs: no outstanding probe is recorded, PROBE_COUNT never
+    /// advances, the s5.1.1 inhibition never engages because it is <c>OnProbeSent</c> that
+    /// clears it, and <c>TryGetProbeSize</c> offers the identical size on the next pump. The
+    /// result is not a slow search - it is an unbounded loop of identical refusals at pump rate,
+    /// which is exactly what a caller behind a small-MTU tunnel sees.</para>
+    /// </remarks>
+    /// <param name="size">The datagram size the host refused.</param>
+    internal void OnProbeRefusedLocally(int size)
+    {
+        // The probe was never recorded as outstanding - the throw came first - but clearing is
+        // stated rather than assumed, so this is correct if it is ever reached from a path that
+        // did record one.
+        _outstandingProbe = null;
+        _probeCount = 0;
+
+        // Math.Min, not assignment: a refusal never RAISES a ceiling an earlier failure lowered.
+        _ceiling = Math.Min(_ceiling, size - 1);
+
+        if (_ceiling - _confirmed < MinimumUsefulGain)
+        {
+            State = TlsQuicPathMtuState.SearchComplete;
+            return;
+        }
+
+        _probedSize = _confirmed + ((_ceiling - _confirmed + 1) / 2);
+    }
+
     // AND THE SIZE IS RULED OUT RATHER THAN THE SEARCH ABANDONED. s5.2's literal reading ends
     // the search at MAX_PROBES; s5.3.1 permits more - "a new probe of the same size or any
     // other size (determined by the search algorithm) can be sent" - and a binary search that

@@ -143,7 +143,7 @@ internal sealed class TlsQuicConnectionSpec
     //
     // "all UDP datagrams" - per datagram, not per flight. Task 5 owns honouring it; this
     // constant is only the floor a spec may declare.
-    private const int MinimumInitialDatagramSize = 1200;
+    internal const int MinimumInitialDatagramSize = 1200;
 
     // RFC 9000 s17.1, verbatim from rfc9000-packet-formats-and-pn-pseudocode.txt line 184:
     // "Packet Number:  This field is 1 to 4 bytes long."  Named rather than written inline

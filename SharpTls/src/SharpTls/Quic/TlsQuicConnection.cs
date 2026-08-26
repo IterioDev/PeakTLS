@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Security.Cryptography;
 
 namespace SharpTls.Quic;
@@ -1314,6 +1315,72 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal int DatagramPayloadBudget => Math.Min(
         CurrentMaxDatagramSize - _options.Transport.DatagramOverhead,
         _options.Transport.MaxDatagramPayloadSize);
+
+    /// <summary>
+    /// THE ONE PLACE A DATAGRAM LEAVES THIS CONNECTION. Every send goes through here so that a
+    /// local refusal is diagnosed once rather than surfacing five different ways.
+    /// </summary>
+    /// <remarks>
+    /// <para>WSAEMSGSIZE IS A LOCAL VERDICT, NOT A NETWORK ONE, and that is what makes it worth
+    /// catching. The datagram never reached the wire: this host's outgoing interface carries
+    /// less than the datagram is long and RFC 9000 s14 has the socket set Don't Fragment, so the
+    /// kernel refuses the write instead of splitting it. The peer, the route and the path MTU
+    /// beyond the first hop are all uninvolved.</para>
+    /// <para>THE MESSAGE IS THE FIX FOR THE HARD PART. Windows says only "larger than the
+    /// internal message buffer or some other network limit" and names neither the size nor the
+    /// limit, so the error is normally diagnosed by guessing at MTUs - and a caller who guesses
+    /// wrong sees the identical error again and concludes the knob does nothing. Three numbers
+    /// end that: what QUIC built, what the transport prepends, and the sum the interface saw.
+    /// The transport's header is the half nothing else reports, and on a SOCKS5 relay it is 10
+    /// to 32 bytes of RFC 1928 section 7 that no MTU arithmetic done against the QUIC size
+    /// alone will ever account for.</para>
+    /// <para>IOException, NOT A NEW TYPE. Every other failure this assembly raises out of a
+    /// connection derives from it, and the SocketException is kept as the inner exception, so a
+    /// caller that wants to switch transports on this specific condition still can - see
+    /// <see cref="IsLocalDatagramRefusal"/>, which is that test.</para>
+    /// </remarks>
+    /// <param name="payload">The datagram to send.</param>
+    /// <param name="cancellationToken">Cancels the send.</param>
+    /// <exception cref="IOException">The host refused the datagram for its size.</exception>
+    private async ValueTask SendDatagramAsync(
+        ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _options.Transport
+                .SendAsync(_options.RemoteEndPoint, payload, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
+        {
+            var overhead = _options.Transport.DatagramOverhead;
+            throw new IOException(
+                $"The host refused a {payload.Length + overhead}-byte datagram "
+                + $"({payload.Length} bytes of QUIC plus {overhead} bytes of transport header) "
+                + $"to {_options.RemoteEndPoint}: the outgoing interface for that route carries "
+                + "less than that and RFC 9000 s14 sets Don't Fragment. Lower "
+                + $"{nameof(TlsQuicConnectionSpec.MaximumPathMtu)} (currently "
+                + $"{_options.Spec.MaximumPathMtu}) below the interface MTU less the IP and UDP "
+                + "headers, or set "
+                + $"{nameof(TlsQuicConnectionSpec.PathMtuDiscovery)} to false to stay at "
+                + $"{nameof(TlsQuicConnectionSpec.BasePathMtu)} "
+                + $"({_options.Spec.BasePathMtu}). A refusal at or below "
+                + $"{TlsQuicConnectionSpec.MinimumInitialDatagramSize} plus the "
+                + "transport header means the route cannot carry QUIC at all, because RFC 9000 "
+                + "s14.1 fixes that as the smallest Initial datagram.",
+                ex);
+        }
+    }
+
+    /// <summary>Whether an exception is <see cref="SendDatagramAsync"/>'s local size refusal.
+    /// </summary>
+    /// <remarks>The inner exception is the test rather than the message, so this keeps working
+    /// if the wording above changes.</remarks>
+    private static bool IsLocalDatagramRefusal(IOException exception) =>
+        exception.InnerException is SocketException
+        {
+            SocketErrorCode: SocketError.MessageSize,
+        };
 
     // The bytes a 1-RTT packet spends on framing before any frame: s17.3.1's first byte, the
     // Destination Connection ID, the packet number, and s5.3's AEAD tag. Computed from THIS
@@ -4118,17 +4185,31 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return;
         }
 
-        // BEFORE THE AWAIT, which is RetainSentPackets' own documented ordering: "Called in the
-        // same synchronous step as the build and BEFORE the await that sends." A send that
-        // throws then leaves the packet retained, which over-counts bytes in flight for a
-        // connection that is failing anyway; retaining afterwards would under-count for every
-        // packet already on the wire, which is the error that costs.
+        // AFTER THE AWAIT HERE, AND ONLY HERE, WHICH INVERTS RetainSentPackets' OWN DOCUMENTED
+        // ORDERING ON PURPOSE. That ordering reasons about a send that throws on a connection
+        // "that is about to fail anyway", where over-counting bytes in flight costs nothing. A
+        // probe refused locally is the case that assumption does not cover: the connection is
+        // healthy, the datagram never left the host, and the search below recovers - so
+        // retaining it would add a packet that can never be acknowledged to bytes_in_flight,
+        // once per descent step, on a connection that keeps running. Nothing is appended to
+        // _justSent between the build above and this line, so holding it across the await moves
+        // no other packet's accounting.
+        try
+        {
+            await SendDatagramAsync(_sendBuffer.AsMemory(0, written), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (IOException ex) when (IsLocalDatagramRefusal(ex))
+        {
+            // RFC 8899 s4.6.2. The probe is the ONE datagram whose whole purpose is to find out
+            // whether a size fits, so a refusal is its answer rather than its failure - and the
+            // only send on this connection that must not propagate one.
+            _justSent.Clear();
+            _pathMtu.OnProbeRefusedLocally(size);
+            return;
+        }
+
         RetainSentPackets();
-
-        await _options.Transport
-            .SendAsync(_options.RemoteEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken)
-            .ConfigureAwait(false);
-
         _pathMtu.OnProbeSent(packetNumber);
         PathMtuProbesSent++;
 
@@ -4157,11 +4238,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 return;
             }
 
-            await _options.Transport
-                .SendAsync(
-                    _options.RemoteEndPoint,
-                    _sendBuffer.AsMemory(0, written),
-                    cancellationToken)
+            await SendDatagramAsync(_sendBuffer.AsMemory(0, written), cancellationToken)
                 .ConfigureAwait(false);
 
             ProbeDatagramsSent++;
@@ -4441,9 +4518,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         var datagrams = BuildInitialFlight(cryptoStream);
         foreach (var datagram in datagrams)
         {
-            await _options.Transport
-                .SendAsync(_options.RemoteEndPoint, datagram, cancellationToken)
-                .ConfigureAwait(false);
+            await SendDatagramAsync(datagram, cancellationToken).ConfigureAwait(false);
         }
 
         // BuildInitialFlight advances the packet number by one per datagram from the template
@@ -4542,8 +4617,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             crypto, now, out var carriedHandshakePacket, out var carriedAckElicitingFrame);
         if (written > 0)
         {
-            await _options.Transport
-                .SendAsync(_options.RemoteEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken)
+            await SendDatagramAsync(_sendBuffer.AsMemory(0, written), cancellationToken)
                 .ConfigureAwait(false);
 
             // RFC 9000 s10.1's second restart, and the condition is what makes it a restart
@@ -5010,9 +5084,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         var written = BuildCloseDatagram(application, errorCode, reason);
         if (written > 0)
         {
-            await _options.Transport
-                .SendAsync(
-                    _options.RemoteEndPoint, _sendBuffer.AsMemory(0, written), cancellationToken)
+            await SendDatagramAsync(_sendBuffer.AsMemory(0, written), cancellationToken)
                 .ConfigureAwait(false);
         }
 
