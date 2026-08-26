@@ -1364,7 +1364,8 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         {
             var overhead = _options.Transport.DatagramOverhead;
             throw new IOException(
-                $"[{origin}: {DescribeCoalescedPackets(payload.Span)}] "
+                $"[{origin}: {DescribeCoalescedPackets(payload.Span)}; "
+                + $"budget {DatagramPayloadBudget}] "
                 + $"The host refused a {payload.Length + overhead}-byte datagram "
                 + $"({payload.Length} bytes of QUIC plus {overhead} bytes of transport header) "
                 + $"to {_options.RemoteEndPoint}: the outgoing interface for that route carries "

@@ -138,6 +138,11 @@ public sealed partial class TlsQuicConnectionTests
         // it is what makes a report of "Initial + Handshake" or "Initial + Initial" from the
         // field a fact rather than an inference.
         Assert.Contains("[SendInitialFlightAsync: Initial ", failure.Message, StringComparison.Ordinal);
+
+        // AND THE BUDGET THE BUILDER WAS WORKING TO. A datagram far above its own stated budget
+        // is a builder that never consulted it - which is a different fault from a budget set
+        // too high, and the two were indistinguishable in three rounds of field reports.
+        Assert.Contains("budget ", failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("truncated", failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("overruns", failure.Message, StringComparison.Ordinal);
 
