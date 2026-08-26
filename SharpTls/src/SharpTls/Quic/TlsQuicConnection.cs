@@ -4931,7 +4931,19 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // s12.2: "packets with a short header (Section 17.3) do not contain a Length field
         // and so cannot be followed by other packets in the same UDP datagram." That is not
         // a dimension anything may vary, so the 1-RTT packet is not one of the levels above.
-        if (TryBuildApplicationPacket(now, out var oneRtt))
+        // MEASURED BY BUILDING IT, NOT BY ESTIMATING IT. The prefix's on-wire size depends on
+        // the long header's version, connection IDs, token, packet number width, the Length
+        // varint that widens with what follows it, and s14.1's expansion of an Initial-carrying
+        // datagram to the padding target. Re-deriving that here would be a second encoder to
+        // keep in step with the real one; calling the real one with a null sent-packet list
+        // records nothing and returns the exact figure. It costs one extra encode, and only
+        // while a handshake level still has something to send - zero passes out of every
+        // connection's steady state.
+        var coalescedPrefixBytes = packets.Count == 0
+            ? 0
+            : TlsQuicDatagramBuilder.BuildDatagram(_options.Spec, packets, now, _sendBuffer);
+
+        if (TryBuildApplicationPacket(now, coalescedPrefixBytes, out var oneRtt))
         {
             // A3-8's ledger for the 1-RTT packet, RECORDED HERE RATHER THAN WHERE THE PACKET IS
             // BUILT. TryBuildApplicationPacket lives in TlsQuicApplicationSendPath.cs, which is

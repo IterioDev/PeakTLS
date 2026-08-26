@@ -489,7 +489,15 @@ internal sealed partial class TlsQuicConnection
     /// <para>NOT async, and it cannot be: <c>TlsQuicWriteKeyMaterial</c> is a ref struct, so
     /// key material never lives in an async state machine.</para>
     /// </remarks>
-    private bool TryBuildApplicationPacket(DateTimeOffset now, out TlsQuicPacketToSend packet)
+    /// <summary>Builds this pass's 1-RTT packet, if there is anything to put in one.</summary>
+    /// <param name="now">The instant the datagram is about to be sent at.</param>
+    /// <param name="reservedBytes">Bytes already committed to long-header packets coalesced
+    /// AHEAD of this one in the same datagram, which the stream budget below must not spend.
+    /// Zero once the handshake levels are done, which is every pass after the first few.</param>
+    /// <param name="packet">The packet built.</param>
+    /// <returns><see langword="true"/> when a packet was built.</returns>
+    private bool TryBuildApplicationPacket(
+        DateTimeOffset now, int reservedBytes, out TlsQuicPacketToSend packet)
     {
         packet = default;
 
@@ -601,7 +609,18 @@ internal sealed partial class TlsQuicConnection
             // WHAT IS ALREADY IN `frames` IS CHARGED FOR, not assumed away: an ACK and a
             // PATH_RESPONSE may precede the stream data, and both are measured with the same
             // encoder that will write them rather than estimated.
-            streams.DatagramPayloadBudget = DatagramPayloadBudget;
+            // AND THE COALESCED PREFIX IS CHARGED TOO, WHICH IS THE HALF THAT WAS MISSING.
+            // RFC 9000 s12.2 lets an Initial or Handshake packet share this datagram, and
+            // BuildAnswerDatagram puts them BEFORE the 1-RTT packet - so the sentence above is
+            // about the DATAGRAM and this budget was about the PACKET. During the handshake
+            // window that gap is the whole Handshake packet: a client Finished coalesced with
+            // the first 1-RTT packet carrying an HTTP request produced datagrams around 1500
+            // bytes from a 1200-byte path MTU, refused by a DF-set socket with
+            // SocketError.MessageSize - and immune to MaximumPathMtu, BasePathMtu and
+            // PathMtuDiscovery alike, because every one of those knobs feeds the budget the
+            // prefix was escaping.
+            var budget = DatagramPayloadBudget - reservedBytes;
+            streams.DatagramPayloadBudget = budget;
 
             var spent = OneRttPacketOverhead;
             foreach (var already in frames)
@@ -609,7 +628,14 @@ internal sealed partial class TlsQuicConnection
                 spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
             }
 
-            var taken = streams.TakePendingFrames(DatagramPayloadBudget - spent);
+            // A prefix that already fills the datagram leaves nothing for stream data, and the
+            // take's own first-frame exemption - it always takes one frame however large, so a
+            // pass can never make zero progress - would otherwise turn "no room" into "one
+            // frame anyway". The frames stay queued and go out in the next datagram, which by
+            // then has no prefix in front of it.
+            var taken = budget - spent > 0
+                ? streams.TakePendingFrames(budget - spent)
+                : [];
             frames.AddRange(taken);
 
             // RFC 8899 s5.1.1's "application data has been sent", reported from the one place
