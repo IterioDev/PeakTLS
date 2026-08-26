@@ -13,7 +13,7 @@ var echResolver = new TlsEchDnsResolver(new TlsEchDnsResolverOptions
     // DoT/DoH require explicit bootstrap IPs and authenticate the resolver name.
 });
 
-var options = TlsPresets.Chrome133.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 options.EchDnsResolver = echResolver;
 
 await using var session = new TlsSession(options);

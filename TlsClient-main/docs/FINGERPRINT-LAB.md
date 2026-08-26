@@ -40,7 +40,7 @@ rather than silently weakened.
 ## Strict JSON interchange
 
 ```csharp
-string json = TlsClientHello.ExportJson(TlsProfiles.Chrome133);
+string json = TlsClientHello.ExportJson(TlsProfiles.Spotify917602050IOS270Tcp);
 TlsProfile restored = TlsClientHello.ImportJson("reviewed-profile", json);
 ```
 
@@ -53,7 +53,7 @@ and input limits. JSON contains reusable offer policy only, never connection sec
 ```csharp
 byte[] testSeed = SHA256.HashData("my-fixture-v1"u8);
 TlsClientHelloSnapshot snapshot = TlsClientHello.BuildSnapshotForTesting(
-    TlsProfiles.Chrome133,
+    TlsProfiles.Spotify917602050IOS270Tcp,
     "fixture.example",
     testSeed,
     TlsHttpVersionPolicy.PreferHttp2);
@@ -87,7 +87,7 @@ HTTP/2 SETTINGS, flow-control increments, and priority frames can be captured ex
 from session options and moved through a strict JSON document:
 
 ```csharp
-var source = TlsPresets.Chrome133.CreateOptions();
+var source = TlsPresets.SpotifyH2.CreateOptions();
 TlsHttpBehaviorProfile behavior = TlsHttpBehaviorProfile.Capture(
     "chrome-133-http",
     source);
@@ -95,7 +95,7 @@ TlsHttpBehaviorProfile behavior = TlsHttpBehaviorProfile.Capture(
 string json = behavior.ExportJson();
 TlsHttpBehaviorProfile restored = TlsHttpBehaviorProfile.ImportJson(json);
 
-var target = new TlsSessionOptions { Profile = TlsProfiles.Chrome133 };
+var target = new TlsSessionOptions { Profile = TlsProfiles.Spotify917602050IOS270Tcp };
 restored.ApplyTo(target);
 ```
 
@@ -127,7 +127,7 @@ Console.WriteLine(fingerprint.Ja4Raw);
 Or observe the exact SharpTls wire image immediately before it is sent:
 
 ```csharp
-var options = TlsPresets.Chrome133.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 TlsClientHello.Observe(options, observation =>
 {
     Console.WriteLine(observation.Flight);

@@ -4,7 +4,7 @@ TlsClient owns TCP connection establishment while SharpTls owns the TLS handshak
 session keeps these layers explicit and bounded:
 
 ```csharp
-var options = TlsPresets.Chrome133.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 options.MaximumConnectionsPerOrigin = 6;
 options.MaximumPooledConnections = 64;
 options.PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2);

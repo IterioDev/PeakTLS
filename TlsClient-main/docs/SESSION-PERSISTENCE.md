@@ -10,7 +10,7 @@ byte[] julyKey = Load32ByteKeyFromSecretStore();
 byte[] persisted;
 
 using (var july = new Tls13SessionStateProtector("2026-07", julyKey))
-await using (var session = new TlsSession(TlsPresets.Chrome133))
+await using (var session = new TlsSession(TlsPresets.SpotifyH2))
 {
     await session.GetAsync("https://example.com/");
     persisted = session.ExportTls13SessionState(july);
@@ -27,7 +27,7 @@ byte[] augustKey = Load32ByteKeyFromSecretStore();
 using var august = new Tls13SessionStateProtector("2026-08", augustKey);
 august.AddDecryptionKey("2026-07", julyKey);
 
-await using var restored = new TlsSession(TlsPresets.Chrome133);
+await using var restored = new TlsSession(TlsPresets.SpotifyH2);
 restored.ImportTls13SessionState(
     await File.ReadAllBytesAsync("tls-sessions.bin"),
     august);

@@ -124,18 +124,33 @@ public static class TlsProfiles
             nameof(ClientHelloProfiles.Spotify917602050IOS270Quic),
             ClientHelloProfiles.Spotify917602050IOS270Quic);
 
+    /// <summary>
+    /// Gets the TCP ClientHello of the same Spotify 9.1.76.2050 iOS build — the hello its
+    /// HTTP/2 legs dial with, paired with <see cref="TlsPresets.SpotifyH2"/>.
+    /// </summary>
+    /// <remarks>Transcribed from a supplied fingerprint record rather than decoded from a
+    /// first-party capture, unlike <see cref="Spotify917602050IOS270Quic"/>. Thirteen cipher
+    /// suites to that one's three, and a different extension set; the two are not derivable
+    /// from each other.</remarks>
+    public static TlsProfile Spotify917602050IOS270Tcp { get; } =
+        TlsProfile.CreateBuiltIn(
+            "spotify-9.1.76-ios-27.0-tcp",
+            nameof(ClientHelloProfiles.Spotify917602050IOS270Tcp),
+            ClientHelloProfiles.Spotify917602050IOS270Tcp);
+
     /// <summary>Gets every built-in TlsClient profile in stable name order.</summary>
-    /// <remarks>TWO ENTRIES, AND THAT IS THE WHOLE CATALOGUE. The browser transcriptions -
-    /// Chrome, Firefox, Edge, Safari, iOS, Android and their pinned versions - were removed
-    /// along with the uTLS profiles they were built on. <see cref="Modern"/> is not an
-    /// impersonation: it is SharpTls's conservative TLS 1.3 shape and exists so
-    /// <c>TlsSessionOptions.Profile</c> has a default that negotiates rather than imitates.
-    /// Anything you want to look like now comes from a capture, through
-    /// <c>ClientHelloProfiles.Custom</c>.</remarks>
+    /// <remarks>THREE ENTRIES, AND THAT IS THE WHOLE CATALOGUE - one honest shape and the two
+    /// halves of one client. The browser transcriptions - Chrome, Firefox, Edge, Safari, iOS,
+    /// Android and their pinned versions - were removed along with the uTLS profiles they were
+    /// built on. <see cref="Modern"/> is not an impersonation: it is SharpTls's conservative
+    /// TLS 1.3 shape and exists so <c>TlsSessionOptions.Profile</c> has a default that
+    /// negotiates rather than imitates. Anything else you want to look like comes from a
+    /// capture, through <c>ClientHelloProfiles.Custom</c>.</remarks>
     public static IReadOnlyList<TlsProfile> All { get; } = Array.AsReadOnly(
         new TlsProfile[]
         {
             Modern,
             Spotify917602050IOS270Quic,
+            Spotify917602050IOS270Tcp,
         });
 }

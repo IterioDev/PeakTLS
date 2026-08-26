@@ -15,7 +15,7 @@ not create an `Activity`.
 origin and a connection identifier:
 
 ```csharp
-var options = TlsPresets.Chrome133.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 options.HandshakeObserver = item => Console.WriteLine(
     $"{item.ConnectionId} #{item.SequenceNumber} {item.Kind} " +
     $"{item.Direction} {item.ProtocolVersion} {item.EncodedLength}");

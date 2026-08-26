@@ -11,9 +11,9 @@ field lands when it is present; it never causes one to be sent. Nothing — not 
 `User-Agent` — is added on the caller's behalf.
 
 ```csharp
-await using var session = new TlsSession(TlsPresets.Chrome133);
+await using var session = new TlsSession(TlsPresets.SpotifyH2);
 
-var options = TlsPresets.Firefox148.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 await using var customized = new TlsSession(options);
 
 var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -24,17 +24,20 @@ var response = await customized.SendAsync(request);
 ```
 
 `CreateOptions()` always returns an independent mutable object. The short aliases
-`Chrome`, `Firefox`, `Android`, and `Spotify` point to the current built-in versioned
-presets; choose the versioned property when reproducibility matters.
+`Spotify` and `SpotifyH2` point to the current built-in versioned presets; choose the
+versioned property when reproducibility matters.
 
 ## Profile matrix
 
-| TlsClient preset | SharpTls TLS profile | Ordered HTTP/2 SETTINGS | WINDOW_UPDATE increment | HEADERS priority | Pseudo-header order |
-|---|---|---|---:|---|---|
-| `Chrome133` | `UTlsChrome133` | `1:65536; 2:0; 4:6291456; 6:262144` | `15663105` | none | `m,a,s,p` |
-| `Firefox148` | `UTlsFirefox148` | `1:65536; 2:0; 4:131072; 5:16384` | `12517377` | dep `0`, non-exclusive, weight `41` | `m,p,a,s` |
-| `Android11` | `UTlsAndroid11OkHttp` | `4:16777216` | `16711681` | dep `0`, non-exclusive, weight `1` | `m,p,a,s` |
-| `Spotify917602050IOS270Http3` | `Spotify917602050IOS270Quic` | HTTP/3, not HTTP/2 — see below | n/a | n/a | `m,a,s,p` (unmeasured) |
+| TlsClient preset | SharpTls TLS profile | Transport | Ordered HTTP/2 SETTINGS | WINDOW_UPDATE increment | Pseudo-header order |
+|---|---|---|---|---:|---|
+| `Spotify917602050IOS270Http2` | `Spotify917602050IOS270Tcp` | TCP, PreferHttp2 | `1:4096; 2:0; 3:100; 4:2097152; 5:16384; 6:4294967295; 8:0` | `15663105` | `m,s,p,a` |
+| `Spotify917602050IOS270Http3` | `Spotify917602050IOS270Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,a,s,p` (unmeasured) |
+
+**TWO PRESETS, ONE CLIENT, TWO FINGERPRINTS.** The same app dials HTTP/2 over TCP and
+HTTP/3 over QUIC with genuinely different hellos — thirteen cipher suites against three, a
+different extension set, and even a different pseudo-header order. Neither is derivable from
+the other; pick the one matching the transport you are dialling.
 
 The setting identifiers are the HTTP/2 registry values. The pseudo-header abbreviation
 uses `m` = method, `a` = authority, `s` = scheme, and `p` = path. WINDOW_UPDATE values
@@ -48,15 +51,20 @@ no `SETTINGS_ENABLE_CONNECT_PROTOCOL` — and no PRIORITY frames.
 
 ## Provenance
 
-The first three presets and the Spotify preset do not have the same kind of evidence
-behind them, and the difference matters when judging how far to trust each.
-
-`Chrome133`, `Firefox148`, and `Android11` are **transcriptions of a third-party
-project**: their HTTP/2 values come from bogdanfinn/tls-client at the commit linked
-below, and their ClientHellos from uTLS at its pinned commit. Their accuracy is
-inherited from those upstreams.
+The two presets do not have the same kind of evidence behind them, and the difference
+matters when judging how far to trust each.
 
 `Spotify917602050IOS270Http3` is a **first-party passive capture of a real device**.
+
+`Spotify917602050IOS270Http2` is a **transcription of a supplied fingerprint record**, in
+bogdanfinn/tls-client's JSON format, whose collection method is not recorded here. Its TLS
+values — cipher suites, groups, key shares, signature algorithms, extension order — and its
+HTTP/2 SETTINGS, window increment and pseudo-header order are all read from that record.
+Its accuracy is inherited from whoever produced it; pin it against your own capture before
+trusting it. Two details in it are NOT derivable from the record and are called out where
+they are set: the GREASE equality pattern, carried over from the QUIC capture of the same
+app, and the fact that the record's literal GREASE values are per-connection nonces rather
+than fingerprint.
 
 | | |
 |---|---|
@@ -76,8 +84,10 @@ fingerprint database. Both hashes are reproduced live against `fp.impersonate.pr
 **This preset is `Http3Only`.** The shape it carries is QUIC's, and RFC 9001 §8.4 forbids
 several extensions a TCP hello carries, so applying it to a TCP dial would impersonate
 nothing. The same app's HTTP/2 legs are a *different* ClientHello — thirteen cipher suites
-instead of three, no post-quantum group, a 32-byte `legacy_session_id`, TLS 1.2 in
-`supported_versions` — and are not reproduced here.
+instead of three, a 32-byte `legacy_session_id` where this one is empty, TLS 1.2 in
+`supported_versions`, and the 1.2-era extensions §8.4 forbids over QUIC. Both hellos carry
+the `X25519MLKEM768` hybrid group; that is one of the few things they share. Use
+`Spotify917602050IOS270Http2` for the TCP half — do not derive one from the other.
 
 ### What is measured
 
@@ -177,14 +187,10 @@ known identifiers are still range-checked against RFC 9113 section 6.5.2, so
 `SETTINGS_MAX_FRAME_SIZE` outside `[16384, 16777215]` is rejected at configuration time
 rather than sent; unknown identifiers carry any value.
 
-The HTTP/2 values for `Chrome133`, `Firefox148`, and `Android11` — and only those three;
-see Provenance above for `Spotify917602050IOS270Http3` — were transcribed from
-bogdanfinn/tls-client commit
-[`b790a311273f26051935641120de169e497e5943`](https://github.com/bogdanfinn/tls-client/commit/b790a311273f26051935641120de169e497e5943):
-
-- [Chrome 133 profile](https://github.com/bogdanfinn/tls-client/blob/b790a311273f26051935641120de169e497e5943/profiles/internal_browser_profiles.go#L820-L935)
-- [Firefox 148 profile](https://github.com/bogdanfinn/tls-client/blob/b790a311273f26051935641120de169e497e5943/profiles/contributed_browser_profiles.go#L10-L151)
-- [OkHttp Android 11 profile](https://github.com/bogdanfinn/tls-client/blob/b790a311273f26051935641120de169e497e5943/profiles/contributed_custom_profiles.go#L1250-L1274)
+The browser presets these paragraphs used to describe — `Chrome133`, `Firefox148` and
+`Android11`, transcribed from bogdanfinn/tls-client and uTLS — were removed along with the
+uTLS profiles they were built on. The two presets above are what ships. See Provenance
+above for how each was obtained.
 
 TlsClient's loopback capture tests establish a real SharpTls connection and assert the
 serialized settings order and values, connection window increment, HEADERS priority

@@ -92,8 +92,70 @@ public static class TlsPresets
 
 #pragma warning restore TLSCLIENT3
 
+    /// <summary>
+    /// Gets the HTTP/2 half of the same Spotify 9.1.76.2050 iOS 27.0 client: the TCP
+    /// ClientHello its h2 legs dial with, plus the HTTP/2 SETTINGS, connection-window
+    /// increment and pseudo-header order recorded alongside it.
+    /// </summary>
+    /// <remarks>
+    /// <para>TRANSCRIBED, NOT FIRST-PARTY CAPTURED, which is the opposite of
+    /// <see cref="Spotify917602050IOS270Http3"/> and is the distinction docs/PRESETS.md is
+    /// organised around. It is read from a fingerprint record supplied in bogdanfinn/tls-client's
+    /// JSON format, whose collection method is not recorded. Pin it against your own capture
+    /// before trusting it.</para>
+    /// <para>PreferHttp2 rather than Http2Only ON PURPOSE: the hello offers
+    /// <c>http/1.1</c> after <c>h2</c>, so pinning h2 would misrepresent a client that accepts
+    /// the fallback. The app negotiates TLS 1.3 in practice, which matters because the hello
+    /// also offers ten TLS 1.2 suites that SharpTls will not complete on - see the profile's
+    /// own remarks.</para>
+    /// <para>No header order, for the reason every preset here carries none: a field reaches
+    /// the wire only when <c>request.AddHeader</c> put it there, in the order it was added.
+    /// The captured header images live in docs/USAGE.md.</para>
+    /// </remarks>
+    public static TlsPreset Spotify917602050IOS270Http2 { get; } = new(
+        "spotify-9.1.76-ios-27.0-h2",
+        TlsProfiles.Spotify917602050IOS270Tcp,
+        ConfigureSpotifyIosHttp2,
+        TlsHttpVersionPolicy.PreferHttp2);
+
     /// <summary>Gets the current SharpTls Spotify-family preset.</summary>
     public static TlsPreset Spotify => Spotify917602050IOS270Http3;
+
+    /// <summary>Gets the current Spotify-family HTTP/2 preset.</summary>
+    public static TlsPreset SpotifyH2 => Spotify917602050IOS270Http2;
+
+    /// <summary>Applies the recorded HTTP/2 shape of the Spotify iOS client.</summary>
+    private static void ConfigureSpotifyIosHttp2(TlsHttp2Options http2)
+    {
+        // THE PREFACE IS A SCRIPT AND THE ORDER IS THE FINGERPRINT. These seven settings are in
+        // the record's declared order, which is ascending here but is not required to be and is
+        // not treated as sortable. Identifier 0x8 is RFC 8441 ENABLE_CONNECT_PROTOCOL; the
+        // record calls it UNKNOWN_SETTING_8 because its own table has no name for it, and
+        // sending it with value 0 is a real client declining extended CONNECT explicitly rather
+        // than by omission - which is itself a distinguisher, so it is kept.
+        http2.Preface =
+        [
+            new TlsHttp2SettingsFrame
+            {
+                Settings =
+                [
+                    new TlsHttp2SettingValue(0x1, 4_096),          // HEADER_TABLE_SIZE
+                    new TlsHttp2SettingValue(0x2, 0),              // ENABLE_PUSH
+                    new TlsHttp2SettingValue(0x3, 100),            // MAX_CONCURRENT_STREAMS
+                    new TlsHttp2SettingValue(0x4, 2_097_152),      // INITIAL_WINDOW_SIZE
+                    new TlsHttp2SettingValue(0x5, 16_384),         // MAX_FRAME_SIZE
+                    new TlsHttp2SettingValue(0x6, uint.MaxValue),  // MAX_HEADER_LIST_SIZE
+                    new TlsHttp2SettingValue(0x8, 0),              // ENABLE_CONNECT_PROTOCOL
+                ],
+            },
+            new TlsHttp2WindowUpdateFrame { Increment = 15_663_105 },
+        ];
+
+        // m, s, p, a — NOT the m, a, s, p the QUIC half sends. RFC 9113 section 8.3 fixes no
+        // order among the pseudo-headers, so the choice is pure fingerprint and the two halves
+        // of this client genuinely differ.
+        http2.PseudoHeaderOrder = [":method", ":scheme", ":path", ":authority"];
+    }
 
     private static TlsQuicTransportParameterEntry[] SpotifyTransportParameters() =>
     [

@@ -171,8 +171,10 @@ T: public static class SharpTls.ClientHelloProfiles
   M: public static SharpTls.ClientHelloProfile Custom(System.Action<SharpTls.ClientHelloBuilder> configure)
   M: public static SharpTls.ClientHelloProfile FromSpec(SharpTls.ClientHelloSpec spec)
   M: public static System.Void ApplySpotify917602050IOS270QuicClientHello(SharpTls.ClientHelloBuilder builder)
+  M: public static System.Void ApplySpotify917602050IOS270TcpClientHello(SharpTls.ClientHelloBuilder builder)
   P: public SharpTls.ClientHelloProfile ModernTls13 { get; }
   P: public SharpTls.ClientHelloProfile Spotify917602050IOS270Quic { get; }
+  P: public SharpTls.ClientHelloProfile Spotify917602050IOS270Tcp { get; }
 T: public sealed class SharpTls.ClientHelloSpec
   P: public SharpTls.ClientHelloGreasePolicy? GreasePolicy { get; }
   P: public SharpTls.Quic.TlsQuicTransportParameters? QuicTransportParameters { get; }

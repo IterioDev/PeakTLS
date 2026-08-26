@@ -4,7 +4,7 @@ Retries are a visible session policy. TlsClient does not retry indefinitely and 
 replays a non-replayable body:
 
 ```csharp
-var options = TlsPresets.Chrome133.CreateOptions();
+var options = TlsPresets.SpotifyH2.CreateOptions();
 options.Retry.MaximumAttempts = 3; // includes the first attempt
 options.Retry.RetryConnectionFailures = true;
 options.Retry.StatusCodes.Add(HttpStatusCode.RequestTimeout);
