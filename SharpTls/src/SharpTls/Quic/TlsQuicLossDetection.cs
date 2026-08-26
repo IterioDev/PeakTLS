@@ -842,8 +842,12 @@ internal sealed partial class TlsQuicConnection
         owed.Add(repaired);
     }
 
-    /// <summary>Hands the repairs owed at one level to a packet being built, and empties the
-    /// queue.</summary>
+    /// <summary>Hands the repairs owed at one level to a packet being built, as many as fit.
+    /// </summary>
+    /// <param name="level">The level whose queue to drain.</param>
+    /// <param name="frames">The packet's frame list, appended to.</param>
+    /// <param name="payloadBudget">Bytes of frame payload this datagram has left. What does not
+    /// fit STAYS OWED and goes out in the next one.</param>
     /// <remarks>
     /// <para>THE CONGESTION GATE IS HERE AND NOT AT THE QUEUE, because RFC 9002 s7's rule is
     /// about sending: "An endpoint MUST NOT send a packet if it would cause bytes_in_flight ...
@@ -858,13 +862,31 @@ internal sealed partial class TlsQuicConnection
     /// case; A3-11's pacing task is where a send path acquires a byte-exact gate.</para>
     /// <para>NOT USED BY THE PROBE PATH, and that is s7.5 rather than an omission:
     /// "Probe packets MUST NOT be blocked by the congestion controller."</para>
+    /// <para>THE BUDGET IS RFC 9000 s14.2's, AND IT WAS MISSING. This used to be
+    /// <c>frames.AddRange(owed)</c> - every owed repair into one packet, gated on the
+    /// congestion window and on nothing else. The congestion window is not a size limit: it
+    /// bounds bytes IN FLIGHT across packets and says nothing about whether one datagram fits
+    /// the path. A client whose ClientHello was split into a 999-byte CRYPTO frame and a
+    /// ~492-byte one - two datagrams of 1200, because that is what fitted - repaired both into
+    /// ONE datagram of about 1525, which a DF-set socket refuses outright with
+    /// SocketError.MessageSize. The split that made the original flight legal was undone by the
+    /// repair that was supposed to reproduce it.</para>
+    /// <para>AND <see cref="AppendProbeData"/> HAD THIS ALL ALONG, twenty lines below: fill to
+    /// a budget, leave the remainder owed. Two drains of the same queue answered the same
+    /// question differently and only one of them was right; this is the other one brought into
+    /// line rather than a new idea.</para>
+    /// <para>A REFUSED FRAME IS NEVER DROPPED - it stays at the head of the queue in send
+    /// order, so the next datagram takes it and two frames on one stream keep their offsets.
+    /// Dropping the overflow would pass every size assertion and stall the handshake, which is
+    /// a worse failure than the one being fixed.</para>
     /// <para>INTERNAL FOR THE REASON <see cref="OnPacketSent"/> GIVES ABOUT ITS OWN: this IS
     /// the drain <c>BuildAnswerDatagram</c> calls for every Initial and Handshake packet it
     /// builds, so a test driving it drives the same code the send path does. What such a test
     /// does NOT prove is that the send path calls it; the loopback witnesses cover that half
     /// and neither half is sufficient alone.</para>
     /// </remarks>
-    internal void TakeRepairsInto(TlsQuicEncryptionLevel level, List<TlsQuicFrame> frames)
+    internal void TakeRepairsInto(
+        TlsQuicEncryptionLevel level, List<TlsQuicFrame> frames, int payloadBudget)
     {
         var owed = _repairsOwed[(int)level];
         if (owed.Count == 0)
@@ -872,10 +894,25 @@ internal sealed partial class TlsQuicConnection
             return;
         }
 
+        // HOW MANY FIT, DECIDED BEFORE THE CONGESTION GATE IS ASKED. The gate's question is
+        // "may these bytes be sent"; asking it about bytes this datagram was never going to
+        // carry would refuse a repair that fits on a window that could have taken it.
+        var take = 0;
         var bytes = 0;
-        foreach (var repair in owed)
+        while (take < owed.Count && bytes + owed[take].Data.Length <= payloadBudget)
         {
-            bytes += repair.Data.Length;
+            bytes += owed[take].Data.Length;
+            take++;
+        }
+
+        // ONE FRAME LARGER THAN THE WHOLE BUDGET IS NOT LEFT TO STARVE. It cannot be split here
+        // - a CRYPTO frame's offsets belong to the TLS endpoint that produced it - so it goes
+        // out oversized and the send path reports the refusal, which is a legible failure
+        // rather than a queue that never drains and a handshake that never completes.
+        if (take == 0)
+        {
+            take = 1;
+            bytes = owed[0].Data.Length;
         }
 
         if (!Congestion.CanSend(bytes))
@@ -883,9 +920,13 @@ internal sealed partial class TlsQuicConnection
             return;
         }
 
-        frames.AddRange(owed);
-        _framesRetransmitted += owed.Count;
-        owed.Clear();
+        for (var i = 0; i < take; i++)
+        {
+            frames.Add(owed[i]);
+        }
+
+        owed.RemoveRange(0, take);
+        _framesRetransmitted += take;
     }
 
     /// <summary>RFC 9002 s6.2.4's "Previously sent data MAY be sent if no new data can be sent":

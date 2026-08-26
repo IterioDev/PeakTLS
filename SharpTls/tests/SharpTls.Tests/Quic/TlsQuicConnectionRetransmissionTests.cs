@@ -181,6 +181,126 @@ public sealed partial class TlsQuicConnectionTests
     // which is why the excluded frames share a packet with a CRYPTO frame here. The packet is
     // lost once; the CRYPTO half must come back and the other four must not, and no
     // single-sided build satisfies both halves.
+    /// <summary>
+    /// A REPAIR FILLS THE DATAGRAM IT IS GOING INTO, AND STOPS. RFC 9000 section 14.2 bounds
+    /// the DATAGRAM, and a drain that emptied the queue regardless produced datagrams no path
+    /// carries: the Spotify preset splits its ClientHello into a 999-byte CRYPTO frame and a
+    /// ~492-byte one, sent as two 1200-byte datagrams - and repaired as ONE datagram of about
+    /// 1525, which a DF-set socket refuses with SocketError.MessageSize. Field-reported at
+    /// exactly 1525 and 1520 bytes for two hosts whose names differ by five characters, which
+    /// is the second frame carrying the SNI.
+    /// <para>THE SIBLING PATH ALREADY DID THIS. AppendProbeData, twenty lines further down the
+    /// same file, fills to a budget and leaves the remainder owed. The two answered the same
+    /// question differently, and the ordinary answer path was the one with no bound.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARepairDrainStopsAtTheDatagramBudgetAndLeavesTheRestOwed()
+    {
+        var clock = FakeClock();
+        await using var connection = LossDetectionConnectionOn(clock);
+
+        // The captured shape: one 999-byte CRYPTO frame and the remainder, each sent in its own
+        // datagram because that is what fitted.
+        connection.RecordRepairable(
+            TlsQuicEncryptionLevel.Initial,
+            0,
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.Crypto,
+                    Offset = 0,
+                    Data = new byte[999],
+                },
+            ]);
+        connection.RecordRepairable(
+            TlsQuicEncryptionLevel.Initial,
+            1,
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.Crypto,
+                    Offset = 999,
+                    Data = new byte[492],
+                },
+            ]);
+
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 0, clock.GetUtcNow()));
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 1, clock.GetUtcNow()));
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 2, clock.GetUtcNow()));
+
+        clock.Advance(TimeThresholdGap);
+        Acknowledge(connection, TlsQuicEncryptionLevel.Initial, 2);
+        Assert.Equal(2, connection.RepairsOwed(TlsQuicEncryptionLevel.Initial).Count);
+
+        // A 1200-byte datagram carries the first frame and not both. The budget is the payload
+        // one Initial packet has left, which is under 1200 by the long header this test does not
+        // restate; 1100 is comfortably inside it and comfortably outside 999 + 492.
+        var first = new List<TlsQuicFrame>();
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, first, 1100);
+
+        // ONE OF THE TWO, WHICHEVER THE LOSS PASS QUEUED FIRST - the assertion is the BUDGET,
+        // not the order. Queue order is send order within a level, but which of two packets
+        // declared lost in the same pass is walked first is loss detection's business and not
+        // this bound's; a CRYPTO frame carries its own offset, so either order reassembles.
+        Assert.Single(first);
+        Assert.True(
+            first[0].Data.Length <= 1100,
+            $"a {first[0].Data.Length}-byte repair went into a 1100-byte budget");
+
+        // AND THE REMAINDER IS STILL OWED, NOT DROPPED. A bound that discarded the overflow
+        // would pass the assertion above and stall the handshake, which is a worse failure
+        // than the one being fixed.
+        var stillOwed = Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+        Assert.NotEqual(first[0].Data.Length, stillOwed.Data.Length);
+
+        // The next datagram takes it, and the two together are the whole flight - 1491 bytes
+        // that never shared one datagram.
+        var second = new List<TlsQuicFrame>();
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, second, 1100);
+        Assert.Single(second);
+        Assert.Equal(1491, first[0].Data.Length + second[0].Data.Length);
+        Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+    }
+
+    /// <summary>
+    /// A SINGLE FRAME LARGER THAN THE WHOLE BUDGET STILL GOES OUT. It cannot be split here - a
+    /// CRYPTO frame's offsets belong to the TLS endpoint that produced it - so the choice is
+    /// between an oversized datagram the send path reports as a refusal, and a queue that never
+    /// drains behind a frame that never fits. The second is a handshake that hangs with no
+    /// error, which is strictly worse than the size bug this budget exists to fix.
+    /// </summary>
+    [Fact]
+    public async Task ARepairTooLargeForTheBudgetIsStillSentRatherThanStarved()
+    {
+        var clock = FakeClock();
+        await using var connection = LossDetectionConnectionOn(clock);
+
+        connection.RecordRepairable(
+            TlsQuicEncryptionLevel.Initial,
+            0,
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.Crypto,
+                    Offset = 0,
+                    Data = new byte[1400],
+                },
+            ]);
+
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 0, clock.GetUtcNow()));
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 1, clock.GetUtcNow()));
+
+        clock.Advance(TimeThresholdGap);
+        Acknowledge(connection, TlsQuicEncryptionLevel.Initial, 1);
+        Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+
+        var drained = new List<TlsQuicFrame>();
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained, 1100);
+
+        Assert.Equal(1400, Assert.Single(drained).Data.Length);
+        Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+    }
+
     [Fact]
     public async Task TheFramesSection133ExcludesAreNotRepairedWhileTheirPacketmateIs()
     {
@@ -231,7 +351,7 @@ public sealed partial class TlsQuicConnectionTests
         // a build that counted at the queue would report a repair a shut window withheld.
         Assert.Equal(0, connection.FramesRetransmitted);
         var drained = new List<TlsQuicFrame>();
-        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Application, drained);
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Application, drained, TlsQuicUdpDatagramTransport.MaximumUdpPayload);
         Assert.Single(drained);
         Assert.Equal(1, connection.FramesRetransmitted);
 
@@ -1262,7 +1382,7 @@ public sealed partial class TlsQuicConnectionTests
 
             // The drain the send path performs - the same method BuildAnswerDatagram calls.
             var drained = new List<TlsQuicFrame>();
-            connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained);
+            connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained, TlsQuicUdpDatagramTransport.MaximumUdpPayload);
             Assert.Single(drained);
             Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
 
@@ -1309,7 +1429,7 @@ public sealed partial class TlsQuicConnectionTests
 
         // REFUSED, AND NOT LOST.
         var refused = new List<TlsQuicFrame>();
-        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, refused);
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, refused, TlsQuicUdpDatagramTransport.MaximumUdpPayload);
         Assert.Empty(refused);
         Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
         Assert.Equal(0, connection.FramesRetransmitted);
@@ -1320,7 +1440,7 @@ public sealed partial class TlsQuicConnectionTests
 
         gate.Open = true;
         var admitted = new List<TlsQuicFrame>();
-        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, admitted);
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, admitted, TlsQuicUdpDatagramTransport.MaximumUdpPayload);
         Assert.Single(admitted);
         Assert.Equal(1, connection.FramesRetransmitted);
     }
@@ -1362,7 +1482,7 @@ public sealed partial class TlsQuicConnectionTests
         Acknowledge(connection, TlsQuicEncryptionLevel.Initial, 1);
 
         var drained = new List<TlsQuicFrame>();
-        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained);
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained, TlsQuicUdpDatagramTransport.MaximumUdpPayload);
         Assert.Single(drained);
         Assert.Equal(1, connection.FramesRetransmitted);
     }

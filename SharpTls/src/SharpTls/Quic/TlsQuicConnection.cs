@@ -1382,6 +1382,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             SocketErrorCode: SocketError.MessageSize,
         };
 
+    /// <summary>An upper bound on what a long-header packet spends before its first frame.
+    /// </summary>
+    /// <remarks>A BOUND RATHER THAN THIS PACKET'S FIGURE, and deliberately the pessimistic one:
+    /// it is SUBTRACTED from a budget, so over-stating it costs a few bytes of a datagram and
+    /// under-stating it produces the datagram that cannot be sent. RFC 9000 s17.2: one first
+    /// byte, four version bytes, a length-prefixed Destination and Source Connection ID at
+    /// s17.2's 20-byte maximum each, a token whose own varint length s16 Table 4 caps at eight
+    /// bytes for anything this client sends, the Length varint at its widest useful four, the
+    /// packet number at its widest four, and s5.3's 16-byte AEAD tag.</remarks>
+    private const int LongHeaderPacketOverheadBound =
+        1 + 4 + (1 + 20) + (1 + 20) + 8 + 4 + 4 + 16;
+
     // The bytes a 1-RTT packet spends on framing before any frame: s17.3.1's first byte, the
     // Destination Connection ID, the packet number, and s5.3's AEAD tag. Computed from THIS
     // connection's actual lengths rather than from the widest legal ones, because it is
@@ -4856,7 +4868,22 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // frame is a frame in the ordinary answer datagram: it is protected by the same
             // keys, numbered by the same counter, retained by the same RetainSentPackets, and
             // becomes repairable again by the same ledger if it is lost in turn.
-            TakeRepairsInto(level, frames);
+            // RFC 9000 s14.2 BOUNDS THE DATAGRAM, AND THIS LEVEL IS SHARING IT. s12.2 lets an
+            // Initial and a Handshake packet travel together, so what earlier levels of this
+            // loop already committed is not available to this one - and the repairs are the
+            // frames big enough for that to matter, because they are whole CRYPTO frames from a
+            // flight that needed more than one datagram in the first place.
+            //
+            // MEASURED BY BUILDING, for the reason the 1-RTT prefix below is: the encoded size
+            // of what is already committed depends on the long header, the Length varint that
+            // widens with what follows it, and s14.1's expansion. Passing a null sent-packet
+            // list records nothing and returns the exact figure.
+            var committed = packets.Count == 0
+                ? 0
+                : TlsQuicDatagramBuilder.BuildDatagram(_options.Spec, packets, now, _sendBuffer);
+
+            TakeRepairsInto(
+                level, frames, DatagramPayloadBudget - committed - LongHeaderPacketOverheadBound);
 
             foreach (var data in crypto)
             {
