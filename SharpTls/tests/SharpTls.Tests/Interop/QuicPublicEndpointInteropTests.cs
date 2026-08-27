@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -1934,6 +1934,858 @@ public sealed class QuicPublicEndpointInteropTests
                 + $"nothing was retransmitted: {string.Join(", ", inert)}. That is a finding "
                 + "about A3, not a flaky network, and the per-attempt lines say which counter "
                 + "stayed at zero.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+    }
+
+    // =====================================================================================
+    // THE SPOTIFY EDGE - the servers this repository's QUIC persona was decoded from.
+    //
+    // Everything above this line meets fp.impersonate.pro and tls3.peet.ws: fingerprint
+    // services that answer h3 and publish what they saw. Useful, and not the target. The
+    // shipped QUIC ClientHello was recovered from the Initial CRYPTO frames of real
+    // connections to *.spotify.com, so Spotify's own edge - BoringSSL behind Envoy - is the
+    // only peer that can say whether the persona works where it was captured.
+    //
+    // WHAT A PASS IS HERE. These are API hosts and nothing below carries a credential, so
+    // 401, 404 and 405 are the expected answers and every one of them is a PASS: RFC 9114
+    // s4.1 is satisfied by "an HTTP message ... consisting of ... a HEADERS frame", whatever
+    // the status says. The transport is what is on trial. A handshake failure, a transport
+    // error, a stall, a body that disagrees with its own content-length, or a connection that
+    // ends by idle timeout rather than by CONNECTION_CLOSE is the failure this section exists
+    // to catch, and none of these assertions may be relaxed to make a run go green.
+    // =====================================================================================
+
+    /// <summary>The three production hosts under test, each confirmed to advertise
+    /// <c>alt-svc: h3=":443"; ma=2592000</c> over its TCP leg before this file was
+    /// written.</summary>
+    /// <remarks>THREE RATHER THAN ONE, AND THEY ARE NOT INTERCHANGEABLE. clienttoken and
+    /// spclient are different Envoy fleets and gew4 is a geographically pinned access point;
+    /// a failure on one of the three is a deployment quirk, and the same failure on all three
+    /// is ours.</remarks>
+    private static readonly string[] SpotifyHosts =
+    [
+        "clienttoken.spotify.com",
+        "spclient.wg.spotify.com",
+        "gew4-spclient.spotify.com",
+    ];
+
+    /// <summary>The one Spotify host that answers a body without a credential.</summary>
+    /// <remarks>THE THREE HOSTS ABOVE ANSWER WITH ZERO BODY BYTES, measured rather than
+    /// assumed: every unauthenticated path tried on them returns 401, 404 or 405 with
+    /// <c>content-length: 0</c>. That is a complete HTTP/3 exchange and it exercises the
+    /// HEADERS path, but it puts not one byte through DATA reassembly. apresolve is the same
+    /// Envoy edge, advertises the same <c>h3=":443"</c>, and answers 200 with a JSON body - so
+    /// it is what makes a reassembly assertion possible against Spotify at all.</remarks>
+    private const string SpotifyBodyHost = "apresolve.spotify.com";
+
+    /// <summary>The path apresolve answers 200 on.</summary>
+    private const string SpotifyBodyPath = "/?type=accesspoint";
+
+    /// <summary>The Spotify host that serves a body big enough to span many STREAM
+    /// frames.</summary>
+    /// <remarks>
+    /// <para>ITS h3 IS NOT ADVERTISED, WHICH IS WHY THE ARM BELOW RECORDS BEFORE IT ASSERTS.
+    /// The four API hosts above all answer <c>alt-svc: h3=":443"</c>; this one, on the same
+    /// <c>server: envoy</c>, sends no <c>alt-svc</c> at all over its TCP leg. RFC 9114 s3.1
+    /// makes that header the discovery mechanism - "the origin ... indicates ... using the
+    /// Alt-Svc HTTP response header field" - so a client has no standing to expect UDP/443 to
+    /// be open here, and a refusal would be the endpoint's answer rather than a defect.</para>
+    /// <para>IT ANSWERS ANYWAY, MEASURED RATHER THAN ASSUMED: UDP/443 completes, selects h3,
+    /// and its SETTINGS differ from the API fleet's - which is how the recording says this is a
+    /// different deployment and not the same Envoy under another name. It is here because
+    /// nothing Spotify serves unauthenticated on the API fleet is large enough to make
+    /// reassembly, MAX_DATA and MAX_STREAM_DATA all run at once, and a body of about 300 kB
+    /// under a narrowed window makes all three run on one stream.</para>
+    /// </remarks>
+    private const string SpotifyLargeBodyHost = "open.spotify.com";
+
+    /// <inheritdoc cref="SpotifyLargeBodyHost"/>
+    private const string SpotifyLargeBodyPath = "/";
+
+    /// <summary>The user agent the captured client sends. Recorded here because a request that
+    /// omits it is not the request the persona was captured making.</summary>
+    private const string SpotifyUserAgent = "Spotify/9.1.76.2050 iOS/27.0 (iPhone17,2)";
+
+    /// <summary>How many requests this file puts on ONE Spotify connection, one after the
+    /// other.</summary>
+    private const int SpotifySequentialRequests = 4;
+
+    /// <summary>How many requests are opened before any of them is pumped, so that four
+    /// request streams are in flight at once on one connection.</summary>
+    /// <remarks>MULTIPLEXED, NOT MULTI-THREADED, and the distinction is itself the finding.
+    /// This layer has no synchronisation and assumes single-thread affinity, so the concurrency
+    /// RFC 9114 s2.1 describes - "Multiple requests ... proceed concurrently and
+    /// independently" - is the one worth testing: four streams open at once, one thread
+    /// pumping all of them. Driving the same connection from four threads would be testing an
+    /// assumption the library never made and reporting the crash as a live-interop
+    /// finding.</remarks>
+    private const int SpotifyMultiplexedRequests = 4;
+
+    /// <summary>The captured connection's own flow-control numbers, decoded from the iOS 27
+    /// transport-parameter blocks: <c>0x04</c> as the four-byte varint <c>0x81000000</c>, and
+    /// <c>0x05</c>, <c>0x06</c> and <c>0x07</c> each as <c>0x80200000</c>.</summary>
+    private const ulong SpotifyInitialMaxData = 16_777_216;
+
+    /// <inheritdoc cref="SpotifyInitialMaxData"/>
+    private const ulong SpotifyInitialMaxStreamData = 2_097_152;
+
+    /// <summary>The connection spec the Spotify persona dials with.</summary>
+    /// <remarks>
+    /// <para>THE SEVEN PARAMETERS ARE THE CAPTURE'S SEVEN, IN THE CAPTURE'S ORDER, ROTATING.
+    /// The persona in <c>CapturedClientHelloProfiles</c> carries the same seven as a baked
+    /// list; a live dial cannot use that list, because RFC 9000 s7.3 requires
+    /// <c>initial_source_connection_id</c> to carry "the value ... that it selected for the
+    /// connection" and a baked list carries the captured one. So the seven are re-declared as
+    /// SLOTS here - five placed from <see cref="TlsQuicConnectionSpec.LocalFlowControl"/>, one
+    /// literal, one placed from the live connection ID - and <c>CyclicRotationLength</c> is 7
+    /// because every captured connection showed a cyclic rotation of one order and never a
+    /// shuffle.</para>
+    /// <para><c>initial_max_streams_bidi</c> (0x08) IS ABSENT ON PURPOSE. The capture carries
+    /// exactly seven parameters and 0x08 is not among them, so RFC 9000 s18.2 applies:
+    /// "Transport parameters have a default value of 0 if the transport parameter is absent" -
+    /// the server may open no bidirectional stream. That is correct for an HTTP/3 client, which
+    /// initiates every request stream itself.</para>
+    /// <para>ONE SPEC OBJECT REACHES BOTH THE CONNECTION AND THE PROFILE FACTORY. See
+    /// <see cref="FactoryClient"/>'s remarks for the three ways a second spec diverges in
+    /// silence; the two window arguments below exist precisely so that a caller can narrow the
+    /// advertised window without ever producing a second spec to do it with.</para>
+    /// </remarks>
+    /// <param name="maximumData">What <c>initial_max_data</c> advertises AND what this endpoint
+    /// enforces - one number, because <c>Compose</c> places it rather than copying it.</param>
+    /// <param name="maximumRequestStreamData">The same, for <c>initial_max_stream_data_bidi_
+    /// local</c>, which is the limit every response body arrives under. The unidirectional
+    /// limit is deliberately NOT narrowed with it: the peer's control and QPACK encoder streams
+    /// arrive under that one, and starving them would stall the connection before any request
+    /// body could demonstrate anything.</param>
+    private static TlsQuicConnectionSpec SpotifyConnectionSpec(
+        ulong maximumData = SpotifyInitialMaxData,
+        ulong maximumRequestStreamData = SpotifyInitialMaxStreamData) =>
+        new()
+        {
+            PaddingTarget = 1200,
+
+            // THE CAPTURED CLIENT'S OWN SPLIT, AND WITHOUT IT NOTHING BELOW EVEN LEAVES THE
+            // SOCKET. This persona offers X25519MLKEM768, whose key share alone is 1216 bytes,
+            // so its ClientHello weighs about 1490 and a single Initial datagram carrying it
+            // would be about 1540 - refused outright by a DF-set socket on any ordinary path,
+            // which is what RFC 9000 s14 requires: "UDP datagrams MUST NOT be fragmented at
+            // the IP layer". The capture splits the CRYPTO stream into a 999-byte frame and
+            // the remainder, one frame per datagram, each padded to 1200 - so these two lists
+            // are the capture's shape and not a workaround chosen to make a socket accept
+            // something.
+            //
+            // 999 TWICE RATHER THAN 999 AND A MEASURED REMAINDER: the second element is a
+            // CEILING, and RFC 9000 s19.6 leaves the sender free to end the frame where the
+            // stream ends, so the last frame is simply short. Writing the remainder as a
+            // constant would make this list a function of the server name's length, since the
+            // hello grows and shrinks with the SNI it carries.
+            InitialCryptoFrameByteCounts = [999, 999],
+            InitialCryptoFramesPerDatagram = [1, 1],
+            LocalFlowControl = new TlsQuicLocalFlowControlSpec
+            {
+                InitialMaxData = maximumData,
+                InitialMaxStreamDataBidiLocal = maximumRequestStreamData,
+                InitialMaxStreamDataBidiRemote = SpotifyInitialMaxStreamData,
+                InitialMaxStreamDataUni = SpotifyInitialMaxStreamData,
+                // 0x09 in the capture is the single byte 0x08.
+                InitialMaxStreamsUni = 8,
+            },
+            TransportParameters = new TlsQuicTransportParameterSpec
+            {
+                Parameters =
+                [
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialMaxData),
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+                    // The capture's two-byte 0x4040 - 64 written in the two-byte varint form
+                    // where one byte would do. Kept as the literal bytes rather than as the
+                    // number, because the encoding is part of the fingerprint.
+                    TlsQuicTransportParameterSlot.Literal(
+                        (ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit,
+                        [0x40, 0x40]),
+                    TlsQuicTransportParameterSlot.Placed(
+                        (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                    // The Google-private entry iOS 27 sends, last in every proxy capture
+                    // regardless of where the rotation of the other seven started - which is
+                    // why the rotation length above is 7 and not 8.
+                    TlsQuicTransportParameterSlot.Literal(0xFF08_0808, [0x09]),
+                ],
+                CyclicRotationLength = 7,
+            },
+        };
+
+    /// <summary>The Spotify client: the captured TLS half, with ALPN and extension 57's body
+    /// composed per connection by <see cref="TlsQuicClientHelloProfileFactory"/>.</summary>
+    /// <remarks>THE FACTORY IS NOT OPTIONAL FOR THIS PEER. RFC 9001 s8.4: "the TLS ClientHello
+    /// ... legacy_session_id ... MUST be set to a zero-length vector" - and the factory forces
+    /// that alongside ALPN and the transport parameters. Every Spotify host answers
+    /// CRYPTO_ERROR with alert 47 (illegal_parameter) to a hello that carries the 32 random
+    /// bytes a TCP encoder supplies for compatibility mode, and no offline test can see
+    /// it.</remarks>
+    private static CustomTlsQuicClient SpotifyClient(
+        string host,
+        ReadOnlyMemory<byte> sourceConnectionId,
+        TlsQuicConnectionSpec connectionSpec)
+    {
+        var factory = new TlsQuicClientHelloProfileFactory
+        {
+            ConnectionSpec = connectionSpec,
+            AlpnProtocols = [TlsQuicClientHelloProfileFactory.Http3AlpnToken],
+            // The persona itself and not a re-typing of it: the same method the shipped
+            // profile is built from, so this dial and that profile cannot drift apart. The
+            // ALPN and transport parameters it sets are overwritten by the factory
+            // afterwards, which is the whole reason the factory exists.
+            Tls = ClientHelloProfiles.ApplySpotify917602050IOS270QuicClientHello,
+        };
+
+        return new CustomTlsQuicClient(new CustomTlsQuicClientOptions
+        {
+            ServerName = host,
+            ClientHello = factory.Create(sourceConnectionId.Span),
+            CertificateValidation = new CustomTlsCertificateValidationOptions
+            {
+                // Same reason as TlsClient's: an OCSP fetch inside the pump loop would spend
+                // the handshake deadline and be recorded as QUIC loss.
+                RevocationMode = X509RevocationMode.NoCheck,
+            },
+        });
+    }
+
+    /// <summary>One request/response exchange on a Spotify connection.</summary>
+    private sealed record SpotifyExchange(
+        string Path,
+        int Status,
+        int BodyBytes,
+        long DeclaredContentLength,
+        bool FinReceived,
+        bool Complete,
+        string? Refusal)
+    {
+        /// <summary>Whether the peer's own <c>content-length</c> agrees with the number of
+        /// bytes reassembly delivered.</summary>
+        /// <remarks>RFC 9110 s8.6: "the Content-Length header field ... indicates ... the
+        /// number of octets in the ... content". A body reassembled in the WRONG order still
+        /// weighs the right number of octets, so this is the COMPLETENESS witness and nothing
+        /// more; ordering is witnessed separately, by the head and the tail of the body being
+        /// where the content type requires them. A header the peer omits reads -1 and is not a
+        /// disagreement.</remarks>
+        public bool ContentLengthAgrees =>
+            DeclaredContentLength < 0 || DeclaredContentLength == BodyBytes;
+
+        public string Render() =>
+            $"{Path} status={Status} body_bytes={BodyBytes} "
+                + $"content_length={DeclaredContentLength} fin={FinReceived} "
+                + $"complete={Complete} refusal={Refusal ?? "-"}";
+    }
+
+    /// <summary>What one whole Spotify connection did, from ClientHello to
+    /// CONNECTION_CLOSE.</summary>
+    private sealed record SpotifySession(
+        string Host,
+        bool HandshakeCompleted,
+        string? NegotiatedAlpn,
+        bool PeerSettingsReceived,
+        string PeerSettings,
+        ulong? PeerControlStreamId,
+        ulong QpackInsertCount,
+        ulong PeerBidirectionalStreamLimit,
+        ImmutableArray<SpotifyExchange> Exchanges,
+        bool CloseSent,
+        int DatagramsAfterClose,
+        bool IdleTimedOut,
+        int DiscardedForMissingKeys,
+        ulong Http3ErrorCode,
+        ulong? PeerCloseErrorCode,
+        string? Failure,
+        string? BodyHead,
+        string? BodyTail)
+    {
+        public string Render()
+        {
+            var text = new StringBuilder();
+            text.AppendLine(
+                $"  handshake_completed={HandshakeCompleted} alpn={NegotiatedAlpn ?? "<none>"}");
+            text.AppendLine(
+                $"  peer_settings_received={PeerSettingsReceived} peer_settings={PeerSettings}");
+            text.AppendLine(
+                $"  peer_control_stream={PeerControlStreamId?.ToString() ?? "<none>"} "
+                    + $"qpack_insert_count={QpackInsertCount} "
+                    + $"peer_initial_max_streams_bidi={PeerBidirectionalStreamLimit}");
+            foreach (var exchange in Exchanges)
+            {
+                text.AppendLine($"  exchange: {exchange.Render()}");
+            }
+
+            text.AppendLine(
+                $"  close_sent={CloseSent} datagrams_after_close={DatagramsAfterClose} "
+                    + $"idle_timed_out={IdleTimedOut} "
+                    + $"discarded_missing_keys={DiscardedForMissingKeys} "
+                    + $"h3_error=0x{Http3ErrorCode:x} "
+                    + $"peer_close={(PeerCloseErrorCode is { } code ? $"0x{code:x}" : "<none>")}");
+            if (Failure is not null)
+            {
+                text.AppendLine($"  FAILURE: {Failure}");
+            }
+
+            return text.ToString();
+        }
+    }
+
+    /// <summary>Runs ONE Spotify connection end to end: handshake, some sequential requests,
+    /// some multiplexed ones, then a graceful CONNECTION_CLOSE.</summary>
+    /// <remarks>ONE CONNECTION AND NOT ONE PER REQUEST, WHICH IS THE POINT. RFC 9114 s3.3:
+    /// "clients SHOULD NOT open more than one HTTP/3 connection to a given host". Everything
+    /// that can only go wrong on the second request lives here - the peer's MAX_STREAMS
+    /// accounting, the QPACK dynamic table its encoder stream fills, and whether a completed
+    /// stream's flow-control credit ever comes back - and every one of them is invisible to a
+    /// test that dials once per request.</remarks>
+    private static async Task<SpotifySession> SpotifySessionAsync(
+        string host,
+        IPEndPoint endPoint,
+        IReadOnlyList<string> sequentialPaths,
+        IReadOnlyList<string> multiplexedPaths,
+        TlsQuicConnectionSpec? connectionSpec = null,
+        bool captureBody = false)
+    {
+        var spec = connectionSpec ?? SpotifyConnectionSpec();
+        var clock = Stopwatch.StartNew();
+        var exchanges = new List<SpotifyExchange>();
+        CustomTlsQuicClient? client = null;
+        string? failure = null;
+        string? bodyHead = null;
+        string? bodyTail = null;
+        var closeSent = false;
+        var datagramsAfterClose = 0;
+
+        await using var transport = new RecordingTransport(
+            TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily));
+        await using var connection = new TlsQuicConnection(
+            new TlsQuicConnectionOptions(transport, endPoint, spec)
+            {
+                HandshakeDeadline = HandshakeDeadline,
+                IdleTimeout = HandshakeDeadline + ResponseDeadline,
+            },
+            // Kept so NegotiatedApplicationProtocol can be read afterwards: RFC 9001 s8.1
+            // makes ALPN mandatory over QUIC, and "the handshake completed" is not the same
+            // claim as "the peer chose h3".
+            source => client = SpotifyClient(host, source, spec));
+
+        TlsQuicHttp3Connection? http3 = null;
+        try
+        {
+            await connection.ConnectAsync();
+            http3 = new TlsQuicHttp3Connection(connection, new TlsQuicHttp3Spec());
+            http3.OpenLocalStreams();
+
+            foreach (var path in sequentialPaths)
+            {
+                exchanges.Add(await OneAsync(path));
+            }
+
+            // ALL OPENED BEFORE ANY IS PUMPED. Opening one and reading it before opening the
+            // next would be four more sequential requests wearing a different name.
+            var inFlight = new List<(string Path, TlsQuicStream Stream)>();
+            foreach (var path in multiplexedPaths)
+            {
+                var opened = http3.TryOpenRequest(
+                    SpotifyRequest(host, path), out var refusal, out var malformed);
+                if (opened is null)
+                {
+                    exchanges.Add(new(path, -1, 0, -1, false, false, $"{refusal}/{malformed}"));
+                    continue;
+                }
+
+                inFlight.Add((path, opened));
+            }
+
+            if (inFlight.Count > 0)
+            {
+                await connection.SendPendingAsync();
+                var deadline = clock.Elapsed + ResponseDeadline;
+                while (clock.Elapsed < deadline
+                    && inFlight.Exists(static entry => !entry.Stream.ReceiveComplete))
+                {
+                    if (!await http3.PumpOnceAsync())
+                    {
+                        break;
+                    }
+                }
+
+                foreach (var (path, stream) in inFlight)
+                {
+                    exchanges.Add(Reading(path, stream));
+                }
+            }
+
+            if (captureBody && http3.RequestStreamIds.Count > 0)
+            {
+                var last = http3.ResponseFor(http3.RequestStreamIds[^1]);
+                if (last is { IsComplete: true } && last.Body.Length > 0)
+                {
+                    // HEAD AND TAIL RATHER THAN THE WHOLE BODY, because the body may be a few
+                    // hundred kilobytes and the only question left once the byte COUNT already
+                    // matches content-length is whether the first bytes are first and the last
+                    // bytes are last. That is what reassembly order can be caught out on.
+                    var text = Encoding.UTF8.GetString(last.Body);
+                    bodyHead = text[..Math.Min(120, text.Length)];
+                    bodyTail = text[^Math.Min(120, text.Length)..];
+                }
+            }
+
+            // THE GRACEFUL CLOSE. RFC 9114 s5.2: "An endpoint that completes a graceful
+            // shutdown SHOULD use the H3_NO_ERROR error code when closing the connection."
+            // Counted in datagrams, because a close that put nothing on the wire is an idle
+            // timeout with a nicer name and every other counter here would read the same.
+            var before = transport.Sent.Count;
+            await http3.CloseAsync(TlsQuicHttp3ErrorCode.H3NoError);
+            datagramsAfterClose = transport.Sent.Count - before;
+            closeSent = true;
+        }
+        catch (Exception exception)
+        {
+            failure = $"{exception.GetType().Name}: {Flatten(exception.Message)}";
+        }
+
+        return new(
+            host,
+            connection.IsHandshakeConfirmed,
+            client?.NegotiatedApplicationProtocol,
+            http3?.Streams.PeerSettingsReceived ?? false,
+            http3 is null
+                ? "<no-http3-connection>"
+                : TlsQuicHttp3Settings.Render(http3.Streams.PeerSettings),
+            http3?.Streams.PeerControlStreamId,
+            http3?.Streams.Table?.InsertCount ?? 0,
+            PeerBidirectionalLimit(),
+            [.. exchanges],
+            closeSent,
+            datagramsAfterClose,
+            connection.IdleTimedOut,
+            connection.DiscardedForMissingKeys,
+            http3?.ConnectionErrorCode ?? 0,
+            connection.PeerCloseErrorCode,
+            failure,
+            bodyHead,
+            bodyTail);
+
+        // Read while the connection is still open, because `await using` disposes it on the
+        // way out of this method and a counter read afterwards would be a read of a torn-down
+        // connection.
+        ulong PeerBidirectionalLimit()
+        {
+            try
+            {
+                return connection.PeerFlowControl.InitialMaxStreamsBidi;
+            }
+            catch (InvalidOperationException)
+            {
+                // The peer's parameters never arrived, which the handshake flag already says.
+                return 0;
+            }
+        }
+
+        async Task<SpotifyExchange> OneAsync(string path)
+        {
+            var stream = http3!.TryOpenRequest(
+                SpotifyRequest(host, path), out var refusal, out var malformed);
+            if (stream is null)
+            {
+                return new(path, -1, 0, -1, false, false, $"{refusal}/{malformed}");
+            }
+
+            await connection.SendPendingAsync();
+            var deadline = clock.Elapsed + ResponseDeadline;
+            while (!stream.ReceiveComplete && clock.Elapsed < deadline)
+            {
+                if (!await http3.PumpOnceAsync())
+                {
+                    break;
+                }
+            }
+
+            return Reading(path, stream);
+        }
+
+        SpotifyExchange Reading(string path, TlsQuicStream stream)
+        {
+            var response = http3!.ResponseFor(stream.Id);
+            return new(
+                path,
+                response?.Status ?? -1,
+                response?.Body.Length ?? 0,
+                response is null ? -1 : DeclaredContentLength(response.HeaderFields),
+                stream.FinalSizeKnown,
+                response is { IsComplete: true },
+                null);
+        }
+    }
+
+    /// <summary>The request the captured client makes: the four pseudo-header fields RFC 9114
+    /// s4.3.1 requires of a GET, plus the user agent the capture carries.</summary>
+    private static TlsQuicHttp3Request SpotifyRequest(string host, string path) =>
+        new()
+        {
+            Method = "GET",
+            Scheme = "https",
+            Authority = host,
+            Path = path,
+            Fields = [new TlsQuicHttp3Field("user-agent", SpotifyUserAgent)],
+        };
+
+    /// <summary>The peer's own <c>content-length</c>, or -1 where it sent none.</summary>
+    private static long DeclaredContentLength(ImmutableArray<TlsQuicHttp3Field> fields)
+    {
+        foreach (var field in fields)
+        {
+            // RFC 9114 s4.1.2: "field names MUST be converted to lowercase prior to their
+            // encoding", so an ordinal compare against the lowercase name is exact rather than
+            // merely convenient.
+            if (string.Equals(field.Name, "content-length", StringComparison.Ordinal)
+                && long.TryParse(field.Value, out var declared))
+            {
+                return declared;
+            }
+        }
+
+        return -1;
+    }
+
+    [InteropFact]
+    [Trait("Category", "Interop")]
+    public async Task EverySpotifyEdgeHostCompletesQuicAndAnswersOverHttp3()
+    {
+        var report = new StringBuilder();
+        report.AppendLine("# Spotify edge - QUIC and HTTP/3, one connection per host");
+        report.AppendLine($"started {DateTimeOffset.UtcNow:O}");
+        report.AppendLine("persona: the shipped iOS 27 Spotify QUIC ClientHello");
+
+        var sessions = new List<SpotifySession>();
+        foreach (var host in SpotifyHosts)
+        {
+            report.AppendLine();
+            report.AppendLine($"## {host}");
+            IPEndPoint endPoint;
+            try
+            {
+                endPoint = await ResolveAsync(host);
+            }
+            catch (Exception exception)
+            {
+                report.AppendLine($"  DNS failed: {exception.GetType().Name}: {exception.Message}");
+                continue;
+            }
+
+            report.AppendLine($"  endpoint: {endPoint}");
+            var session = await SpotifySessionAsync(host, endPoint, ["/"], []);
+            sessions.Add(session);
+            report.Append(session.Render());
+        }
+
+        var reportPath = Path.Combine(Path.GetTempPath(), "quic-spotify-edge.txt");
+        await File.WriteAllTextAsync(reportPath, report.ToString());
+
+        var missing = SpotifyHosts
+            .Except(sessions.Select(static session => session.Host), StringComparer.Ordinal)
+            .ToArray();
+        Assert.True(
+            missing.Length == 0,
+            $"These hosts never got as far as a UDP socket: {string.Join(", ", missing)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // A HANDSHAKE FAILURE IS THE FINDING, so it is asserted first, before anything
+        // downstream can restate it as "no response".
+        var unhandshaken = sessions
+            .Where(static session => !session.HandshakeCompleted)
+            .Select(static session => $"{session.Host}: {session.Failure ?? "no exception"}")
+            .ToArray();
+        Assert.True(
+            unhandshaken.Length == 0,
+            "The QUIC handshake did not complete against these Spotify hosts: "
+                + $"{string.Join("; ", unhandshaken)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // RFC 9001 s8.1: "Unless another mechanism is used ... endpoints MUST use ALPN".
+        // A handshake that completed under some other protocol is not this test passing.
+        var wrongAlpn = sessions
+            .Where(static session => session.NegotiatedAlpn != "h3")
+            .Select(static session => $"{session.Host}={session.NegotiatedAlpn ?? "<none>"}")
+            .ToArray();
+        Assert.True(
+            wrongAlpn.Length == 0,
+            $"These hosts did not select h3: {string.Join(", ", wrongAlpn)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // RFC 9114 s6.2.1: "Each side MUST initiate a single control stream at the beginning of
+        // the connection and send its SETTINGS frame as the first frame on this stream."
+        var noSettings = sessions
+            .Where(static session => !session.PeerSettingsReceived)
+            .Select(static session => session.Host)
+            .ToArray();
+        Assert.True(
+            noSettings.Length == 0,
+            "These hosts' SETTINGS never arrived on a peer control stream: "
+                + $"{string.Join(", ", noSettings)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        var incomplete = sessions
+            .SelectMany(session => session.Exchanges.Select(exchange => (session.Host, exchange)))
+            .Where(static row => !row.exchange.Complete)
+            .Select(static row => $"{row.Host}{row.exchange.Render()}")
+            .ToArray();
+        Assert.True(
+            incomplete.Length == 0,
+            "These exchanges never produced a complete HTTP/3 response. A 4xx here would have "
+                + "been a PASS - an unauthenticated API request is expected to be refused at "
+                + "the application layer - so what these rows record is a TRANSPORT failure: "
+                + $"{string.Join("; ", incomplete)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // The coalescing stall, reported separately from DiscardedPackets for the reason this
+        // file's header gives: a non-zero value here is a bug report about us.
+        var stalled = sessions
+            .Where(static session => session.DiscardedForMissingKeys > 0)
+            .Select(static session => $"{session.Host}={session.DiscardedForMissingKeys}")
+            .ToArray();
+        Assert.True(
+            stalled.Length == 0,
+            "Packets were discarded for want of keys against these hosts, which is a finding "
+                + $"about this client and not about the network: {string.Join(", ", stalled)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // RFC 9000 s10.2: "An immediate close ... sends a CONNECTION_CLOSE frame". A close
+        // that emitted no datagram left the peer to time the connection out instead.
+        var unclosed = sessions
+            .Where(static session =>
+                !session.CloseSent || session.DatagramsAfterClose == 0 || session.IdleTimedOut)
+            .Select(static session =>
+                $"{session.Host} close_sent={session.CloseSent} "
+                    + $"datagrams={session.DatagramsAfterClose} "
+                    + $"idle_timed_out={session.IdleTimedOut}")
+            .ToArray();
+        Assert.True(
+            unclosed.Length == 0,
+            "These connections did not end in a CONNECTION_CLOSE the peer could act on: "
+                + $"{string.Join("; ", unclosed)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+    }
+
+    [InteropFact]
+    [Trait("Category", "Interop")]
+    public async Task OneSpotifyConnectionCarriesSequentialAndMultiplexedHttp3Requests()
+    {
+        const string Host = "spclient.wg.spotify.com";
+        var report = new StringBuilder();
+        report.AppendLine("# Spotify edge - many requests on ONE connection");
+        report.AppendLine($"started {DateTimeOffset.UtcNow:O}");
+        report.AppendLine(
+            $"{SpotifySequentialRequests} sequential, then {SpotifyMultiplexedRequests} opened "
+                + "before any of them is pumped");
+
+        var endPoint = await ResolveAsync(Host);
+        report.AppendLine();
+        report.AppendLine($"## {Host} at {endPoint}");
+
+        // DISTINCT PATHS SO A RESPONSE CANNOT LAND ON THE WRONG STREAM UNNOTICED. Every one of
+        // these answers 401, so the status cannot tell them apart; the query string can, and
+        // the peer echoes nothing - which is why the count of exchanges and their per-stream
+        // completion is what this test reads rather than the bodies.
+        var sequential = Enumerable
+            .Range(1, SpotifySequentialRequests)
+            .Select(static index => $"/melody/v1/product_state?seq={index}")
+            .ToArray();
+        var multiplexed = Enumerable
+            .Range(1, SpotifyMultiplexedRequests)
+            .Select(static index => $"/melody/v1/product_state?mux={index}")
+            .ToArray();
+
+        var session = await SpotifySessionAsync(Host, endPoint, sequential, multiplexed);
+        report.Append(session.Render());
+
+        var reportPath = Path.Combine(Path.GetTempPath(), "quic-spotify-multiplex.txt");
+        await File.WriteAllTextAsync(reportPath, report.ToString());
+
+        Assert.True(
+            session.HandshakeCompleted,
+            $"The handshake did not complete: {session.Failure ?? "no exception"}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        var expected = SpotifySequentialRequests + SpotifyMultiplexedRequests;
+        Assert.True(
+            session.Exchanges.Length == expected,
+            $"{session.Exchanges.Length} of {expected} requests reached the wire; the rest were "
+                + "refused before being sent, which is a stream-limit or malformed-request "
+                + $"finding rather than a network one.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        var failed = session.Exchanges
+            .Where(static exchange => !exchange.Complete)
+            .Select(static exchange => exchange.Render())
+            .ToArray();
+        Assert.True(
+            failed.Length == 0,
+            "These requests on the shared connection never completed. A 401 would have been a "
+                + $"PASS; an incomplete response is not: {string.Join("; ", failed)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // EVERY REQUEST GOT AN ANSWER OF ITS OWN. RFC 9114 s4.1: "A client sends an HTTP
+        // request on a request stream", one per exchange, so eight exchanges is eight streams
+        // and a status below 100 anywhere means one stream's HEADERS never decoded.
+        var statusless = session.Exchanges
+            .Where(static exchange => exchange.Status < 100)
+            .Select(static exchange => exchange.Render())
+            .ToArray();
+        Assert.True(
+            statusless.Length == 0,
+            $"These exchanges completed with no status: {string.Join("; ", statusless)}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        Assert.True(
+            session.CloseSent && session.DatagramsAfterClose > 0 && !session.IdleTimedOut,
+            "The shared connection did not end in a CONNECTION_CLOSE: "
+                + $"close_sent={session.CloseSent} datagrams={session.DatagramsAfterClose} "
+                + $"idle_timed_out={session.IdleTimedOut}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+    }
+
+    [InteropFact]
+    [Trait("Category", "Interop")]
+    public async Task ASpotifyResponseBodyIsReassembledWholeAndInOrderUnderANarrowWindow()
+    {
+        var report = new StringBuilder();
+        report.AppendLine("# Spotify edge - DATA reassembly and flow-control crediting");
+        report.AppendLine($"started {DateTimeOffset.UtcNow:O}");
+
+        // A DELIBERATELY NARROW WINDOW, AND THAT IS THE EXPERIMENT. The capture's own
+        // initial_max_stream_data is 2 MiB and no unauthenticated Spotify body comes near it,
+        // so dialling with the captured numbers would leave MAX_STREAM_DATA untouched and the
+        // crediting path untested by a run that still looked green. RFC 9000 s4.1: "A sender
+        // MUST NOT send data in excess of ... the largest maximum stream data" - so a client
+        // that advertises 128 bytes and never credits more STALLS at 128, and a body larger
+        // than that arriving whole is the proof that crediting ran.
+        var narrow = SpotifyConnectionSpec(maximumData: 8_192, maximumRequestStreamData: 128);
+        report.AppendLine(
+            "advertised window: initial_max_data=8192 initial_max_stream_data_bidi_local=128 "
+                + "(narrowed from the capture's 16777216/2097152 so that MAX_STREAM_DATA is "
+                + "REQUIRED rather than merely permitted; the unidirectional limit is left at "
+                + "the capture's value so the peer's control and QPACK streams are not starved)");
+
+        var endPoint = await ResolveAsync(SpotifyBodyHost);
+        report.AppendLine();
+        report.AppendLine($"## {SpotifyBodyHost}{SpotifyBodyPath} at {endPoint}");
+        var session = await SpotifySessionAsync(
+            SpotifyBodyHost, endPoint, [SpotifyBodyPath], [], narrow, captureBody: true);
+        report.Append(session.Render());
+        report.AppendLine($"  body_head = {session.BodyHead ?? "<none>"}");
+        report.AppendLine($"  body_tail = {session.BodyTail ?? "<none>"}");
+
+        // THE LARGE-BODY ARM, RECORDED WHETHER OR NOT IT REACHES ANYTHING. See
+        // SpotifyLargeBodyHost's remarks: this host publishes no alt-svc, so a QUIC handshake
+        // failure here is the endpoint declining to offer h3 and not a defect. What is asserted
+        // is conditional on the handshake, and nothing else about it is.
+        report.AppendLine();
+        report.AppendLine($"## {SpotifyLargeBodyHost}{SpotifyLargeBodyPath} - the large body");
+        SpotifySession? large = null;
+        try
+        {
+            var largeEndPoint = await ResolveAsync(SpotifyLargeBodyHost);
+            report.AppendLine($"  endpoint: {largeEndPoint}");
+            large = await SpotifySessionAsync(
+                SpotifyLargeBodyHost,
+                largeEndPoint,
+                [SpotifyLargeBodyPath],
+                [],
+                SpotifyConnectionSpec(maximumData: 65_536, maximumRequestStreamData: 16_384),
+                captureBody: true);
+            report.Append(large.Render());
+            report.AppendLine($"  body_head = {large.BodyHead ?? "<none>"}");
+            report.AppendLine($"  body_tail = {large.BodyTail ?? "<none>"}");
+        }
+        catch (Exception exception)
+        {
+            report.AppendLine($"  DNS failed: {exception.GetType().Name}: {exception.Message}");
+        }
+
+        var reportPath = Path.Combine(Path.GetTempPath(), "quic-spotify-body.txt");
+        await File.WriteAllTextAsync(reportPath, report.ToString());
+
+        Assert.True(
+            session.HandshakeCompleted,
+            $"The handshake did not complete: {session.Failure ?? "no exception"}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        var exchange = Assert.Single(session.Exchanges);
+        Assert.True(
+            exchange.Complete && exchange.Status == 200,
+            $"{SpotifyBodyHost}{SpotifyBodyPath} did not answer 200 over a completed HTTP/3 "
+                + $"exchange: {exchange.Render()}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        Assert.True(
+            exchange.BodyBytes > 128,
+            "The body fitted inside the advertised 128-byte window, so no MAX_STREAM_DATA was "
+                + "ever required and this test measured nothing about crediting: "
+                + $"{exchange.Render()}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        Assert.True(
+            exchange.ContentLengthAgrees,
+            "The peer's content-length and the number of bytes reassembly delivered disagree, "
+                + $"so what arrived is not what was sent: {exchange.Render()}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // ORDER, WHICH THE BYTE COUNT CANNOT SEE. A body reassembled from its frames in the
+        // wrong order weighs exactly as much as one reassembled correctly; only its shape gives
+        // it away, and a JSON document begins and ends with the braces of its root object.
+        Assert.True(
+            session.BodyHead is not null && session.BodyTail is not null,
+            "The 200 carried no body, so nothing was reassembled.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+        Assert.True(
+            session.BodyHead!.TrimStart().StartsWith('{')
+                && session.BodyTail!.TrimEnd().EndsWith('}'),
+            "The reassembled body does not begin and end where a JSON document must, which is "
+                + $"an ORDERING failure and not a completeness one: head={session.BodyHead} "
+                + $"tail={session.BodyTail}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        if (large is not { HandshakeCompleted: true })
+        {
+            // Recorded above, asserted nowhere: this host advertises no h3 and is entitled not
+            // to answer on UDP/443.
+            return;
+        }
+
+        var largeExchange = Assert.Single(large.Exchanges);
+        Assert.True(
+            largeExchange.Complete && largeExchange.ContentLengthAgrees
+                && largeExchange.BodyBytes > 65_536,
+            "The large body did not arrive whole under a 16384-byte stream window inside a "
+                + "65536-byte connection window, so reassembly, MAX_STREAM_DATA or MAX_DATA "
+                + "failed on the one exchange large enough to need all three: "
+                + $"{largeExchange.Render()}.\n"
+                + $"Full recording also written to {reportPath}.\n\n{report}");
+
+        // THE ORDER WITNESS FOR THE LARGE BODY, AND HERE IT IS THE ONLY ONE. This response is
+        // chunked, so RFC 9114 s4.1.2's "content-length" is absent and the byte count has
+        // nothing to be compared against: ContentLengthAgrees is vacuously true above. What is
+        // left is the shape - a document that begins with its doctype and ends with its root
+        // close tag is a document whose ~250 STREAM frames were reassembled in the order they
+        // were sent.
+        Assert.True(
+            large.BodyHead is not null
+                && large.BodyHead.StartsWith("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase)
+                && large.BodyTail is not null
+                && large.BodyTail.TrimEnd().EndsWith("</html>", StringComparison.Ordinal),
+            "The large body does not begin and end where an HTML document must, which is an "
+                + $"ORDERING failure and the only one this chunked response can show: "
+                + $"head={large.BodyHead} tail={large.BodyTail}.\n"
                 + $"Full recording also written to {reportPath}.\n\n{report}");
     }
 }
