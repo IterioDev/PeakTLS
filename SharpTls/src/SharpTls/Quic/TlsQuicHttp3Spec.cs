@@ -282,14 +282,25 @@ internal sealed class TlsQuicHttp3Spec
     /// <para>THIS EARLIER READ 256 KiB, A CONSTANT DERIVED FROM A TEST FIXTURE'S 65536 - one
     /// preset's choice mistaken for the library's capability, which is the placeholder-value
     /// defect this project's rules forbid. The number here is now only the slack.</para>
-    /// <para>WHAT THE SLACK IS FOR, both parts of it. An instruction carries its entry plus
-    /// s3.2.1's 32-byte allowance and two prefixed integers, so the largest legal one is
-    /// slightly ABOVE the capacity rather than at it. And <see cref="TlsQuicHttp3Streams"/>
-    /// defers the peer's encoder stream entirely while this endpoint has no decoder stream to
-    /// answer RFC 9204 s2.2.2.3's Insert Count Increment on, so a short backlog can accumulate
-    /// in that window without any of it being parseable yet.</para>
+    /// <para>THE SLACK IS BOUGHT FOR THE DEFERRAL WINDOW, WHICH IS THE TERM THE CAPACITY
+    /// CANNOT PAY FOR. Everywhere else the encoder-stream ceiling measures a RESIDUE - what
+    /// one parse could not take, which is at most one partial instruction and so is bounded by
+    /// the capacity plus s3.2.1's 32-byte allowance and two prefixed integers. There is one
+    /// place where that is not so: <see cref="TlsQuicHttp3Streams"/> parses NOTHING while this
+    /// endpoint has no decoder stream to answer RFC 9204 s2.2.2.3's Insert Count Increment on,
+    /// because advancing the table while silently dropping the feedback s2.2.2.1 owes would be
+    /// worse than waiting. In that window residue equals arrival, and arrival is a MULTI-
+    /// INSTRUCTION BACKLOG rather than one instruction: a legal encoder inserting and evicting
+    /// against a 64 KiB table can send a hundred kibibytes of instructions without ever holding
+    /// more than 64 KiB of entries, so a ceiling of capacity-plus-one-instruction closes on
+    /// conforming peers.</para>
+    /// <para>SO THIS NUMBER IS A BACKLOG ALLOWANCE AND NOT AN INSTRUCTION'S OVERHEAD, which is
+    /// what the 4 KiB it briefly held was. The window is short by construction - a connection
+    /// opens its own streams before it reads - and 64 KiB of s4.3 instructions inside it is
+    /// already far past anything a peer has reason to send, while being large enough that the
+    /// hundred-inserts case above clears it at every capacity this library ships.</para>
     /// </remarks>
-    internal const int EncoderStreamCeilingHeadroomBytes = 4 * 1024;
+    internal const int EncoderStreamCeilingHeadroomBytes = 64 * 1024;
 
     /// <summary>The default ceiling on what one response reader holds: 64 MiB.</summary>
     /// <remarks>

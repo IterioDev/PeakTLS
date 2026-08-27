@@ -559,11 +559,16 @@ internal sealed class TlsQuicHttp3Streams
     // placeholder-value defect this project's rules forbid twice over: it read one preset's
     // choice as the library's capability, and it did so through a file under tests/.
     //
-    // s7.4's HEADROOM IS WHAT THE ADDITION IS FOR. "These limits SHOULD be large enough to
-    // process the largest individual field the HTTP implementation can be configured to
-    // accept", and the largest field is the capacity; the headroom covers that field's prefixes
-    // and the short backlog TryReadEncoderStream defers while this endpoint has no decoder
-    // stream to answer on. SATURATING rather than wrapping, because s7.2.4's Value is a varint
+    // s7.4's HEADROOM IS WHAT THE ADDITION IS FOR, AND THE TERM IT ACTUALLY BUYS IS THE
+    // DEFERRAL WINDOW. "These limits SHOULD be large enough to process the largest individual
+    // field the HTTP implementation can be configured to accept", and the largest field is the
+    // capacity - but the capacity only pays for a RESIDUE, which is what this buffer holds
+    // everywhere except one place. TryReadEncoderStream parses nothing at all while
+    // LocalDecoderStream is null, so in that window residue equals arrival and arrival is a
+    // multi-instruction backlog: a legal encoder inserting and evicting against a 64 KiB table
+    // can send far more than 64 KiB of instructions. EncoderStreamCeilingHeadroomBytes is sized
+    // for that backlog rather than for one instruction's prefixes, and its own remarks derive
+    // the number. SATURATING rather than wrapping, because s7.2.4's Value is a varint
     // to 2^62-1 and an unchecked cast of a huge advertised capacity gives a negative ceiling
     // that every buffer breaches - the same trap the table's own construction avoids above.
     private static int DeriveEncoderStreamCeiling(ulong advertisedCapacity)

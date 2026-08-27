@@ -1520,10 +1520,11 @@ internal sealed class TlsQuicHttp3Response
     /// final size undelivered forever, so a response cut short by RESET_STREAM has a
     /// <see cref="Body"/> that is a PREFIX of the real one - and this property saying yes
     /// over it would hand a caller a truncated message it has no way to distinguish from a
-    /// whole one. That is not a hypothetical: the stream layer reports a reset stream as
-    /// having finished receiving (RFC 9000 s3.2 puts it in "Reset Recvd", and waiting for the
-    /// missing bytes would hang), and this reader's completion rule is FIN plus an empty
-    /// buffer - which a reset landing on a frame boundary satisfies exactly.</para>
+    /// whole one. That was not a hypothetical: <see cref="TlsQuicStream.ReceiveComplete"/>
+    /// briefly folded a reset in, on the true-but-wrong reasoning that such a stream also
+    /// delivers nothing further, and this reader's completion rule is end-of-stream plus an
+    /// empty buffer - which a reset landing on a frame boundary satisfies exactly. That
+    /// property no longer folds it in and the conjunct below is the second lock.</para>
     /// </remarks>
     internal bool IsComplete { get; private set; }
 
@@ -1734,20 +1735,17 @@ internal sealed class TlsQuicHttp3Response
             }
 
             // `!IsReset` IS THE SILENT-CORRUPTION GUARD, and it is here rather than only at the
-            // caller because THIS property is what a caller reads. RFC 9000 s3.2 puts a reset
-            // stream's receiving part in "Reset Recvd" and s4.5 leaves every byte below its
-            // final size undelivered, so the stream layer necessarily reports such a stream as
-            // finished - waiting on bytes that will never come is the hang audit finding #3
-            // named. A reset that lands on an HTTP/3 frame boundary therefore arrives here as
-            // endOfStream with an empty _pending, satisfies every other test in this block, and
-            // would set a TRUNCATED response complete. RFC 9114 s4.1 is unambiguous that this
-            // is a failed response and not a short one; s4.1.1's retry rules only mean anything
-            // if the two are distinguishable.
+            // caller because THIS property is what a caller reads. RFC 9114 s4.1 is unambiguous
+            // that a response its stream was reset under is a FAILED response and not a short
+            // one, and s4.1.1's retry rules only mean anything if the two are distinguishable.
             //
-            // TlsQuicHttp3Connection.TryProcess ALSO SKIPS THE READ ENTIRELY on a reset stream,
-            // and the two are not one rule twice: that one stops a partial body being appended
-            // at all, this one stops the completion flag whoever the caller is - the fuzz
-            // targets and TlsQuicHttp3RequestTests drive this type with no connection above it.
+            // IT IS NOT DEAD CODE JUST BECAUSE TlsQuicStream.ReceiveComplete NOW EXCLUDES A
+            // RESET. Callers that drive this type with no connection above them - the fuzz
+            // targets, TlsQuicHttp3RequestTests - pass `endOfStream` themselves and may pair it
+            // with OnPeerReset in either order. This conjunct is what makes the invariant a
+            // property of the reader rather than of one caller's sequencing, and
+            // TlsQuicHttp3RequestTests.AResetResponseIsNeverCompleteEvenAtEndOfStream drives
+            // exactly that pairing.
             IsComplete = !IsReset && _stage != Stage.BeforeFinalHeaders;
         }
 
@@ -1893,9 +1891,20 @@ internal sealed class TlsQuicHttp3Response
             // arithmetic TlsQuicQpackDecoder applies to SETTINGS_MAX_FIELD_SECTION_SIZE, and
             // the 32 is taken from TlsQuicQpackDynamicTable.EntrySizeOverhead rather than
             // spelled a third time. It is a proxy for the managed cost rather than the cost
-            // itself - a string carries a header and a length of its own - and it is the right
-            // proxy because it is the number s4.2.2 already makes a peer's field sections
-            // answerable for.
+            // itself, and the proxy UNDER-COUNTS BY ROUGHLY TWO TO THREE TIMES: .NET strings
+            // are UTF-16, so a byte of an ASCII field name costs two on the heap, and each
+            // string carries an object header and a length while each section carries an
+            // ImmutableArray and its slots. So MaximumBufferedResponseBytes bounds s4.2.2
+            // units and not resident bytes - its own remarks say the same of the body, whose
+            // real high water mark is a multiple of the ceiling once the QUIC stream's own
+            // delivered copy is counted. The factor is bounded and constant, which is what
+            // makes a ceiling in these units a ceiling on memory at all; it is stated here so
+            // that 64 MiB is not read as 64 MiB resident.
+            //
+            // IT IS THE RIGHT PROXY DESPITE THAT, because it is the number s4.2.2 already
+            // makes a peer's field sections answerable for - the same arithmetic the decoder
+            // applies to SETTINGS_MAX_FIELD_SECTION_SIZE - so one peer cannot be charged two
+            // different prices for the same field section depending on which limit it meets.
             //
             // RUNNING AND NEVER DECREMENTED, because _interim is never trimmed: s4.1's interim
             // sections are kept for the caller ("A 103 Early Hints carries link fields a caller
