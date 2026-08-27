@@ -410,6 +410,87 @@ internal sealed class TlsQuicConnectionSpec
     /// </remarks>
     public bool PathMtuDiscovery { get; init; } = true;
 
+    /// <summary>Gets RFC 9001 s6.6's confidentiality limit for AEAD_AES_128_GCM and
+    /// AEAD_AES_256_GCM - how many packets one set of 1-RTT write keys may protect before
+    /// s6's key update MUST be initiated. Defaults to the section's own 2^23.</summary>
+    /// <remarks>
+    /// <para>THE DEFAULT IS THE RFC's FIGURE, TRANSCRIBED RATHER THAN CHOSEN. s6.6: "For
+    /// AEAD_AES_128_GCM and AEAD_AES_256_GCM, the confidentiality limit is 2^23 encrypted
+    /// packets; see [AEBounds]." Nothing in this library moves it, and this property is the
+    /// ONLY place the number lives - <c>TlsQuicConnection</c> reads it through
+    /// <see cref="ConfidentialityLimitFor"/> rather than keeping a second copy, because two
+    /// copies of one limit is how a limit and its enforcement drift apart.</para>
+    /// <para>IT IS A KNOB BECAUSE THE CROSSING IS OTHERWISE UNREACHABLE, AND THAT REASON IS
+    /// NOT A TEST-ONLY ONE. Everything that happens when the limit is crossed - the update,
+    /// the phase bit, which generation the crossing packet is sealed with, s6.1's gate on
+    /// "an acknowledgment for a packet that was sent protected with keys from the current key
+    /// phase", and s6.6's own "the endpoint MUST stop using the connection" when no update is
+    /// possible - is code that ships and that 2^23 packets of traffic puts out of reach. A
+    /// limit no test can reach is a limit whose behaviour is asserted by reading. The comment
+    /// this replaces said the opposite ("a limit made injectable to fake it would be a knob no
+    /// shipped code path uses"); the knob is the same one either way, and what changed is that
+    /// the crossing is now witnessed.</para>
+    /// <para>LOWERING IT IS CONFORMANT AND RAISING IT IS NOT. s6.6's requirement is an upper
+    /// bound - "Endpoints MUST initiate a key update before sending more protected packets
+    /// than the confidentiality limit for the selected AEAD permits" - so a caller may rotate
+    /// sooner, and a caller who sets this above 2^23 has left the AEAD's bound behind. This
+    /// type does not stop them; it is a fingerprint and behaviour spec, not a policy gate, and
+    /// the value is not observable on the wire beyond how often the phase bit toggles.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Below 1.</exception>
+    public long AesGcmConfidentialityLimit
+    {
+        get => _aesGcmConfidentialityLimit;
+        init
+        {
+            // ONE, NOT ZERO. A limit of zero would demand an update before the first packet a
+            // set of keys ever protects, which s6.1's "An endpoint MUST NOT initiate a
+            // subsequent key update unless it has received an acknowledgment for a packet that
+            // was sent protected with keys from the current key phase" then makes unsatisfiable
+            // for the second one - so the connection would reach s6.6's "MUST stop using the
+            // connection" on its second 1-RTT packet, every time.
+            ArgumentOutOfRangeException.ThrowIfLessThan(
+                value, 1L, nameof(AesGcmConfidentialityLimit));
+            _aesGcmConfidentialityLimit = value;
+        }
+    }
+
+    /// <summary>Gets RFC 9001 s6.6's confidentiality limit for AEAD_CHACHA20_POLY1305.
+    /// Defaults to the section's own 2^62.</summary>
+    /// <remarks>
+    /// s6.6: "For AEAD_CHACHA20_POLY1305, the confidentiality limit is greater than the number
+    /// of possible packets (2^62) and so can be disregarded." DISREGARDED IS WRITTEN AS 2^62
+    /// RATHER THAN AS <see cref="long.MaxValue"/>, because that is the number the section gives
+    /// its reason from - the count of possible packets - and a reader comparing this line to
+    /// s6.6 should find s6.6's own figure. The separate knob exists because the two AEADs have
+    /// separate figures in the RFC, not because anything here treats them differently.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Below 1.</exception>
+    public long ChaCha20Poly1305ConfidentialityLimit
+    {
+        get => _chaCha20Poly1305ConfidentialityLimit;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(
+                value, 1L, nameof(ChaCha20Poly1305ConfidentialityLimit));
+            _chaCha20Poly1305ConfidentialityLimit = value;
+        }
+    }
+
+    private long _aesGcmConfidentialityLimit = 1L << 23;
+    private long _chaCha20Poly1305ConfidentialityLimit = 1L << 62;
+
+    /// <summary>Gets the RFC 9001 s6.6 confidentiality limit for one AEAD.</summary>
+    /// <remarks>THE SELECTION LIVES BESIDE THE TWO VALUES rather than in the connection, so
+    /// that adding an AEAD adds a limit in one place. s5.3 defines four AEADs and pairs
+    /// AEAD_AES_128_GCM, AEAD_AES_256_GCM and AEAD_AES_128_CCM with the same figure, which is
+    /// why the ChaCha20 arm is the named one and everything else falls to the AES limit.
+    /// </remarks>
+    internal long ConfidentialityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
+        cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305
+            ? ChaCha20Poly1305ConfidentialityLimit
+            : AesGcmConfidentialityLimit;
+
     /// <summary>
     /// Gets what this endpoint writes into RFC 9000 section 17.4's latency spin bit on 1-RTT
     /// packets. The default is <see cref="TlsQuicSpinBitPolicy.Zero"/>.
