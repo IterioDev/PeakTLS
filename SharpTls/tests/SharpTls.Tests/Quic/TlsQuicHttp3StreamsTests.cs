@@ -530,6 +530,92 @@ public sealed class TlsQuicHttp3StreamsTests
     }
 
     // ------------------------------------------------------------------------
+    // The buffering ceilings - audit finding #6.
+    // ------------------------------------------------------------------------
+    //
+    // BOTH ROWS DELIVER FAR LESS THAN THEY DECLARE, which is the whole shape of the bug. Every
+    // parser this buffer feeds treats "the declared length has not arrived" as a WAIT:
+    // TlsQuicHttp3Frames.TryRead answers Incomplete for a frame Length it cannot cover, and RFC
+    // 9204 s4.1.2's string literal answers truncated for a literal length it cannot cover. Both
+    // answers are right for a message that is arriving and neither can tell that apart from a
+    // peer that will never send the rest, so the bytes accumulated with nothing to stop them.
+    //
+    // THE CEILINGS ARE NARROWED TO 32 RATHER THAN THE DEFAULTS BEING PROVOKED. The shipped
+    // numbers are 64 KiB and 256 KiB and a test that actually filled either would be a test
+    // about allocation speed; what is under test is that the ceiling is READ FROM THE SPEC and
+    // enforced, which a narrowed value witnesses and a default one cannot - a hard-coded
+    // constant would pass every assertion below if the number happened to match.
+
+    [Fact]
+    public void AControlStreamPastTheSpecsCeilingIsExcessiveLoad()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.DatagramCapable,
+                MaximumBufferedControlStreamBytes = 32,
+            },
+            set);
+        http3.OpenLocalStreams();
+
+        // s6.2.1's opening SETTINGS, whole and legal, so the failure below cannot be the
+        // missing-settings one wearing a different code.
+        var opening = new List<byte> { (byte)TlsQuicHttp3StreamType.Control };
+        TlsQuicHttp3Frames.Write(opening, (ulong)TlsQuicHttp3FrameType.Settings, []);
+        Deliver(set, PeerUni0, opening.ToArray());
+        Assert.True(http3.TryProcessPeerStreams(out var accepted));
+        Assert.Equal(0ul, accepted);
+        Assert.True(http3.PeerSettingsReceived);
+
+        // s7.2.8's reserved (GREASE) frame, declaring a gibibyte and sending 64 bytes of it. A
+        // RESERVED type on purpose: s9 requires an unknown frame to be IGNORED rather than
+        // refused, so this is the one shape the reader must skip by honouring the Length - and
+        // therefore the one shape that can park an arbitrary buffer without breaking any other
+        // rule first.
+        var flood = new List<byte>();
+        QuicVariableLengthInteger.Write(flood, TlsQuicHttp3Frames.ReservedIdentifier(0));
+        QuicVariableLengthInteger.Write(flood, 1ul << 30);
+        flood.AddRange(new byte[64]);
+        Deliver(set, PeerUni0, flood.ToArray(), offset: (ulong)opening.Count);
+
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad, error);
+    }
+
+    [Fact]
+    public void AnEncoderStreamPastTheSpecsCeilingIsQpackEncoderStreamError()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.DatagramCapable,
+                MaximumBufferedEncoderStreamBytes = 32,
+            },
+            set);
+        http3.OpenLocalStreams();
+
+        // s4.3.2's Insert With Literal Name, delivered one byte short of whole. The last byte
+        // is what the value's declared length is still waiting for, so
+        // TlsQuicQpackDynamicTable.TryReadEncoderInstructions consumes NOTHING and answers
+        // NeedMoreData - the exact state the audit found parks forever - and every octet stays
+        // in PeerStreamState.Unparsed.
+        var instruction = Insert(new string('a', 120), "value");
+        Assert.True(instruction.Length > 32);
+
+        byte[] stream = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. instruction[..^1]];
+        Deliver(set, PeerUni0, stream);
+
+        // RFC 9204 s6's 0x0201, which is OUTSIDE TlsQuicHttp3ErrorCode's range - s7.4 asks for
+        // "a connection error of the appropriate type if on the encoder or decoder stream", and
+        // the appropriate type for this stream is the encoder stream's own code rather than
+        // s8.1's H3_EXCESSIVE_LOAD that its sibling above raises.
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(TlsQuicQpackDynamicTable.QpackEncoderStreamError, error);
+    }
+
+    // ------------------------------------------------------------------------
     // The sweep.
     // ------------------------------------------------------------------------
 
