@@ -977,7 +977,8 @@ public sealed partial class TlsQuicConnectionTests
 
     // THE OVERLOAD EXISTS FOR ONE TEST AND TAKES THE DEFAULT FROM THE SPEC ITSELF, so that the
     // no-argument form above cannot drift from RFC 9001 s6.6's 2^23 by transcribing it a second
-    // time here. Only ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration
+    // time here. Only
+    // TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration
     // passes anything else; every other caller gets the shipped limit.
     private static TlsQuicConnectionSpec Spec(long aesGcmConfidentialityLimit) => new()
     {
