@@ -1691,6 +1691,49 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // RFC 9000 s10.3 has it sent by an endpoint that has lost connection state, which a
         // client tearing down a connection it owns has not - so the close is both the
         // RECOMMENDED action and the only one of the two this endpoint could take.
+        // RECORDED, NOT THROWN, AND THE DIFFERENCE IS WHICH CALLER IS ASKING. s6.6's own
+        // sentence is a state - "the endpoint MUST stop using the connection" - and this method
+        // runs on two edges that owe different reactions to it: the pump, and the plan builder
+        // that EVERY short-header packet comes through, including the CONNECTION_CLOSE. Throwing
+        // here made BuildCloseDatagram throw, and that path states three times over that it must
+        // not: it is the teardown path, so a throw leaves CloseCoreAsync short of `_draining =
+        // true` and the connection neither closed nor draining - the one outcome worse than a
+        // close nobody could send.
+        //
+        // SO THE FLAG IS THE VERDICT AND THE CALLERS CHOOSE THE REACTION.
+        // TryPlanShortHeaderPacket refuses to build once it is set, which degrades the close to
+        // the `written == 0` path s10.2 already documents - closing state entered, nothing on
+        // the wire, exactly as a close with no usable write keys behaves - and the ordinary
+        // application send edge raises the exception, which is where s6.6's RECOMMENDED close
+        // and the caller's right to hear about it both belong.
+        //
+        // ONE-WAY, AND SUPERSEDED BY DRAINING RATHER THAN COMPETING WITH IT. Nothing clears
+        // this; a connection that has reached s6.6's limit has reached it for good. A draining
+        // connection sends nothing at all - RFC 9000 s10.2.2 - so the two states cannot both
+        // decide a send, and the close that sets `_draining` is reachable from this state
+        // precisely because the plan gate refuses rather than throws.
+        //
+        // TlsQuicConnectionTests.AConfidentialityLimitReachedWhileClosingStillEntersTheClosing
+        // State and TlsQuicConnectionTests.AConfidentialityLimitWithNoKeyUpdateAvailableThrows
+        // OnTheOrdinarySendEdge are the two halves.
+        _mustStopUsingConnection = true;
+    }
+
+    /// <summary>Whether RFC 9001 s6.6's "the endpoint MUST stop using the connection" has been
+    /// reached: the confidentiality limit was crossed and no key update was available.</summary>
+    internal bool MustStopUsingConnection => _mustStopUsingConnection;
+
+    private bool _mustStopUsingConnection;
+
+    // s6.6's RECOMMENDED half, raised on the ordinary application send edge and nowhere else.
+    // The teardown path calls TryPlanShortHeaderPacket too and must not meet this.
+    private void ThrowIfMustStopUsingConnection()
+    {
+        if (!_mustStopUsingConnection)
+        {
+            return;
+        }
+
         throw new TlsQuicTransportException(
             TlsQuicTransportError.AeadLimitReached,
             "RFC 9001 s6.6's confidentiality limit was reached for the 1-RTT keys and no key "

@@ -620,6 +620,141 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(integrity, TlsQuicConnection.IntegrityLimitFor(cipher));
     }
 
+    // ---- RFC 9001 s6.6's "MUST stop using the connection" -------------------------------
+    //
+    // ONE STATE, TWO REACTIONS, AND THE SPLIT IS THE WHOLE POINT OF THESE TWO TESTS. s6.6:
+    // "If a key update is not possible or integrity limits are reached, the endpoint MUST stop
+    // using the connection and only send stateless resets in response to receiving packets. It
+    // is RECOMMENDED that endpoints immediately close the connection with a connection error of
+    // type AEAD_LIMIT_REACHED before reaching a state where key updates are not possible." The
+    // ordinary send edge owes the caller an exception; the close owes the caller a close, and a
+    // close that throws is the one outcome the RECOMMENDED half cannot survive.
+    //
+    // REACHING THE STATE AT ALL TAKES TWO CROSSINGS AND NO ACKNOWLEDGMENT BETWEEN THEM. The
+    // first crossing finds s6.1's gate open - "An endpoint MUST NOT initiate a subsequent key
+    // update unless it has received an acknowledgment for a packet that was sent protected with
+    // keys from the current key phase", and before any update there is no such phase to wait on
+    // - so it updates. The second finds the gate shut, because this peer never acknowledges the
+    // packet the first one produced, and s6.6's "if a key update is not possible" is then true.
+    // A limit of one is what makes both crossings cost one packet each instead of 2^23.
+
+    /// <summary>
+    /// The send edge's half. Nothing about this changed: a caller with application data to send
+    /// is owed the reason it will not go, and RFC 9000 s20.1 names it - AEAD_LIMIT_REACHED
+    /// (0x0F): "An endpoint has reached the confidentiality or integrity limit for the AEAD
+    /// algorithm used by the given connection."
+    /// </summary>
+    [Fact]
+    public async Task AConfidentialityLimitWithNoKeyUpdateAvailableThrowsOnTheOrdinarySendEdge()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(
+            clientTransport, serverTransport, pki, Spec(aesGcmConfidentialityLimit: 1));
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // THE FIRST CROSSING, which s6.1 permits: the acknowledgment this answers is the first
+        // 1-RTT packet this connection protects, and no phase has been waited on yet.
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Equal(1, connection.KeyUpdatesApplied);
+        Assert.False(connection.MustStopUsingConnection);
+
+        // THE SECOND, WITH THE GATE SHUT. The peer has acknowledged nothing at 1-RTT, so
+        // s6.1's condition on the current phase cannot be met and s6.6's state is reached.
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<TlsQuicTransportException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Equal(TlsQuicTransportError.AeadLimitReached, error.Error);
+        Assert.Contains("s6.6", error.Message, StringComparison.Ordinal);
+        Assert.True(connection.MustStopUsingConnection);
+
+        // STILL ONE UPDATE. The second crossing did not rotate anything - that is what "a key
+        // update is not possible" means - so a connection that had quietly updated behind the
+        // shut gate would show two here.
+        Assert.Equal(1, connection.KeyUpdatesApplied);
+    }
+
+    /// <summary>
+    /// The close's half, and the finding. <c>BuildCloseDatagram</c> reaches the same plan
+    /// builder as every other short-header packet, so the throw above used to come out of
+    /// <c>CloseAsync</c> - past the send and short of the line that records RFC 9000 s10.2's
+    /// "After sending a CONNECTION_CLOSE frame, an endpoint immediately enters the closing
+    /// state". The connection was then neither closed nor draining, which is worse than a close
+    /// nobody could send: the close path states three times over that it may not throw.
+    /// <para>THE DEGRADATION IS ONE THAT PATH ALREADY DOCUMENTS. A close with no usable write
+    /// keys, and a transport error code s20 cannot encode, both take the same
+    /// <c>written == 0</c> exit - nothing on the wire, closing state entered regardless. s6.6's
+    /// state joins them rather than inventing a fourth behaviour.</para>
+    /// </summary>
+    [Fact]
+    public async Task AConfidentialityLimitReachedWhileClosingStillEntersTheClosingState()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(
+            clientTransport, serverTransport, pki, Spec(aesGcmConfidentialityLimit: 1));
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // THE STATE IS REACHED THROUGH THE SEND EDGE, because that is the only door to it -
+        // the limit is a count of packets SENT. Its exception is the sibling test's claim and
+        // is swallowed here; what this test is about starts on the next line.
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+        await Assert.ThrowsAsync<TlsQuicTransportException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.True(connection.MustStopUsingConnection);
+        Assert.False(connection.IsDraining);
+
+        // AND THE CLOSE GOES THROUGH. Not a throw, which is what this used to be, and s10.2's
+        // closing state is entered either way: "After sending a CONNECTION_CLOSE frame, an
+        // endpoint immediately enters the closing state", and the state is the endpoint's own
+        // rather than something the peer has to have heard.
+        var sentBefore = clientTransport.Sent.Count;
+        var spentBefore = connection.NextPacketNumber(TlsQuicEncryptionLevel.Application);
+
+        await connection.CloseAsync(
+            TlsQuicTransportError.NoError, "bye", cancellation.Token);
+
+        Assert.True(connection.IsDraining);
+
+        // NOTHING ON THE WIRE, which is the documented degradation rather than a silent loss:
+        // s6.6 forbids protecting another packet, and a CONNECTION_CLOSE is a packet.
+        Assert.Equal(sentBefore, clientTransport.Sent.Count);
+
+        // AND NOTHING WAS SPENT ON IT EITHER. RFC 9000 s12.3 forbids reusing a packet number in
+        // a space; the plan gate refuses before drawing one, so a close in this state costs no
+        // number.
+        Assert.Equal(
+            spentBefore, connection.NextPacketNumber(TlsQuicEncryptionLevel.Application));
+    }
+
     [Fact]
     public async Task ProtectedOneRttPacketsAreCountedAndAKeyUpdateRestartsTheCount()
     {

@@ -1056,7 +1056,9 @@ public sealed partial class TlsQuicConnectionTests
     // no-argument form above cannot drift from RFC 9001 s6.6's 2^23 by transcribing it a second
     // time here. Only
     // TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration
-    // passes anything else; every other caller gets the shipped limit.
+    // passed anything else. It has two siblings now - the pair that drives RFC 9001 s6.6's "MUST
+    // stop using the connection" state, which needs the limit crossed TWICE - and every other
+    // caller still gets the shipped limit.
     private static TlsQuicConnectionSpec Spec(long aesGcmConfidentialityLimit) => new()
     {
         AesGcmConfidentialityLimit = aesGcmConfidentialityLimit,
