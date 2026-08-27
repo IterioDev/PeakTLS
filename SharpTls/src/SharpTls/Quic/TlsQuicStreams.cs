@@ -1045,6 +1045,33 @@ internal sealed class TlsQuicStream
 
         _largestReceivedOffset = Math.Max(_largestReceivedOffset, end);
 
+        // AFTER A RESET THE BYTES ARE ACCEPTED AND DROPPED, NOT BUFFERED. RFC 9000 s4.5 leaves
+        // this frame legal - a STREAM frame that arrives after a RESET_STREAM is conforming as
+        // long as it stays inside the final size, which the s20.1 case (1) check above has
+        // already enforced - and s4.5 also says what to do with it: "A receiver SHOULD discard
+        // any data it already received on that stream." Data it is still receiving is the same
+        // data one retransmission later.
+        //
+        // AND WITHOUT THIS, FINDING 3 ARMED FINDING 2's CAP AGAINST CONFORMING TRAFFIC. The
+        // reset discards the held pieces, but the gap in front of them can never be filled
+        // now, so every retransmission that follows re-accumulates a piece that nothing will
+        // ever drain. TryReceiveReset cleared the list; this is what stops it refilling. The
+        // 129th such frame reached IsFragmentedPastTheCap below and closed the connection with
+        // INTERNAL_ERROR - our own resource bound, fired at a peer that broke no rule.
+        //
+        // NOTHING IS CREDITED HERE AND NOTHING NEEDS TO BE. CreditReceiveWindow is skipped
+        // deliberately rather than forgotten: `advance` above is necessarily 0, because a
+        // conforming frame ends at or below the final size and TryReceiveReset already raised
+        // _largestReceivedOffset to it, so no connection window was spent to give back. The
+        // window for everything below the final size was returned when the reset was applied -
+        // CreditedPrefix reports the final size for a reset stream, so _creditedToConnection
+        // already equals it and a call here would compute a credit of exactly zero. s4.6's
+        // stream-count credit fired on the same pass, once, behind _receiveCompleteReported.
+        if (_resetErrorCode is not null)
+        {
+            return true;
+        }
+
         if (fin)
         {
             _finalSize = end;
@@ -2124,13 +2151,30 @@ internal sealed class TlsQuicStreamSet
                             RepairsSent++;
                         }
                     }
-                    else if (taken.Count == 0)
+                    else if (taken.Count == 0
+                        && queue[consumed].Type != TlsQuicFrameType.Stream)
                     {
                         // The escape, and it is now the LAST resort rather than the first: a
-                        // frame that cannot be split and cannot fit goes out oversized so the
-                        // queue drains, and the send path names it. Reached only when nothing
-                        // else has been taken, so a datagram that is already carrying frames
-                        // never grows past its budget.
+                        // frame with no byte range to cut - a MAX_DATA is one value - goes out
+                        // oversized so the queue drains, and the send path names it. Reached
+                        // only when nothing else has been taken, so a datagram already
+                        // carrying frames never grows past its budget.
+                        //
+                        // THE TEST IS THE FRAME TYPE AND NOT "TrySplitStreamHead SAID NO",
+                        // WHICH IS THE HOLE FINDING 12 LEFT OPEN. That method refuses for two
+                        // unrelated reasons: the frame is not a STREAM frame, and it IS one
+                        // but `room` leaves nothing worth cutting into - one to fourteen bytes
+                        // once the s19.8 header is paid for. Reading the second as "cannot be
+                        // split" sent a whole ~1200-byte STREAM frame into a budget of ten,
+                        // which is the same over-MTU datagram - WSAEMSGSIZE on a DF-set
+                        // socket - that finding 12 exists to prevent.
+                        //
+                        // A STREAM FRAME LEFT BEHIND HERE IS NOT A STALL. It waits for a
+                        // datagram with no RFC 9000 s12.2 coalesced prefix in front of it, and
+                        // such a datagram offers the whole payload budget - never fewer than
+                        // the 66 bytes OneRttStreamFrameOverheadBound reserves, let alone the
+                        // fourteen that defeat the split. The frame either fits whole or is
+                        // cut on that pass.
                         taken.Add(queue[consumed]);
                         consumed++;
                         if (source == 0)

@@ -1503,6 +1503,108 @@ public sealed class TlsQuicStreamsTests
         Assert.Equal(0UL, stream.UndeliveredBytes);
     }
 
+    // THE HOLE FINDING 12's OWN FIX LEFT OPEN, and it is one line of budget arithmetic away
+    // from the case that fix does cover. TrySplitStreamHead refuses for TWO unrelated reasons -
+    // the frame is not a STREAM frame, and it IS one but `room` leaves nothing worth cutting
+    // into once s19.8's header is paid for - and the starvation escape read both as "cannot be
+    // split". So a budget of a few bytes sent a whole ~1000-byte STREAM frame out unmeasured,
+    // which is exactly the RFC 9000 s14.2 breach finding 12 exists to prevent: "All QUIC
+    // packets that are not sent in a PMTU probe SHOULD be sized to fit within the maximum
+    // datagram size."
+    //
+    // THE ASSERTION IS THE INVARIANT AND NOT A HEADER WIDTH, because the window this lands in
+    // is exactly "less room than s19.8's header costs" and that cost depends on how wide the
+    // stream id, offset and length varints happen to encode - four bytes for the frame below,
+    // up to twenty-five for another. Pinning a number here would pin the arithmetic rather than
+    // the rule, and the rule is the one RFC 9000 s14.2 states: whatever goes out fits.
+    //
+    // SWEEPING THE ROOM FROM 1 UPWARD covers both sides of that boundary in one test - the
+    // budgets too small to cut into, where nothing may be taken, and the budgets that can be
+    // cut, where the cut must fit. TlsQuicStreamsTests
+    // .AFrameQueuedUnderALargerBudgetIsSplitRatherThanOverrunningTheDatagram covers the roomy
+    // end of the same branch and reaches neither boundary.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(9)]
+    [InlineData(15)]
+    public void NoStreamFrameIsEverTakenIntoABudgetItDoesNotFit(int room)
+    {
+        var streams = Set();
+        streams.DatagramPayloadBudget = 1200;
+
+        var stream = streams.OpenUnidirectional();
+        var body = new byte[1000];
+        for (var index = 0; index < body.Length; index++)
+        {
+            body[index] = (byte)((index * 17) + 3);
+        }
+
+        streams.Send(stream, body);
+
+        // Either nothing comes out, or what comes out fits. Taking the whole ~1004-byte frame
+        // is the WSAEMSGSIZE datagram finding 12 exists to prevent.
+        var taken = streams.TakePendingFrames(room);
+        var spent = 0;
+        foreach (var frame in taken)
+        {
+            spent += TlsQuicFrames.MeasureFrame([], frame);
+        }
+
+        Assert.True(
+            spent <= room,
+            $"Took {spent} bytes into a {room}-byte budget.");
+
+        // AND THE BODY IS NEVER LOST, whatever the budget did. A fix that dropped the queue
+        // head would satisfy the assertion above and silently truncate a request.
+        var rest = new List<byte>();
+        foreach (var frame in taken)
+        {
+            rest.AddRange(frame.Data.ToArray());
+        }
+
+        while (streams.HasPendingFrames)
+        {
+            foreach (var frame in streams.TakePendingFrames(1200))
+            {
+                Assert.True(
+                    TlsQuicFrames.MeasureFrame([], frame) <= 1200,
+                    "A later frame overran a full-sized budget.");
+                rest.AddRange(frame.Data.ToArray());
+            }
+        }
+
+        Assert.Equal(body, rest.ToArray());
+    }
+
+    // AND A FRAME WITH NO BYTE RANGE STILL ESCAPES, which is the half of the gate that must not
+    // be lost while closing the half above. s19.9's MAX_DATA is one value, not a range: there
+    // is nothing to cut, so leaving it queued would stall the connection silently rather than
+    // let the send path report an over-budget datagram. That trade is TlsQuicLossDetection
+    // .TakeRepairsInto's and this arm follows it.
+    [Fact]
+    public void AFrameWithNoByteRangeStillEscapesABudgetItCannotFit()
+    {
+        var streams = Set();
+        streams.DatagramPayloadBudget = 1200;
+
+        streams.QueueConnectionFrame(new TlsQuicFrame
+        {
+            RawType = (ulong)TlsQuicFrameType.MaxData,
+            MaximumData = 1_000_000,
+        });
+
+        // One byte of room, against a frame that cannot be built in fewer than several. Taking
+        // it is deliberate: the datagram is over budget and says so, which beats a queue that
+        // never drains.
+        var escaped = Assert.Single(streams.TakePendingFrames(1));
+        Assert.Equal((ulong)TlsQuicFrameType.MaxData, escaped.RawType);
+        Assert.False(streams.HasPendingFrames);
+    }
+
     // THE MERGE PATHS THE FLOOD ABOVE CANNOT REACH. Every frame in the descending-overlap test
     // is fully CONTAINED in the range the first one opened, so it exercises one arm of Buffer
     // and leaves the rest - the gap fill, the partial overlap from either side, and a range
@@ -1622,6 +1724,60 @@ public sealed class TlsQuicStreamsTests
             streams.TryReceive(Frame(3, 82, [1]), out var refused),
             "The ninth disjoint range was accepted against a cap of eight.");
         Assert.Equal(TlsQuicTransportError.InternalError, refused);
+    }
+
+    // THE TWO FIXES MEETING BADLY, AND NEITHER REVIEW COULD SEE IT ALONE. Finding 3 made
+    // RESET_STREAM apply; finding 2 capped retained ranges. Together they closed the connection
+    // on traffic RFC 9000 s4.5 tells us to throw away.
+    //
+    // A STREAM FRAME AFTER A RESET IS LEGAL, which is the part that makes this peer-reachable
+    // rather than theoretical: s4.5 keeps a retransmission conforming as long as it stays
+    // inside the final size, and s13.3 makes retransmission ordinary. But the leading gap can
+    // never be filled once the sender has stopped, so every one of those frames used to
+    // re-open a range that nothing would ever drain - TryReceiveReset clears the list once and
+    // the next frame starts refilling it. Past the cap, IsFragmentedPastTheCap fired
+    // INTERNAL_ERROR: our own resource bound, at a peer that broke no rule.
+    //
+    // THE RESET LANDS FIRST AND LEAVES A HOLE AT ZERO, so nothing can ever drain: four bytes
+    // arrive at offset 4, the reset names a final size of 8, and offset 0 is gone for good.
+    // Then twice the cap in disjoint retransmissions, every one inside the final size.
+    [Fact]
+    public void RetransmissionsAfterAResetAreDiscardedRatherThanRefillingTheRangeCap()
+    {
+        var streams = Set();
+        streams.MaximumUndeliveredRangesPerStream = 4;
+
+        Assert.True(streams.TryReceive(Frame(3, 4, [1, 2, 3, 4]), out _));
+        var stream = streams.PeerInitiated[0];
+
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Reset(3, finalSize: 8, errorCode: 0x010c),
+            out var resetError),
+            $"Refused a conforming RESET_STREAM with {resetError}.");
+
+        // s4.5's "A receiver SHOULD discard any data it already received on that stream",
+        // taken when the reset arrived.
+        Assert.Equal(0UL, stream.UndeliveredBytes);
+
+        // Disjoint single bytes below the final size, twice the cap of them - the shape that
+        // genuinely occupies ranges, and every frame inside what s4.5 permits.
+        for (var round = 0; round < 8; round++)
+        {
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)(7 - (round % 4)), [9]), out var error),
+                $"Round {round} closed the connection with {error} on a retransmission RFC "
+                    + "9000 s4.5 makes legal after a reset.");
+        }
+
+        // NOT ONE BYTE WAS KEPT, which is the assertion the survival check cannot make on its
+        // own: an implementation that buffered but raised the cap would also stay open.
+        Assert.Equal(0UL, stream.UndeliveredBytes);
+        Assert.Empty(stream.Received);
+
+        // And a frame ABOVE the final size is still s20.1's FINAL_SIZE_ERROR - discarding the
+        // bytes must not mean skipping the check that bounds them.
+        Assert.False(streams.TryReceive(Frame(3, 8, [9]), out var beyond));
+        Assert.Equal(TlsQuicTransportError.FinalSizeError, beyond);
     }
 
     // THE FALSE POSITIVE THE CAP WOULD HAVE SHIPPED WITHOUT COMPACTION, and it is the most
