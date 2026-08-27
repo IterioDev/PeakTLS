@@ -456,7 +456,16 @@ public sealed partial class TlsQuicConnectionTests
             async () => await connection.PumpOnceAsync(cancellation.Token));
 
         // s20.1 FRAME_ENCODING_ERROR (0x07): "A frame was received that was badly formatted."
-        // And it was SENT, not merely recorded - which is audit finding 9's half of this test.
+        //
+        // AND IT WAS SENT, NOT MERELY RECORDED - WHICH MAKES THIS FINDING 9's FOURTH ARM AS WELL
+        // AS FINDING 11's CEILING. The refusal happens inside TlsQuicFrames.TryReadFrame, so it
+        // arrives as the receiver's own CloseError rather than through any of the three
+        // per-frame failure slots PumpOnceAsync carries; that arm has no other witness, and the
+        // two reachable siblings are APeerProtocolViolationSendsConnectionCloseBeforeItThrows
+        // and ARefusedStreamFrameClosesWithTheCodeTheStreamLayerChoseNotAFallback. The fourth,
+        // frameError, is unreachable through the wire and says so at its own arm. Deleting the
+        // CloseError close in PumpOnceAsync turns the two assertions below red and leaves the
+        // other witnesses green.
         Assert.Equal(TlsQuicTransportError.FrameEncodingError, connection.ClosedWith);
         await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
         var close = Assert.NotNull(serverPeer.LastConnectionClose);

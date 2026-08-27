@@ -2699,6 +2699,22 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 // the IOException any other send raises, and hiding it behind the protocol
                 // error would lose the one fact that says the socket rather than the peer is
                 // the problem.
+                // UNREACHABLE THROUGH THE WIRE, AND THAT IS MEASURED RATHER THAN ASSUMED - so
+                // this arm is deliberately unwitnessed while its three siblings below are not.
+                // frameError is set only by TlsQuicAckTracker.ProcessAckFrame returning false,
+                // which happens only when TlsQuicAckFrames.TryGetRanges does, which is
+                // TryWalkRanges over frame.AckRanges - the identical walk, with the identical
+                // s19.3.1 underflow rules, that TryReadAck already ran over the identical bytes
+                // before this frame became a TlsQuicFrame at all. So a chain this rejects was
+                // rejected one layer down and arrived as the receiver's CloseError instead;
+                // AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrameEncodingError is
+                // what witnesses that route. Mutation-ledger rows 133 and 134 recorded the same
+                // equivalence from the other side.
+                //
+                // THE ARM STAYS FOR THE REJECTION THAT IS SEMANTIC RATHER THAN STRUCTURAL:
+                // s13.1's "if a packet number was never issued" is a question about what this
+                // endpoint sent, which no parser can ask, and on the day the tracker asks it
+                // this is the line that turns the answer into a close instead of a bare throw.
                 if (frameError is { } malformed)
                 {
                     var message = $"The peer sent a malformed ACK frame: {malformed}.";
