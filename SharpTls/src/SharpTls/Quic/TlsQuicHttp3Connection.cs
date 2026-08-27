@@ -865,19 +865,17 @@ internal sealed class TlsQuicHttp3Connection
             // document, so it was deleted; AFinThatArrivesWithNoNewBytesEndsTheResponseOnce
             // pumps three further times and pins that the repeat stays benign.
             //
-            // `&& !ResetReceived` IS LOAD-BEARING AND THE OBVIOUS READING IS WRONG. RFC 9000
-            // s4.5 says "A RESET_STREAM ... also establishes the final size", so a reset sets
-            // the same field a FIN does: TlsQuicStream.ReceiveComplete is
-            // `_finalSize == _delivered.Count` and FinReceived is `_finalSize is not null`, so
-            // NEITHER distinguishes a stream that ended from one that was cancelled. A peer
-            // that resets naming a final size equal to what it already sent - the ordinary
-            // shape when a server abandons a response between two frames - therefore satisfies
-            // ReceiveComplete exactly, with no FIN anywhere, and would set IsComplete on a
-            // response s4.1 calls incomplete. The stream layer's own revert cured only the
-            // TRUNCATING reset; this conjunct is what covers the exact-size one, and it is here
-            // because ResetReceived is the only observable that separates the two.
-            var endOfStream =
-                exchange.Stream.ReceiveComplete && !exchange.Stream.ResetReceived;
+            // A RESET IS NOT AN END OF STREAM, AND ReceiveComplete NOW SAYS SO ITSELF. This
+            // line briefly read `ReceiveComplete && !ResetReceived`, because RFC 9000 s4.5's
+            // "A RESET_STREAM ... also establishes the final size" meant a reset set the same
+            // field a FIN did - so a peer that reset naming a final size equal to what it had
+            // already sent satisfied the size comparison exactly, with no FIN anywhere, and
+            // would have set IsComplete on a response s4.1 calls incomplete. The stream layer
+            // now answers the three questions separately: ReceiveComplete is normal completion
+            // and excludes every reset, FinalSizeKnown is s4.5's union, ResetReceived is
+            // abandonment. The conjunct was deleted rather than kept as belt-and-braces,
+            // because a second copy of a rule is a second thing to disagree with the first.
+            var endOfStream = exchange.Stream.ReceiveComplete;
 
             // `&& !IsBlocked` IS C16'S, AND WITHOUT IT NOTHING EVER UNBLOCKS. What a parked
             // field section is waiting for arrives on the peer's ENCODER stream, so the
@@ -895,7 +893,7 @@ internal sealed class TlsQuicHttp3Connection
             // deadline - see the note on TryHoldBlocked below.
             // `&& !ResetReceived` KEEPS A RESET-ONLY PUMP FROM BEING SKIPPED. A peer that
             // resets without sending anything alongside it leaves `fresh` at zero, and
-            // ReceiveComplete is false because a truncating reset is not completion - so
+            // ReceiveComplete is false because no reset is completion - so
             // without this conjunct the arm below would never run and the reset would go
             // unrecorded. It costs one empty TryRead on that pump, which is the same no-op
             // this loop already makes for a blocked section.
@@ -935,10 +933,10 @@ internal sealed class TlsQuicHttp3Connection
             //
             // AND IT IS SAFE, WHICH IS WHY THE ORDER IS A FREE CHOICE RATHER THAN A TRADE.
             // TlsQuicHttp3Response.IsComplete is assigned only inside TryRead's `endOfStream`
-            // block, and `endOfStream` is false for every reset - see its own note above for
-            // why that needs an explicit conjunct rather than trusting ReceiveComplete. A frame
-            // the reset cut in half simply stays in the reader's pending buffer, unparsed, as
-            // any partial frame does.
+            // block, and `endOfStream` is TlsQuicStream.ReceiveComplete, which is false for
+            // every reset - normal completion is the only question that property answers. A
+            // frame the reset cut in half simply stays in the reader's pending buffer,
+            // unparsed, as any partial frame does.
             //
             // s4.1 AND RFC 9000 s3.2 TOGETHER ARE WHY A RESET AFTER A WHOLE RESPONSE IS
             // IGNORED. s3.2 lets a receiver in "Data Recvd" or "Data Read" discard a

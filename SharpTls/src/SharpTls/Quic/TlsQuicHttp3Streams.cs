@@ -536,7 +536,7 @@ internal sealed class TlsQuicHttp3Streams
         // the early return ever moves, this line is what stops a peer's ordinary GREASE-stream
         // close from becoming a connection error. Recorded as a surviving mutation, classified
         // unreachable-by-construction, with no test written for it.
-        if (state.StreamType == (ulong)TlsQuicHttp3StreamType.Control && stream.FinReceived)
+        if (state.StreamType == (ulong)TlsQuicHttp3StreamType.Control && stream.FinalSizeKnown)
         {
             error = (ulong)TlsQuicHttp3ErrorCode.H3ClosedCriticalStream;
             return false;

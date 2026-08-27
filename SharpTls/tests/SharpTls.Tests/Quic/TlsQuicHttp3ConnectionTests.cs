@@ -798,15 +798,13 @@ public sealed partial class TlsQuicConnectionTests
     // between two whole frames: the reader's buffer is empty, its stage is Content, and every
     // condition its completion rule tests is satisfied.
     //
-    // WHY end-of-stream IS TRUE HERE AT ALL, which is the part that looks wrong and is not.
-    // RFC 9000 s3.2 puts a reset stream's receiving part in "Reset Recvd" and s4.5 leaves the
-    // bytes below the reset's final size undelivered forever, so TlsQuicStream.ReceiveComplete
-    // MUST answer true on a reset - a completion test that waited for the missing bytes is the
-    // hang audit finding #3 named, and TlsQuicStreamsTests.AResetStreamEndsTheStreamAndReports
-    // ThePeersApplicationErrorCode pins that. TlsQuicHttp3Connection.TryProcess reads exactly
-    // that property as its endOfStream, so before the fix this response arrived at
-    // TlsQuicHttp3Response.TryRead as "the stream ended cleanly with nothing left over" and
-    // came back a complete 200 carrying half a body.
+    // WHY THIS ONCE PASSED FOR A CLEAN CLOSE. TlsQuicStream.ReceiveComplete used to fold a
+    // reset in - a reset stream does deliver nothing further, which is true and is the wrong
+    // question - and TlsQuicHttp3Connection.TryProcess reads that property as its endOfStream.
+    // So this response arrived at TlsQuicHttp3Response.TryRead as "the stream ended cleanly
+    // with nothing left over" and came back a complete 200 carrying half a body. The property
+    // now answers normal completion only, and RFC 9000 s4.5's other route out of the same
+    // state is TlsQuicStream.FinalSizeKnown.
     //
     // s4.1 IS WHAT MAKES THAT WRONG RATHER THAN MERELY ODD: a request stream reset before the
     // response is complete is a FAILED response, and s4.1.1's retry rules - "The client can
@@ -840,13 +838,12 @@ public sealed partial class TlsQuicConnectionTests
         //
         // THE FINAL SIZE EQUALS WHAT WAS SENT, AND THAT IS THE SHARPEST SHAPE OF THIS BUG
         // RATHER THAN A CONVENIENCE. RFC 9000 s4.5: "A RESET_STREAM ... also establishes the
-        // final size" - the same field a FIN sets - so this reset leaves
-        // TlsQuicStream.ReceiveComplete TRUE with no FIN anywhere on the stream, and both
-        // FinReceived and ReceiveComplete answer identically to a clean close. Nothing below
-        // the final size is missing; what is missing is the rest of the RESPONSE, which the
-        // server has just said it will not send. An endOfStream computed from ReceiveComplete
-        // alone reports this as a whole 200, which is what it did until the conjunct naming
-        // ResetReceived was added.
+        // final size" - the same field a FIN sets - so nothing below the final size is
+        // missing here. What is missing is the rest of the RESPONSE, which the server has just
+        // said it will not send. Every size comparison a clean close would satisfy, this row
+        // satisfies too, so it is the row that fails against any completion test built on the
+        // final size alone; TlsQuicStream.ReceiveComplete excluding a reset outright is what
+        // it now rests on.
         await harness.PeerSendsAsync(
             cancellation.Token,
             expectAccepted: true,
@@ -2280,7 +2277,7 @@ public sealed partial class TlsQuicConnectionTests
                     return false;
                 }
 
-                if ((frame.RawType & TlsQuicStreamFrames.FinBit) != 0 && !stream.FinReceived)
+                if ((frame.RawType & TlsQuicStreamFrames.FinBit) != 0 && !stream.FinalSizeKnown)
                 {
                     return false;
                 }
@@ -3190,7 +3187,7 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
         Assert.True(
             response.IsComplete,
             $"No complete response after {clock.Elapsed}. "
-                + $"received={stream.Received.Count} fin={stream.FinReceived} "
+                + $"received={stream.Received.Count} fin={stream.FinalSizeKnown} "
                 + $"peer_settings={TlsQuicHttp3Settings.Render(http3.Streams.PeerSettings)}");
         Assert.Equal(200, response.Status);
 
