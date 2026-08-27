@@ -1365,7 +1365,7 @@ internal sealed class TlsQuicHttp3Response
 
     private readonly long _maximumFieldSectionSize;
 
-    // The ceiling on _pending.Count + _body.Count, audit finding #6's third buffer. NOT THE
+    // The ceiling on _pending + _body + _interimBytes, audit finding #6's third buffer. NOT THE
     // SAME LIMIT AS _maximumFieldSectionSize AND NOT A SUBSTITUTE FOR IT: s4.2.2's limit is on
     // the UNCOMPRESSED size of one field section and is applied by the QPACK decoder after a
     // HEADERS frame is whole, which is too late to stop a peer that never finishes one. This
@@ -1387,6 +1387,12 @@ internal sealed class TlsQuicHttp3Response
     // _pending together because a byte crosses from one to the other as its frame completes.
     private readonly List<byte> _body = [];
     private readonly List<ImmutableArray<TlsQuicHttp3Field>> _interim = [];
+
+    // What _interim has cost so far, in RFC 9114 s4.2.2's field-list units. A RUNNING TOTAL AND
+    // NOT A RECOMPUTATION, because the check that reads it runs once per TryRead and walking
+    // every field of every interim section each time would make a peer's 1xx flood quadratic -
+    // which is the shape of the very attack the ceiling exists to refuse.
+    private long _interimBytes;
 
     private Stage _stage = Stage.BeforeFinalHeaders;
 
@@ -1506,9 +1512,81 @@ internal sealed class TlsQuicHttp3Response
     internal int Status { get; private set; } = -1;
 
     /// <summary>Gets whether a final response was read and the stream then ended.</summary>
-    /// <remarks><see langword="false"/> after a stream that ended carrying only interim
-    /// responses: s4.1 requires "a single final HTTP response" to follow them.</remarks>
+    /// <remarks>
+    /// <para><see langword="false"/> after a stream that ended carrying only interim
+    /// responses: s4.1 requires "a single final HTTP response" to follow them.</para>
+    /// <para>AND <see langword="false"/> AFTER A RESET, WHICH IS THE POINT OF
+    /// <see cref="ResetErrorCode"/>. RFC 9000 s4.5 leaves the bytes below a reset stream's
+    /// final size undelivered forever, so a response cut short by RESET_STREAM has a
+    /// <see cref="Body"/> that is a PREFIX of the real one - and this property saying yes
+    /// over it would hand a caller a truncated message it has no way to distinguish from a
+    /// whole one. That is not a hypothetical: the stream layer reports a reset stream as
+    /// having finished receiving (RFC 9000 s3.2 puts it in "Reset Recvd", and waiting for the
+    /// missing bytes would hang), and this reader's completion rule is FIN plus an empty
+    /// buffer - which a reset landing on a frame boundary satisfies exactly.</para>
+    /// </remarks>
     internal bool IsComplete { get; private set; }
+
+    /// <summary>Gets the RFC 9000 s19.4 Application Protocol Error Code the peer reset this
+    /// request stream with, or <see langword="null"/> if it has not.</summary>
+    /// <remarks>
+    /// <para>THE CODE AND NOT A FLAG, because RFC 9114 s4.1.1 makes the number the whole
+    /// decision. "The server SHOULD abort its response stream with the error code
+    /// H3_REQUEST_REJECTED" when it did no application processing, and "The client can treat
+    /// requests rejected by the server as though they had never been sent at all, thereby
+    /// allowing them to be retried later" - whereas H3_REQUEST_CANCELLED means the server
+    /// "abandons a response after partial processing", which a client may not silently retry.
+    /// A caller told only that the stream was reset cannot tell those apart.</para>
+    /// <para>REPORTED, NOT INTERPRETED. The value is the varint the peer sent, whatever it is;
+    /// s8.1's codes are not exhaustive of what may legally arrive - s8's reserved
+    /// <c>0x1f * N + 0x21</c> space is expressly for codes an endpoint sends in place of
+    /// H3_NO_ERROR. Nothing here maps it onto <see cref="TlsQuicHttp3ErrorCode"/>, whose own
+    /// summary says its members are the codes THIS subsystem raises.</para>
+    /// <para>NULL RATHER THAN 0, for the reason <see cref="TlsQuicStream.ResetErrorCode"/>
+    /// gives: 0 is H3_NO_ERROR and a legal thing for a peer to reset with, so a
+    /// <see cref="ulong"/> defaulting to zero would read "no reset" and "reset, deliberately"
+    /// identically.</para>
+    /// </remarks>
+    internal ulong? ResetErrorCode { get; private set; }
+
+    /// <summary>Gets whether the peer abandoned this response with an RFC 9000 s19.4
+    /// RESET_STREAM.</summary>
+    /// <remarks>A STREAM ERROR AND NOT A CONNECTION ERROR, which is why it is a property here
+    /// rather than a code out of <see cref="TryRead"/>. RFC 9114 s8 draws the line - "This is
+    /// referred to as a 'stream error'" against "This is referred to as a 'connection error'" -
+    /// and s4.1.1 makes cancelling one request an ordinary thing for a server to do: "servers
+    /// cancel requests if they are unable to or choose not to respond". A connection closed over
+    /// it would take every other exchange down with it.</remarks>
+    internal bool IsReset => ResetErrorCode is not null;
+
+    /// <summary>Records that the peer reset this request stream, RFC 9000 s19.4.</summary>
+    /// <returns><see langword="true"/> the first time only.</returns>
+    /// <remarks>
+    /// <para>IDEMPOTENT, AND THE FIRST CODE STANDS. The connection calls this once per pump
+    /// for as long as the exchange is held, and s19.4 admits only one RESET_STREAM per stream
+    /// - the stream layer refuses a second with a different final size as s20.1's
+    /// FINAL_SIZE_ERROR - so a later call carries the same number. Keeping the first is what
+    /// makes that guaranteed rather than merely true today.</para>
+    /// <para>THE RETURN IS WHAT MAKES ONCE-PER-STREAM WORK ONE LAYER UP. RFC 9204 s2.2.2.2's
+    /// Stream Cancellation is emitted per abandoned stream, not per pump, and a caller that
+    /// tested <see cref="IsReset"/> itself would be keeping a second copy of the same fact.
+    /// </para>
+    /// <para>IT DOES NOT CLEAR <see cref="HeaderFields"/>, <see cref="Status"/> OR
+    /// <see cref="Body"/>. RFC 9114 s4.1 tells a client to "begin processing partial HTTP
+    /// messages once enough of the message has been received to make progress", so what did
+    /// arrive is worth keeping and reading; what must not happen is it being presented as the
+    /// WHOLE message, which is <see cref="IsComplete"/>'s job and not this data's.</para>
+    /// </remarks>
+    internal bool OnPeerReset(ulong applicationErrorCode)
+    {
+        if (IsReset)
+        {
+            return false;
+        }
+
+        ResetErrorCode = applicationErrorCode;
+        return true;
+    }
 
     /// <summary>Consumes the next bytes of the response stream.</summary>
     /// <remarks>
@@ -1544,27 +1622,6 @@ internal sealed class TlsQuicHttp3Response
         foreach (var b in bytes)
         {
             _pending.Add(b);
-        }
-
-        // AUDIT FINDING #6'S THIRD BUFFER, AND ONE CHECK COVERS BOTH HALVES OF IT. _pending and
-        // _body are the only two lists here that a peer can grow, and this is the only line at
-        // which either does: _body is filled from payloads that were in _pending a moment ago,
-        // so the pair's total rises exactly here and nowhere else. A check at each Add would be
-        // the same rule twice, in the two places most likely to drift apart.
-        //
-        // WHY THE ARITHMETIC IS A SUBTRACTION. _pending.Count + _body.Count is an int addition
-        // and a peer able to reach 2^31 bytes could wrap it to a negative that passes; the
-        // subtraction cannot overflow, because _maximumBufferedBytes and _body.Count are both
-        // non-negative ints and their difference stays in range. A ceiling already exceeded
-        // makes that difference negative, which no non-negative _pending.Count is ever `<=`.
-        //
-        // NOT s7.1's H3_FRAME_ERROR. Nothing about the peer's framing is wrong at this point -
-        // the frame it is sending may well be legal and simply larger than we chose to hold -
-        // and s8.1 gives H3_EXCESSIVE_LOAD to exactly that: "The endpoint detected that its
-        // peer is exhibiting a behavior that might be generating excessive load."
-        if (_pending.Count > _maximumBufferedBytes - _body.Count)
-        {
-            return Fail(ExcessiveLoad, out errorCode);
         }
 
         var buffer = CollectionsMarshal.AsSpan(_pending);
@@ -1612,6 +1669,43 @@ internal sealed class TlsQuicHttp3Response
 
         _pending.RemoveRange(0, offset);
 
+        // AUDIT FINDING #6'S THIRD BUFFER, MEASURED AS A RESIDUE AND COVERING A FOURTH THE
+        // FINDING DID NOT NAME. Three lists here grow from the peer and nothing else shrinks
+        // them, so the ceiling is on their SUM:
+        //
+        //   * _pending, the tail of a frame that has not finished arriving. The RemoveRange
+        //     above has just dropped everything the loop could read, so what is counted is the
+        //     part no parse could take - which is the quantity the finding was about, and not
+        //     the same thing as how much arrived in this call.
+        //   * _body, s7.2.1's DATA payloads concatenated. Its bytes were in _pending a moment
+        //     ago, so the two are one quantity moving between two lists.
+        //   * _interim, one field section per s4.1 interim (1xx) response. THE FIRST VERSION OF
+        //     THIS CHECK ASSERTED THAT _pending AND _body WERE "the only two lists here that a
+        //     peer can grow", AND THAT WAS FALSE. s4.1 permits "zero or more interim HTTP
+        //     responses" with no bound on the count, and their bytes pass through _pending, are
+        //     consumed, and never reach _body - so a peer emitting 1xx responses forever grew
+        //     this reader without moving either of the other two numbers.
+        //
+        // AFTER THE LOOP AND NOWHERE ELSE, WHICH IS WHAT MAKES IT ONE CHECK RATHER THAN THREE.
+        // Parsing only moves bytes between these lists and drops frame headers, so the sum
+        // never rises during the loop above what it was when the loop began; measuring once at
+        // the end therefore bounds every path into all three. The transient peak inside one
+        // call is this ceiling plus the delivery that crossed it, which is the same bound
+        // TlsQuicHttp3Streams accepts for the same reason.
+        //
+        // A long ACCUMULATOR AND A long COMPARISON, because three int-shaped quantities added
+        // together can leave int's range even when none of them does, and a wrapped negative
+        // total would pass a check the peer had already broken.
+        //
+        // NOT s7.1's H3_FRAME_ERROR. Nothing about the peer's framing is wrong here - the
+        // frames may be legal and simply more than we chose to hold - and s8.1 gives
+        // H3_EXCESSIVE_LOAD to exactly that: "The endpoint detected that its peer is exhibiting
+        // a behavior that might be generating excessive load."
+        if ((long)_pending.Count + _body.Count + _interimBytes > _maximumBufferedBytes)
+        {
+            return Fail(ExcessiveLoad, out errorCode);
+        }
+
         // s7.1's leftover-at-FIN rule does NOT apply to a parked section, and neither does
         // s4.1's completeness. A peer may legally FIN its response stream while the encoder
         // instructions the section needs are still in flight on the encoder stream - that is
@@ -1639,7 +1733,22 @@ internal sealed class TlsQuicHttp3Response
                 return Fail(MessageError, out errorCode);
             }
 
-            IsComplete = _stage != Stage.BeforeFinalHeaders;
+            // `!IsReset` IS THE SILENT-CORRUPTION GUARD, and it is here rather than only at the
+            // caller because THIS property is what a caller reads. RFC 9000 s3.2 puts a reset
+            // stream's receiving part in "Reset Recvd" and s4.5 leaves every byte below its
+            // final size undelivered, so the stream layer necessarily reports such a stream as
+            // finished - waiting on bytes that will never come is the hang audit finding #3
+            // named. A reset that lands on an HTTP/3 frame boundary therefore arrives here as
+            // endOfStream with an empty _pending, satisfies every other test in this block, and
+            // would set a TRUNCATED response complete. RFC 9114 s4.1 is unambiguous that this
+            // is a failed response and not a short one; s4.1.1's retry rules only mean anything
+            // if the two are distinguishable.
+            //
+            // TlsQuicHttp3Connection.TryProcess ALSO SKIPS THE READ ENTIRELY on a reset stream,
+            // and the two are not one rule twice: that one stops a partial body being appended
+            // at all, this one stops the completion flag whoever the caller is - the fuzz
+            // targets and TlsQuicHttp3RequestTests drive this type with no connection above it.
+            IsComplete = !IsReset && _stage != Stage.BeforeFinalHeaders;
         }
 
         errorCode = NoError;
@@ -1778,6 +1887,26 @@ internal sealed class TlsQuicHttp3Response
         if (status is >= 100 and <= 199)
         {
             _interim.Add(fields);
+
+            // WHAT THIS SECTION COSTS, IN RFC 9114 s4.2.2's OWN UNITS: "the length of the name
+            // and value in bytes plus an overhead of 32 bytes for each field". The same
+            // arithmetic TlsQuicQpackDecoder applies to SETTINGS_MAX_FIELD_SECTION_SIZE, and
+            // the 32 is taken from TlsQuicQpackDynamicTable.EntrySizeOverhead rather than
+            // spelled a third time. It is a proxy for the managed cost rather than the cost
+            // itself - a string carries a header and a length of its own - and it is the right
+            // proxy because it is the number s4.2.2 already makes a peer's field sections
+            // answerable for.
+            //
+            // RUNNING AND NEVER DECREMENTED, because _interim is never trimmed: s4.1's interim
+            // sections are kept for the caller ("A 103 Early Hints carries link fields a caller
+            // may want", as InterimHeaderSections argues), so every one that arrives is one this
+            // reader holds until the exchange is dropped.
+            foreach (var field in fields)
+            {
+                _interimBytes += field.Name.Length + field.Value.Length
+                    + TlsQuicQpackDynamicTable.EntrySizeOverhead;
+            }
+
             return true;
         }
 

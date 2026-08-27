@@ -457,6 +457,43 @@ public sealed class TlsQuicHttp3SpecTests
         Assert.Empty(offenders);
     }
 
+    // ------------------------------------------------------------------------
+    // The three buffering ceilings refuse a non-positive value.
+    // ------------------------------------------------------------------------
+
+    // WHY A GUARD AT ALL, WHEN THE VALUE IS ONLY EVER COMPARED. Subsystem B populates this type
+    // from outside the library, and this file's header makes witnessing every guard the price
+    // of adding a property. A ceiling of zero closes the connection on the peer's first byte
+    // and a negative one on its zeroth, so neither is a narrow configuration - both are a
+    // connection that cannot be opened, and failing at the point the number is SET names the
+    // caller rather than the peer.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ANonPositiveBufferingCeilingIsRejected(int value)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new TlsQuicHttp3Spec { MaximumBufferedControlStreamBytes = value });
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new TlsQuicHttp3Spec { MaximumBufferedEncoderStreamBytes = value });
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new TlsQuicHttp3Spec { MaximumBufferedResponseBytes = value });
+    }
+
+    // NULL IS NOT A VALUE HERE BUT THE ABSENCE OF ONE, and only the encoder stream's ceiling
+    // can express it: it is the one of the three with something to derive from, RFC 9204
+    // s3.2.2's dynamic table capacity, so the library holds no default number for it and the
+    // knob is an override. Setting it back to null must therefore be legal, which the guard
+    // above would refuse if it were written over the nullable rather than inside it.
+    [Fact]
+    public void TheEncoderStreamCeilingMayBeLeftUnset()
+    {
+        Assert.Null(new TlsQuicHttp3Spec().MaximumBufferedEncoderStreamBytes);
+        Assert.Null(
+            new TlsQuicHttp3Spec { MaximumBufferedEncoderStreamBytes = null }
+                .MaximumBufferedEncoderStreamBytes);
+    }
+
     // A C# string literal with backslash escapes honoured, so a `\"` inside a message does
     // not end the match early and leak the rest of the sentence back into the scan.
     private static readonly Regex StringLiteral = new(
