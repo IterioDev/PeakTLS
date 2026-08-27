@@ -5537,9 +5537,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // COULD NOT: "The CRYPTO frame ... includes ... Offset", so a frame carrying the
             // second half of a message is complete in itself. The remainder stays in the list
             // and SendAnswerAsync builds another datagram for it.
+            // Indexed rather than frames.Skip(spentFrames): the same frames in the same order,
+            // without the LINQ partition object, on a list this method already owns.
             var cryptoBudget = DatagramPayloadBudget - spent;
-            foreach (var repaired in frames.Skip(spentFrames))
+            for (var r = spentFrames; r < frames.Count; r++)
             {
+                var repaired = frames[r];
                 cryptoBudget -= TlsQuicFrames.MeasureFrame(_frameMeasureScratch, repaired);
             }
 
@@ -5602,9 +5605,20 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             // WHAT THIS PACKET COSTS THE DATAGRAM, carried to the next level of the loop so
             // that two coalesced packets cannot each spend the whole budget.
-            spentAcrossLevels += LongHeaderPacketOverheadBound;
-            foreach (var built in frames)
+            //
+            // RESUMED FROM `spent` RATHER THAN RECOMPUTED FROM ZERO, and the two are the same
+            // number by construction: `spent` was set to this same spentAcrossLevels plus the
+            // same LongHeaderPacketOverheadBound plus the encoded size of the first
+            // `spentFrames` frames, and nothing removes a frame from the list between there and
+            // here. So the only frames still to be measured are the ones appended after that
+            // point - the repairs and this level's CRYPTO - and the loop below starts at
+            // spentFrames instead of re-encoding the ACK and whatever preceded it a second time.
+            // TlsQuicFrames.MeasureFrame measures BY ENCODING, deliberately (see its remarks),
+            // so a second pass over a frame is a second full encode of it.
+            spentAcrossLevels = spent;
+            for (var b = spentFrames; b < frames.Count; b++)
             {
+                var built = frames[b];
                 spentAcrossLevels += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, built);
             }
 
