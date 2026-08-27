@@ -135,7 +135,7 @@ internal readonly record struct TlsQuicHttp3Setting(ulong Identifier, ulong Valu
 //   QpackNameMatchPolicy            read by TlsQuicHttp3Request.TryEncodeFieldSection
 //   SendReservedFramesOnRequestStreams  read by TlsQuicHttp3Request.TryEncode
 //   MaximumBufferedControlStreamBytes   read by TlsQuicHttp3Streams.TryProcessPeerStream
-//   MaximumBufferedEncoderStreamBytes   read by TlsQuicHttp3Streams.TryProcessPeerStream
+//   MaximumBufferedEncoderStreamBytes   read by TlsQuicHttp3Streams' constructor
 //   MaximumBufferedResponseBytes        read by TlsQuicHttp3Connection.TryOpenRequest
 //
 // THE LAST THREE ARE THE ONE KIND OF PROPERTY THIS FILE'S SUMMARY SAYS IT DOES NOT HOLD -
@@ -268,38 +268,53 @@ internal sealed class TlsQuicHttp3Spec
     /// padding for cover still fits and a peer mining our heap does not.</remarks>
     internal const int DefaultMaximumBufferedControlStreamBytes = 64 * 1024;
 
-    /// <summary>The default ceiling on the unparsed tail of the peer's QPACK encoder stream:
-    /// 256 KiB.</summary>
+    /// <summary>How much room the peer's QPACK encoder-stream ceiling leaves ABOVE the dynamic
+    /// table capacity this endpoint advertised: 4 KiB.</summary>
     /// <remarks>
-    /// <para>FOUR TIMES THE LARGEST TABLE CAPACITY ANY SHIPPED FIXTURE ADVERTISES, and derived
-    /// from that rather than picked. RFC 9204 s3.2.2 bounds a dynamic table entry by the
-    /// capacity this endpoint advertised in SETTINGS_QPACK_MAX_TABLE_CAPACITY, so the longest
-    /// s4.3.2 Insert With Literal Name a conforming encoder can usefully send is about that
-    /// capacity plus its two prefixes; 65536 is the value the presets and test fixtures in this
-    /// tree use, and headroom of four times it covers an instruction split across pumps and a
-    /// short backlog behind it.</para>
-    /// <para>A BACKLOG IS THE ONE LEGITIMATE WAY THIS FILLS. TlsQuicHttp3Streams defers the
-    /// peer's encoder stream until this endpoint's own decoder stream exists, because RFC 9204
-    /// s2.2.2.3's Insert Count Increment would otherwise have nowhere to go - so the bytes that
-    /// arrive in that window are held rather than parsed, and the ceiling has to clear
-    /// them.</para>
+    /// <para>NOT A CEILING, A TERM IN ONE. The encoder-stream ceiling is
+    /// <c>advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY + this</c>, resolved in
+    /// <see cref="TlsQuicHttp3Streams"/>'s constructor, and the capacity is the load-bearing
+    /// half: RFC 9204 s3.2.2 makes it "an error if the encoder attempts to add an entry that is
+    /// larger than the dynamic table capacity", so the largest s4.3.2 Insert With Literal Name
+    /// a conforming peer can usefully send is bounded by the number we advertised. A ceiling
+    /// that did not track that number would fire on a caller's first legal large insert the
+    /// moment it raised the capacity through <see cref="Settings"/>.</para>
+    /// <para>THIS EARLIER READ 256 KiB, A CONSTANT DERIVED FROM A TEST FIXTURE'S 65536 - one
+    /// preset's choice mistaken for the library's capability, which is the placeholder-value
+    /// defect this project's rules forbid. The number here is now only the slack.</para>
+    /// <para>WHAT THE SLACK IS FOR, both parts of it. An instruction carries its entry plus
+    /// s3.2.1's 32-byte allowance and two prefixed integers, so the largest legal one is
+    /// slightly ABOVE the capacity rather than at it. And <see cref="TlsQuicHttp3Streams"/>
+    /// defers the peer's encoder stream entirely while this endpoint has no decoder stream to
+    /// answer RFC 9204 s2.2.2.3's Insert Count Increment on, so a short backlog can accumulate
+    /// in that window without any of it being parseable yet.</para>
     /// </remarks>
-    internal const int DefaultMaximumBufferedEncoderStreamBytes = 256 * 1024;
+    internal const int EncoderStreamCeilingHeadroomBytes = 4 * 1024;
 
     /// <summary>The default ceiling on what one response reader holds: 64 MiB.</summary>
     /// <remarks>
+    /// <para>A RESPONSE LARGER THAN THIS IS REFUSED, NOT TRUNCATED, and the refusal is loud:
+    /// <see cref="TlsQuicHttp3Response.TryRead"/> answers <see langword="false"/> with
+    /// H3_EXCESSIVE_LOAD and STAYS failed, so a caller sees an error rather than a short
+    /// <see cref="TlsQuicHttp3Response.Body"/> it might mistake for the whole thing. Raise this
+    /// to fetch more; there is no setting that truncates instead.</para>
     /// <para>THE WHOLE RESPONSE, BECAUSE THIS READER'S API IS THE WHOLE RESPONSE.
     /// <see cref="TlsQuicHttp3Response.Body"/> hands back every DATA frame's payload
-    /// concatenated, so a caller downloading more than this already had no way to avoid holding
-    /// it - the ceiling turns an out-of-memory into an s8.1 code naming the peer that caused
-    /// it.</para>
-    /// <para>AND IT IS CHARGED ONCE FOR A BODY THAT IS RESIDENT MORE THAN ONCE. The reader's
-    /// unparsed tail and its accumulated content are counted together against this one number,
-    /// which is what makes it a bound on this type's memory rather than on either half; the
-    /// QUIC stream underneath keeps its own delivered copy besides, so the process's real high
-    /// water mark is a multiple of this. 64 MiB is past any document, API payload or script
-    /// bundle a browser-shaped client fetches and short of the size at which that multiple is
-    /// the whole heap.</para>
+    /// concatenated out of one <see cref="List{T}"/>, so the type cannot stream and a caller
+    /// fetching more than this was always going to hold all of it. Something has to bound that,
+    /// and the platform's own bound is far too high to be a safety net: a
+    /// <see cref="List{T}"/> grows by doubling, so a 1 GiB body transiently asks for 2 GiB
+    /// before <see cref="Array.MaxLength"/> refuses it, and the failure is an
+    /// <see cref="OutOfMemoryException"/> that names nothing. The ceiling turns that into an
+    /// s8.1 code naming the peer that caused it.</para>
+    /// <para>WHY 64 MiB AND NOT MORE. The number is charged against three of this reader's
+    /// lists at once - the unparsed tail, the accumulated content and the interim sections -
+    /// which is what makes it a bound on the type's memory rather than on one field of it; and
+    /// the QUIC stream underneath keeps its own delivered copy besides, so the process's real
+    /// high water mark is a multiple of this. 64 MiB is past any document, API payload or
+    /// script bundle a browser-shaped client fetches, and short of the size at which that
+    /// multiple is the whole heap. A caller doing bulk transfer raises it and knows it
+    /// has.</para>
     /// </remarks>
     internal const int DefaultMaximumBufferedResponseBytes = 64 * 1024 * 1024;
 
@@ -316,8 +331,7 @@ internal sealed class TlsQuicHttp3Spec
         TlsQuicQpackNameMatchPolicy.NameReference;
     private readonly int _maximumBufferedControlStreamBytes =
         DefaultMaximumBufferedControlStreamBytes;
-    private readonly int _maximumBufferedEncoderStreamBytes =
-        DefaultMaximumBufferedEncoderStreamBytes;
+    private readonly int? _maximumBufferedEncoderStreamBytes;
     private readonly int _maximumBufferedResponseBytes = DefaultMaximumBufferedResponseBytes;
 
     /// <summary>Gets the SETTINGS frame's parameters, in the order they go on the wire.</summary>
@@ -703,14 +717,16 @@ internal sealed class TlsQuicHttp3Spec
     /// <remarks>
     /// <para>Default <see cref="DefaultMaximumBufferedControlStreamBytes"/>, whose remarks argue
     /// the number. Read by <see cref="TlsQuicHttp3Streams.TryProcessPeerStreams"/>.</para>
-    /// <para>IT BOUNDS WHAT ARRIVED, NOT WHAT WAS DECLARED, and the difference is what makes one
-    /// check enough. RFC 9114 s7.1's Length is a varint running to 2^62-1 and
-    /// <see cref="TlsQuicHttp3Frames.TryRead"/> refuses only the part of that range no
+    /// <para>IT BOUNDS THE RESIDUE - what is left after every whole frame has been read - AND
+    /// NOT WHAT ARRIVED OR WHAT WAS DECLARED. All three are different numbers and only the
+    /// residue is the one worth refusing. RFC 9114 s7.1's Length is a varint running to 2^62-1
+    /// and <see cref="TlsQuicHttp3Frames.TryRead"/> refuses only the part of that range no
     /// <see cref="ReadOnlySpan{T}"/> could ever carry, so a peer declaring 2 GB is answered
-    /// <see cref="TlsQuicHttp3FrameReadStatus.Incomplete"/> and its bytes accumulate. A second
-    /// check on the DECLARED length would fail such a frame sooner and would be a second copy
-    /// of one rule: a peer that declares 2 GB and sends ten bytes has cost us ten bytes, and it
-    /// is the arrival of the 64th kibibyte that this endpoint actually cannot afford.</para>
+    /// <see cref="TlsQuicHttp3FrameReadStatus.Incomplete"/> and its bytes sit unparsed - that is
+    /// the residue, and it grows without bound. A check on the DECLARED length would refuse a
+    /// frame that has cost nothing yet; a check on what ARRIVED in one pass would refuse a peer
+    /// that sent a great many complete, legal frames at once, which the very next statement
+    /// would have consumed in full.</para>
     /// <para>s8.1's H3_EXCESSIVE_LOAD - "The endpoint detected that its peer is exhibiting a
     /// behavior that might be generating excessive load" - is the code, and not
     /// H3_FRAME_ERROR: the frame is legal and it is our ceiling that ran out. See
@@ -733,8 +749,6 @@ internal sealed class TlsQuicHttp3Spec
     /// <summary>Gets how many bytes of the peer's QPACK encoder stream this endpoint will hold
     /// unparsed before closing the connection with <c>QPACK_ENCODER_STREAM_ERROR</c>.</summary>
     /// <remarks>
-    /// <para>Default <see cref="DefaultMaximumBufferedEncoderStreamBytes"/>, whose remarks argue
-    /// the number. Read by <see cref="TlsQuicHttp3Streams.TryProcessPeerStreams"/>.</para>
     /// <para>A DIFFERENT CODE FROM ITS TWO SIBLINGS, AND RFC 9204 s7.4 SAYS WHICH: "If an
     /// implementation encounters a value larger than it is able to decode, this MUST be treated
     /// as a stream error of type QPACK_DECOMPRESSION_FAILED if on a request stream or a
@@ -748,15 +762,27 @@ internal sealed class TlsQuicHttp3Spec
     /// could complete it - which the table maps to "need more data" and which parks the
     /// instruction forever. Nothing inside the primitives knows how long this endpoint is
     /// willing to wait; the stream layer that owns the buffer does.</para>
+    /// <para>NULLABLE, AND NULL IS THE DEFAULT AND THE NORMAL ANSWER. Unlike its two siblings
+    /// this ceiling has something to be derived FROM, so the library does not hold a number for
+    /// it: <see cref="TlsQuicHttp3Streams"/> computes the advertised
+    /// SETTINGS_QPACK_MAX_TABLE_CAPACITY plus
+    /// <see cref="EncoderStreamCeilingHeadroomBytes"/> at construction. A value set here is an
+    /// OVERRIDE - a caller saying it knows something the advertised capacity does not imply -
+    /// and it detaches the ceiling from the capacity, which is the one way to make it too small
+    /// for a peer's legal instruction.</para>
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">Zero or negative.</exception>
-    internal int MaximumBufferedEncoderStreamBytes
+    /// <exception cref="ArgumentOutOfRangeException">Set to zero or a negative number. Null is
+    /// not a value here but the absence of one, so it is not checked.</exception>
+    internal int? MaximumBufferedEncoderStreamBytes
     {
         get => _maximumBufferedEncoderStreamBytes;
         init
         {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(
-                value, nameof(MaximumBufferedEncoderStreamBytes));
+            if (value is { } explicitCeiling)
+            {
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(
+                    explicitCeiling, nameof(MaximumBufferedEncoderStreamBytes));
+            }
             _maximumBufferedEncoderStreamBytes = value;
         }
     }
@@ -769,11 +795,18 @@ internal sealed class TlsQuicHttp3Spec
     /// number. Read by <see cref="TlsQuicHttp3Connection.TryOpenRequest"/>, which hands it to
     /// every <see cref="TlsQuicHttp3Response"/> it constructs; a caller constructing that type
     /// directly gets no ceiling, exactly as it gets no field-section limit.</para>
-    /// <para>ONE NUMBER FOR TWO LISTS, WHICH IS WHY IT IS NOT TWO KNOBS. The unparsed tail is
-    /// where a DATA frame lands while it is still arriving and the content is where it goes
-    /// once it is whole, so a byte moves from one to the other and the pair is a single
-    /// quantity - this reader's footprint. Two ceilings would let a peer sit just under both
-    /// and cost twice what either named.</para>
+    /// <para>ONE NUMBER FOR THREE LISTS, WHICH IS WHY IT IS NOT THREE KNOBS. The unparsed tail
+    /// is where a frame lands while it is still arriving, the content is where a DATA payload
+    /// goes once its frame is whole, and the interim sections are RFC 9114 s4.1's "zero or more
+    /// interim HTTP responses" kept for the caller - three places one peer fills, so the
+    /// quantity worth bounding is their sum, this reader's footprint. Three ceilings would let
+    /// a peer sit just under each and cost three times what any of them named.</para>
+    /// <para>MEASURED AFTER EACH PARSE, NOT AS BYTES ARRIVE, so a peer sending fast is not
+    /// confused with a peer sending a frame Length it never intends to satisfy. What is counted
+    /// is what this reader still holds when the pass is over.</para>
+    /// <para>A RESPONSE PAST IT IS REFUSED RATHER THAN TRUNCATED - see
+    /// <see cref="DefaultMaximumBufferedResponseBytes"/>, which argues the number and the
+    /// failure mode.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">Zero or negative.</exception>
     internal int MaximumBufferedResponseBytes

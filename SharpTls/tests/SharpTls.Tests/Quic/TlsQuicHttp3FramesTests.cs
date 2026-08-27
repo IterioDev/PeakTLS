@@ -93,12 +93,15 @@ public sealed class TlsQuicHttp3FramesTests
             Assert.True(seen.Add((ulong)code), $"{code} duplicates another member's value");
         }
 
-        // And the enum is not vacuously conforming because it is empty. Seven members carry an
+        // And the enum is not vacuously conforming because it is empty. Eight members carry an
         // s8.1 code today - H3_STREAM_CREATION_ERROR, H3_CLOSED_CRITICAL_STREAM,
-        // H3_FRAME_UNEXPECTED, H3_FRAME_ERROR, H3_SETTINGS_ERROR, H3_MISSING_SETTINGS and
-        // H3_MESSAGE_ERROR - which is a floor and not a pin, because s8.1 defines seventeen and
-        // this enum carries only the ones something raises.
-        Assert.True(seen.Count >= 7);
+        // H3_FRAME_UNEXPECTED, H3_FRAME_ERROR, H3_EXCESSIVE_LOAD, H3_SETTINGS_ERROR,
+        // H3_MISSING_SETTINGS and H3_MESSAGE_ERROR - which is a floor and not a pin, because
+        // s8.1 defines seventeen and this enum carries only the ones something raises. THE
+        // COUNT IN THE PROSE IS KEPT IN STEP BY HAND AND THE ASSERTION IS DELIBERATELY `>=`:
+        // pinning it would make every future code this subsystem starts raising a test failure
+        // rather than a passing addition, which is the opposite of what a floor is for.
+        Assert.True(seen.Count >= 8);
     }
 
     // ------------------------------------------------------------------------

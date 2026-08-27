@@ -616,6 +616,143 @@ public sealed class TlsQuicHttp3StreamsTests
     }
 
     // ------------------------------------------------------------------------
+    // The ceilings measure the RESIDUE, which is the half the first attempt got wrong.
+    // ------------------------------------------------------------------------
+    //
+    // THE FIRST VERSION OF BOTH GUARDS RAN BEFORE THE PARSE, over everything that had arrived
+    // in the pass. That refuses a peer for sending FAST as readily as for sending a Length it
+    // never satisfies, and the two rows below are the difference: each delivers well past its
+    // narrowed ceiling in one call and each byte is part of a whole, legal, immediately
+    // consumable unit. Without the reordering they close the connection.
+
+    [Fact]
+    public void AControlStreamDeliveringWholeFramesPastTheCeilingIsAccepted()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.DatagramCapable,
+                MaximumBufferedControlStreamBytes = 32,
+            },
+            set);
+        http3.OpenLocalStreams();
+
+        // s6.2.1's SETTINGS, then eight s7.2.8 reserved frames of sixteen payload bytes each -
+        // 150-odd bytes, nearly five times the ceiling, and not one byte of it still owed. s9
+        // requires the reserved frames to be ignored, so TryParseControlFrames consumes every
+        // one and leaves a residue of zero.
+        var control = new List<byte> { (byte)TlsQuicHttp3StreamType.Control };
+        TlsQuicHttp3Frames.Write(control, (ulong)TlsQuicHttp3FrameType.Settings, []);
+        for (var i = 0; i < 8; i++)
+        {
+            TlsQuicHttp3Frames.Write(
+                control, TlsQuicHttp3Frames.ReservedIdentifier(0), new byte[16]);
+        }
+
+        Assert.True(control.Count > 32 * 4);
+        Deliver(set, PeerUni0, control.ToArray());
+
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0ul, error);
+        Assert.True(http3.PeerSettingsReceived);
+    }
+
+    [Fact]
+    public void AnEncoderStreamDeliveringWholeInstructionsPastTheCeilingIsAccepted()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.DatagramCapable,
+                MaximumBufferedEncoderStreamBytes = 32,
+            },
+            set);
+        http3.OpenLocalStreams();
+
+        // Six complete s4.3.2 Insert With Literal Name instructions in one delivery. Every one
+        // is consumed by TryReadEncoderInstructions, so the table advances and nothing is left
+        // behind for the ceiling to measure - the InsertCount assertion is what says the bytes
+        // were PARSED rather than merely tolerated.
+        //
+        // THE Set Dynamic Table Capacity IS NOT DECORATION. RFC 9204 s3.2.2 starts the table at
+        // a capacity of zero whatever SETTINGS_QPACK_MAX_TABLE_CAPACITY advertised - the
+        // setting is the MAXIMUM the encoder may ask for - so an insert before it is one the
+        // table has no room for, which is its own QPACK_ENCODER_STREAM_ERROR and would have
+        // made this row pass for the wrong reason.
+        var instructions = new List<byte> { (byte)TlsQuicHttp3StreamType.QpackEncoder };
+        instructions.AddRange(SetCapacity(4096));
+        for (var i = 0; i < 6; i++)
+        {
+            instructions.AddRange(Insert($"name-{i}", "a value long enough to matter"));
+        }
+
+        Assert.True(instructions.Count > 32 * 4);
+        Deliver(set, PeerUni0, instructions.ToArray());
+
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0ul, error);
+        Assert.Equal(6ul, http3.Table!.InsertCount);
+    }
+
+    // ------------------------------------------------------------------------
+    // Where the encoder stream's ceiling comes from.
+    // ------------------------------------------------------------------------
+
+    // RFC 9204 s3.2.2 makes it "an error if the encoder attempts to add an entry that is larger
+    // than the dynamic table capacity", so the capacity THIS endpoint advertises is what bounds
+    // the largest instruction a conforming peer can send - and therefore what the ceiling has
+    // to follow. THE FIRST VERSION WAS A CONSTANT OF 256 KiB read off a test fixture's 65536,
+    // which fires on the first legal instruction of any caller who advertises more.
+    //
+    // ONE TRUNCATED INSTRUCTION, TWO CAPACITIES, AND NOTHING ELSE DIFFERENT. The bytes are
+    // identical in both rows; only SETTINGS_QPACK_MAX_TABLE_CAPACITY moves. A constant ceiling
+    // would give both rows the same answer whichever constant it was.
+    [Fact]
+    public void TheEncoderStreamCeilingFollowsTheAdvertisedTableCapacity()
+    {
+        // Just past the 4 KiB of headroom the derivation adds, so a capacity of 1 cannot cover
+        // it and a capacity of 64 KiB covers it with room to spare.
+        var instruction = Insert(new string('a', 5000), "value");
+        byte[] stream = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. instruction[..^1]];
+
+        Assert.False(ProcessedAtCapacity(stream, capacity: 1, out var narrowError));
+        Assert.Equal(TlsQuicQpackDynamicTable.QpackEncoderStreamError, narrowError);
+
+        Assert.True(ProcessedAtCapacity(stream, capacity: 65536, out var wideError));
+        Assert.Equal(0ul, wideError);
+    }
+
+    // s3.2.3's zero-capacity arm, which TryReadEncoderStream answers by DISCARDING the buffer -
+    // there being no table for the instructions to drive. The ceiling is checked after that
+    // discard and not before, so an endpoint that advertised zero cannot be closed over bytes
+    // it had already decided to throw away. The first version of the guard ran ahead of the
+    // discard and closed the connection here.
+    [Fact]
+    public void AZeroCapacityEndpointDiscardsALargeEncoderBurstRatherThanClosing()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            // RFC 9204 s5: "SETTINGS_QPACK_MAX_TABLE_CAPACITY (0x01): The default value is
+            // zero", so a list that omits it has advertised zero.
+            new TlsQuicHttp3Spec
+            {
+                Settings = [new(TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier, 100)],
+                MaximumBufferedEncoderStreamBytes = 32,
+            },
+            set);
+        http3.OpenLocalStreams();
+        Assert.Null(http3.Table);
+
+        byte[] stream = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. new byte[512]];
+        Deliver(set, PeerUni0, stream);
+
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0ul, error);
+    }
+
+    // ------------------------------------------------------------------------
     // The sweep.
     // ------------------------------------------------------------------------
 
@@ -1179,6 +1316,23 @@ public sealed class TlsQuicHttp3StreamsTests
         return Assert.IsType<TlsQuicQpackDynamicTable>(http3.Table);
     }
 
+    // One peer encoder stream delivered whole, under a spec advertising `capacity` and taking
+    // the DERIVED ceiling - no MaximumBufferedEncoderStreamBytes override, which is the whole
+    // point of the row that calls this.
+    private static bool ProcessedAtCapacity(byte[] encoderStream, ulong capacity, out ulong error)
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = [new(TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier, capacity)],
+            },
+            set);
+        http3.OpenLocalStreams();
+        Deliver(set, PeerUni0, encoderStream);
+        return http3.TryProcessPeerStreams(out error);
+    }
+
     // s4.3.1's Set Dynamic Table Capacity: the 001 pattern, then the capacity on a 5-bit
     // prefix.
     private static byte[] SetCapacity(int capacity)
@@ -1193,7 +1347,10 @@ public sealed class TlsQuicHttp3StreamsTests
     // string literal and the value as an 8-bit prefix one.
     private static byte[] Insert(string name, string value)
     {
-        var instruction = new byte[256];
+        // SIZED FROM THE INPUTS rather than a flat 256. huffman:false never expands, and the
+        // two prefixed integers cost at most nine bytes each, so name + value + 32 always
+        // fits. A fixed scratch silently capped how long a name a test could build.
+        var instruction = new byte[name.Length + value.Length + 32];
         Assert.True(TlsQuicQpackPrimitives.TryEncodeStringLiteral(
             Encoding.ASCII.GetBytes(name), 6, 0b0100_0000, huffman: false,
             instruction, out var nameLength));

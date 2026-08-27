@@ -1365,7 +1365,7 @@ internal sealed class TlsQuicHttp3Response
 
     private readonly long _maximumFieldSectionSize;
 
-    // The ceiling on _pending.Count + _body.Count, audit finding #6's third buffer. NOT THE
+    // The ceiling on _pending + _body + _interimBytes, audit finding #6's third buffer. NOT THE
     // SAME LIMIT AS _maximumFieldSectionSize AND NOT A SUBSTITUTE FOR IT: s4.2.2's limit is on
     // the UNCOMPRESSED size of one field section and is applied by the QPACK decoder after a
     // HEADERS frame is whole, which is too late to stop a peer that never finishes one. This
@@ -1387,6 +1387,12 @@ internal sealed class TlsQuicHttp3Response
     // _pending together because a byte crosses from one to the other as its frame completes.
     private readonly List<byte> _body = [];
     private readonly List<ImmutableArray<TlsQuicHttp3Field>> _interim = [];
+
+    // What _interim has cost so far, in RFC 9114 s4.2.2's field-list units. A RUNNING TOTAL AND
+    // NOT A RECOMPUTATION, because the check that reads it runs once per TryRead and walking
+    // every field of every interim section each time would make a peer's 1xx flood quadratic -
+    // which is the shape of the very attack the ceiling exists to refuse.
+    private long _interimBytes;
 
     private Stage _stage = Stage.BeforeFinalHeaders;
 
@@ -1546,27 +1552,6 @@ internal sealed class TlsQuicHttp3Response
             _pending.Add(b);
         }
 
-        // AUDIT FINDING #6'S THIRD BUFFER, AND ONE CHECK COVERS BOTH HALVES OF IT. _pending and
-        // _body are the only two lists here that a peer can grow, and this is the only line at
-        // which either does: _body is filled from payloads that were in _pending a moment ago,
-        // so the pair's total rises exactly here and nowhere else. A check at each Add would be
-        // the same rule twice, in the two places most likely to drift apart.
-        //
-        // WHY THE ARITHMETIC IS A SUBTRACTION. _pending.Count + _body.Count is an int addition
-        // and a peer able to reach 2^31 bytes could wrap it to a negative that passes; the
-        // subtraction cannot overflow, because _maximumBufferedBytes and _body.Count are both
-        // non-negative ints and their difference stays in range. A ceiling already exceeded
-        // makes that difference negative, which no non-negative _pending.Count is ever `<=`.
-        //
-        // NOT s7.1's H3_FRAME_ERROR. Nothing about the peer's framing is wrong at this point -
-        // the frame it is sending may well be legal and simply larger than we chose to hold -
-        // and s8.1 gives H3_EXCESSIVE_LOAD to exactly that: "The endpoint detected that its
-        // peer is exhibiting a behavior that might be generating excessive load."
-        if (_pending.Count > _maximumBufferedBytes - _body.Count)
-        {
-            return Fail(ExcessiveLoad, out errorCode);
-        }
-
         var buffer = CollectionsMarshal.AsSpan(_pending);
         var offset = 0;
         while (offset < buffer.Length)
@@ -1611,6 +1596,43 @@ internal sealed class TlsQuicHttp3Response
         }
 
         _pending.RemoveRange(0, offset);
+
+        // AUDIT FINDING #6'S THIRD BUFFER, MEASURED AS A RESIDUE AND COVERING A FOURTH THE
+        // FINDING DID NOT NAME. Three lists here grow from the peer and nothing else shrinks
+        // them, so the ceiling is on their SUM:
+        //
+        //   * _pending, the tail of a frame that has not finished arriving. The RemoveRange
+        //     above has just dropped everything the loop could read, so what is counted is the
+        //     part no parse could take - which is the quantity the finding was about, and not
+        //     the same thing as how much arrived in this call.
+        //   * _body, s7.2.1's DATA payloads concatenated. Its bytes were in _pending a moment
+        //     ago, so the two are one quantity moving between two lists.
+        //   * _interim, one field section per s4.1 interim (1xx) response. THE FIRST VERSION OF
+        //     THIS CHECK ASSERTED THAT _pending AND _body WERE "the only two lists here that a
+        //     peer can grow", AND THAT WAS FALSE. s4.1 permits "zero or more interim HTTP
+        //     responses" with no bound on the count, and their bytes pass through _pending, are
+        //     consumed, and never reach _body - so a peer emitting 1xx responses forever grew
+        //     this reader without moving either of the other two numbers.
+        //
+        // AFTER THE LOOP AND NOWHERE ELSE, WHICH IS WHAT MAKES IT ONE CHECK RATHER THAN THREE.
+        // Parsing only moves bytes between these lists and drops frame headers, so the sum
+        // never rises during the loop above what it was when the loop began; measuring once at
+        // the end therefore bounds every path into all three. The transient peak inside one
+        // call is this ceiling plus the delivery that crossed it, which is the same bound
+        // TlsQuicHttp3Streams accepts for the same reason.
+        //
+        // A long ACCUMULATOR AND A long COMPARISON, because three int-shaped quantities added
+        // together can leave int's range even when none of them does, and a wrapped negative
+        // total would pass a check the peer had already broken.
+        //
+        // NOT s7.1's H3_FRAME_ERROR. Nothing about the peer's framing is wrong here - the
+        // frames may be legal and simply more than we chose to hold - and s8.1 gives
+        // H3_EXCESSIVE_LOAD to exactly that: "The endpoint detected that its peer is exhibiting
+        // a behavior that might be generating excessive load."
+        if ((long)_pending.Count + _body.Count + _interimBytes > _maximumBufferedBytes)
+        {
+            return Fail(ExcessiveLoad, out errorCode);
+        }
 
         // s7.1's leftover-at-FIN rule does NOT apply to a parked section, and neither does
         // s4.1's completeness. A peer may legally FIN its response stream while the encoder
@@ -1778,6 +1800,26 @@ internal sealed class TlsQuicHttp3Response
         if (status is >= 100 and <= 199)
         {
             _interim.Add(fields);
+
+            // WHAT THIS SECTION COSTS, IN RFC 9114 s4.2.2's OWN UNITS: "the length of the name
+            // and value in bytes plus an overhead of 32 bytes for each field". The same
+            // arithmetic TlsQuicQpackDecoder applies to SETTINGS_MAX_FIELD_SECTION_SIZE, and
+            // the 32 is taken from TlsQuicQpackDynamicTable.EntrySizeOverhead rather than
+            // spelled a third time. It is a proxy for the managed cost rather than the cost
+            // itself - a string carries a header and a length of its own - and it is the right
+            // proxy because it is the number s4.2.2 already makes a peer's field sections
+            // answerable for.
+            //
+            // RUNNING AND NEVER DECREMENTED, because _interim is never trimmed: s4.1's interim
+            // sections are kept for the caller ("A 103 Early Hints carries link fields a caller
+            // may want", as InterimHeaderSections argues), so every one that arrives is one this
+            // reader holds until the exchange is dropped.
+            foreach (var field in fields)
+            {
+                _interimBytes += field.Name.Length + field.Value.Length
+                    + TlsQuicQpackDynamicTable.EntrySizeOverhead;
+            }
+
             return true;
         }
 

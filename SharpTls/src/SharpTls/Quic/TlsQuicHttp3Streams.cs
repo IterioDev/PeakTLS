@@ -34,10 +34,12 @@ internal sealed class TlsQuicHttp3Streams
     // in-order reassembly, which is what a second offset-tracking buffer would amount to.
     private sealed class PeerStreamState
     {
-        // BOUNDED, AND BY TryEnforceBufferCeiling RATHER THAN BY ANYTHING HERE. This list is
-        // filled from the peer's bytes and drained only by a parser that succeeds, so a peer
-        // that declares more than it sends leaves it growing; the banner over that method
-        // argues which ceiling and which error code apply to which stream type.
+        // BOUNDED, BUT ONLY AS A RESIDUE AND NOT AS AN ARRIVAL. This list is filled from the
+        // peer's bytes and drained by whichever parser the stream's type selects, so what
+        // survives a pass through TryProcessPeerStream is exactly the prefix that parser could
+        // not take - a frame or an instruction whose declared length has not arrived. That
+        // leftover is what the two ceilings measure, each at the point its own parser has
+        // finished; a check taken before the parse would refuse a peer merely sending fast.
         internal readonly List<byte> Unparsed = [];
 
         // How many of TlsQuicStream.Received's bytes have been copied into Unparsed. Not how
@@ -83,6 +85,14 @@ internal sealed class TlsQuicHttp3Streams
     // static decoder that reads field sections.
     private readonly TlsQuicQpackDecoderStream _decoderStream = new();
 
+    // How much of the peer's encoder stream may sit unparsed. Resolved ONCE, in the
+    // constructor, because it is derived from this endpoint's own advertised
+    // SETTINGS_QPACK_MAX_TABLE_CAPACITY and those cannot change after the SETTINGS frame is
+    // sent. See DeriveEncoderStreamCeiling for the derivation and for why the spec's knob is
+    // an override rather than the source. The control stream's ceiling needs no field: it is
+    // read straight off the spec, having nothing to derive from.
+    private readonly int _encoderStreamCeiling;
+
     /// <summary>Creates the HTTP/3 stream layer over 14e's QUIC stream set.</summary>
     /// <exception cref="ArgumentNullException">Either argument is
     /// <see langword="null"/>.</exception>
@@ -121,6 +131,13 @@ internal sealed class TlsQuicHttp3Streams
 
         BlockedStreams = new TlsQuicQpackBlockedStreams(
             TlsQuicHttp3Settings.Value(spec.Settings, TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier) ?? 0);
+
+        // THE SAME `capacity` THE TABLE WAS BUILT FROM, which is the point: what this endpoint
+        // told the peer it would hold in its dynamic table is also what bounds the instruction
+        // stream that fills it. A null knob means derive; a value means the caller has said it
+        // knows better, and this is the only place either is read.
+        _encoderStreamCeiling =
+            spec.MaximumBufferedEncoderStreamBytes ?? DeriveEncoderStreamCeiling(capacity);
     }
 
     /// <summary>Gets the QUIC stream ids this client opened, in the order it opened
@@ -440,28 +457,29 @@ internal sealed class TlsQuicHttp3Streams
             return typeError == TlsQuicHttp3ErrorCode.None;
         }
 
-        // THE CEILING ON WHAT WE ARE WILLING TO HOLD, and the answer to a peer that declares a
-        // frame or a string literal it then feeds one byte at a time. Everything below this
-        // line either parses the buffer or defers it; nothing shrinks it on its own, so this is
-        // the last point at which a refusal costs only what has already arrived.
-        //
-        // AFTER TryTakeStreamType AND NOT BEFORE IT, because the type decides both the ceiling
-        // and the error code and a stream whose type has not arrived has neither. That ordering
-        // is free rather than lucky: a stream with no type varint yet is holding at most the
-        // eight bytes of a partial varint, RFC 9000 s16 admitting no longer encoding, so it
-        // cannot breach any ceiling a caller could sensibly set.
-        if (!TryEnforceBufferCeiling(state, out error))
-        {
-            return false;
-        }
-
         // C16's encoder-stream arm, and the ONE stream type that is neither the control stream
         // nor discarded. RFC 9204 s4.3's instructions are what drive the dynamic table, and
         // s2.1.2 is why they arrive here rather than inside a field section: "encoded field
         // sections and encoder stream instructions arrive on separate streams".
         if (state.StreamType == (ulong)TlsQuicHttp3StreamType.QpackEncoder)
         {
-            return TryReadEncoderStream(state, out error);
+            if (!TryReadEncoderStream(state, out error))
+            {
+                return false;
+            }
+
+            // THE RESIDUE, AND THE ZERO-CAPACITY ARM IS WHY THE ORDER MATTERS RATHER THAN
+            // MERELY BEING TIDIER. TryReadEncoderStream CLEARS this buffer when there is no
+            // table to drive, so an endpoint that advertised capacity 0 discards a peer's
+            // encoder burst harmlessly - and a ceiling checked ahead of that discard would
+            // close the connection over bytes this endpoint had already decided to throw away.
+            if (state.Unparsed.Count > _encoderStreamCeiling)
+            {
+                error = TlsQuicQpackDynamicTable.QpackEncoderStreamError;
+                return false;
+            }
+
+            return true;
         }
 
         // NO SECOND `if (state.Ignoring)` HERE, and its absence is deliberate. A stream that
@@ -472,6 +490,29 @@ internal sealed class TlsQuicHttp3Streams
         if (!TryParseControlFrames(state, out var frameError))
         {
             error = (ulong)frameError;
+            return false;
+        }
+
+        // WHAT THE LOOP ABOVE COULD NOT TAKE, WHICH IS THE ONLY QUANTITY WORTH BOUNDING.
+        // TryParseControlFrames runs until TlsQuicHttp3Frames.TryRead answers Incomplete, so
+        // every whole frame is already gone and what is left is one frame that has not finished
+        // arriving. THIS IS A CORRECTION OF THE FIRST ATTEMPT AT THIS GUARD, which measured the
+        // buffer BEFORE the loop and so refused a pass that delivered a lot of perfectly legal,
+        // wholly parseable frames at once - a peer sending fast is not a peer sending a Length
+        // it will never satisfy, and only the residue tells the two apart.
+        //
+        // s8.1's H3_EXCESSIVE_LOAD, "The endpoint detected that its peer is exhibiting a
+        // behavior that might be generating excessive load", and NOT H3_FRAME_ERROR: s7.1's
+        // Length is a varint to 2^62-1 and a frame declaring more than we will hold is legal,
+        // so the fault named is the load and not the layout. TlsQuicHttp3Frames.TryRead keeps
+        // H3_FRAME_ERROR for the one Length that IS invalid - above int.MaxValue, which no
+        // ReadOnlySpan could ever carry.
+        //
+        // BEFORE s6.2.1's FIN RULE BELOW AND NOT AFTER, because a peer that flooded us and then
+        // closed flooded first; both answers end the connection, and this one names the cause.
+        if (state.Unparsed.Count > _spec.MaximumBufferedControlStreamBytes)
+        {
+            error = (ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad;
             return false;
         }
 
@@ -504,55 +545,31 @@ internal sealed class TlsQuicHttp3Streams
         return true;
     }
 
-    // The bound audit finding #6 said was missing. PeerStreamState.Unparsed grew only from peer
-    // input and nothing ever refused to add to it: TlsQuicHttp3Frames.TryRead answers Incomplete
-    // for a control frame whose declared Length has not arrived, and RFC 9204 s4.1.2's string
-    // literal answers "truncated" for a literal whose declared length has not arrived, so BOTH
-    // of the two things this buffer feeds treat "not here yet" as a wait. That is right for a
-    // frame that is arriving and wrong for a Length no peer intends to satisfy, and the
-    // difference is not visible from inside either parser - which is why the ceiling is here,
-    // over the buffer, rather than in the codecs that answer Incomplete.
+    // WHERE THE ENCODER STREAM'S CEILING COMES FROM, AND WHY IT IS NOT A CONSTANT. RFC 9204
+    // s3.2.2 bounds a dynamic table entry by the capacity THIS endpoint advertised in
+    // SETTINGS_QPACK_MAX_TABLE_CAPACITY - "It is an error if the encoder attempts to add an
+    // entry that is larger than the dynamic table capacity" - so the longest s4.3.2 Insert With
+    // Literal Name a conforming peer can usefully send is that capacity plus the entry's own
+    // 32-byte allowance and two prefixed integers. The ceiling is therefore DERIVED from the
+    // number we advertised rather than fixed: a caller who raises the capacity through
+    // TlsQuicHttp3Spec.Settings raises what its peer may legally send in one instruction, and a
+    // constant here would fire on the first legal one.
     //
-    // TWO CEILINGS AND TWO CODES, PICKED BY THE STREAM AND NOT BY THE FAULT, because the fault
-    // is the same one in both places - we ran out of patience - and it is the stream the bytes
-    // arrived on that decides how a peer must be told:
+    // THE FIRST VERSION OF THIS WAS 256 KiB TAKEN FROM A TEST FIXTURE'S 65536, which is the
+    // placeholder-value defect this project's rules forbid twice over: it read one preset's
+    // choice as the library's capability, and it did so through a file under tests/.
     //
-    //   * The control stream takes RFC 9114 s8.1's H3_EXCESSIVE_LOAD, "The endpoint detected
-    //     that its peer is exhibiting a behavior that might be generating excessive load". Not
-    //     H3_FRAME_ERROR: s8.1 scopes that one to "a frame that fails to satisfy layout
-    //     requirements or with an invalid size", and a frame whose Length we simply declined to
-    //     accumulate has neither fault. TlsQuicHttp3Frames.TryRead still raises H3_FRAME_ERROR
-    //     for a Length above int.MaxValue, which IS an invalid size - no span can carry it - and
-    //     the two live one call apart rather than merged.
-    //   * The encoder stream takes RFC 9204 s6's QPACK_ENCODER_STREAM_ERROR, 0x0201, because
-    //     s7.4 says which registry answers: "If an implementation encounters a value larger than
-    //     it is able to decode, this MUST be treated as a stream error of type
-    //     QPACK_DECOMPRESSION_FAILED if on a request stream or a connection error of the
-    //     appropriate type if on the encoder or decoder stream." The number is taken from
-    //     TlsQuicQpackDynamicTable, which already holds it, rather than spelled a second time.
-    //
-    // A STREAM BEING IGNORED CANNOT BREACH EITHER, and needs no arm of its own: TryTakeStreamType
-    // clears Unparsed for every discarded type and TryProcessPeerStream returns before this on
-    // every later pass, so a push, decoder, GREASE or unknown stream holds nothing at all. That
-    // is what keeps s6.2's "The recipient MUST NOT consider unknown stream types to be a
-    // connection error of any kind" intact through this check.
-    private bool TryEnforceBufferCeiling(PeerStreamState state, out ulong error)
+    // s7.4's HEADROOM IS WHAT THE ADDITION IS FOR. "These limits SHOULD be large enough to
+    // process the largest individual field the HTTP implementation can be configured to
+    // accept", and the largest field is the capacity; the headroom covers that field's prefixes
+    // and the short backlog TryReadEncoderStream defers while this endpoint has no decoder
+    // stream to answer on. SATURATING rather than wrapping, because s7.2.4's Value is a varint
+    // to 2^62-1 and an unchecked cast of a huge advertised capacity gives a negative ceiling
+    // that every buffer breaches - the same trap the table's own construction avoids above.
+    private static int DeriveEncoderStreamCeiling(ulong advertisedCapacity)
     {
-        var isEncoderStream = state.StreamType == (ulong)TlsQuicHttp3StreamType.QpackEncoder;
-        var ceiling = isEncoderStream
-            ? _spec.MaximumBufferedEncoderStreamBytes
-            : _spec.MaximumBufferedControlStreamBytes;
-
-        if (state.Unparsed.Count <= ceiling)
-        {
-            error = (ulong)TlsQuicHttp3ErrorCode.None;
-            return true;
-        }
-
-        error = isEncoderStream
-            ? TlsQuicQpackDynamicTable.QpackEncoderStreamError
-            : (ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad;
-        return false;
+        var ceiling = advertisedCapacity + TlsQuicHttp3Spec.EncoderStreamCeilingHeadroomBytes;
+        return ceiling < int.MaxValue ? (int)ceiling : int.MaxValue;
     }
 
     // RFC 9204 s4.3's encoder instructions, and s2.2.2.3's feedback for them.

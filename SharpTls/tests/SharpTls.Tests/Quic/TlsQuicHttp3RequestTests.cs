@@ -2331,6 +2331,88 @@ public sealed class TlsQuicHttp3RequestTests
     }
 
     // ------------------------------------------------------------------
+    // The buffering ceiling - audit finding #6's third buffer, and a fourth.
+    // ------------------------------------------------------------------
+
+    // WHAT HAPPENS AT THE BOUNDARY, IN BOTH DIRECTIONS, because the shipped default of 64 MiB
+    // is a behaviour change for anyone fetching more than that and "refused, not truncated" is
+    // the half a caller must be able to rely on. A reader that answered true with a short Body
+    // would satisfy the over-the-line row alone; the under-the-line row is what says a response
+    // exactly AT the ceiling is a complete response and not a near miss.
+    //
+    // THE CEILING IS CHARGED AGAINST WHAT IS RETAINED, WHICH IS WHY THE NUMBER IS THE BODY'S.
+    // By the time TryRead returns, the DATA frame's own type and length octets have been parsed
+    // and dropped; only the payload is still held. So a ceiling of 128 admits a 128-byte body
+    // and refuses a 129-byte one, and the frame overhead does not enter into it.
+    [Theory]
+    [InlineData(128, true)]
+    [InlineData(129, false)]
+    public void AResponseIsRefusedOnlyOnceItsRetainedBytesPassTheCeiling(int bodyLength, bool accepted)
+    {
+        var script = Script(
+            (Headers, EncodeSection((":status", "200"))),
+            (Data, new byte[bodyLength]))
+            .ToArray();
+
+        var response = new TlsQuicHttp3Response(maximumBufferedBytes: 128);
+        Assert.Equal(accepted, response.TryRead(script, endOfStream: true, out var error));
+
+        if (accepted)
+        {
+            Assert.Equal(0ul, error);
+            Assert.Equal(bodyLength, response.Body.Length);
+            Assert.True(response.IsComplete);
+        }
+        else
+        {
+            Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad, error);
+        }
+    }
+
+    // THE FOURTH BUFFER, WHICH THE AUDIT DID NOT NAME AND THE FIRST FIX ASSERTED AWAY. That
+    // fix's comment claimed _pending and _body were "the only two lists here that a peer can
+    // grow"; RFC 9114 s4.1 permits "zero or more interim HTTP responses" with no bound on the
+    // count, and an interim section's bytes pass through _pending, are consumed, and never
+    // reach _body - so neither of the two counted numbers moves while the reader grows.
+    //
+    // NOTHING HERE IS MALFORMED. Every 103 below is a legal interim response in a legal place;
+    // s4.1 would let this stream run forever. The refusal is s8.1's excessive load and not
+    // s4.1's malformed message, and the assertion on InterimHeaderSections is what says the
+    // reader really was accumulating them rather than rejecting the second one on some other
+    // rule.
+    [Fact]
+    public void AFloodOfInterimResponsesIsRefusedOnceItPassesTheCeiling()
+    {
+        // Each 103 costs its two fields' names and values plus s4.2.2's 32 bytes apiece, so a
+        // handful clears a ceiling of 512 while no single one comes close to it.
+        var interim = Script(
+            (Headers, EncodeSection((":status", "103"), ("link", "</style.css>; rel=preload"))))
+            .ToArray();
+
+        var response = new TlsQuicHttp3Response(maximumBufferedBytes: 512);
+
+        ulong error = 0;
+        var refusedAt = -1;
+        for (var i = 0; i < 64 && refusedAt < 0; i++)
+        {
+            if (!response.TryRead(interim, endOfStream: false, out error))
+            {
+                refusedAt = i;
+            }
+        }
+
+        Assert.InRange(refusedAt, 1, 63);
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad, error);
+
+        // ONE MORE SECTION THAN THE CALL THAT REFUSED, and the off-by-one is the design rather
+        // than a slip: the ceiling is measured AFTER the parse, so the section that crossed it
+        // is kept and then the reader fails. Charging it before it was decoded would mean
+        // guessing an uncompressed size from compressed bytes, which is the thing RFC 9204
+        // s4.5's representations make impossible to do in advance.
+        Assert.Equal(refusedAt + 1, response.InterimHeaderSections.Count);
+    }
+
+    // ------------------------------------------------------------------
     // The failure is sticky, and nothing throws.
     // ------------------------------------------------------------------
 
