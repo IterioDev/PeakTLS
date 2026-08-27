@@ -2573,7 +2573,108 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
                 ThrowIfIntegrityLimitReached();
 
+                AccountForPacket(outcome);
+
+                if (outcome.Processed > 0)
+                {
+                    // RFC 9000 s17.2.5.2's "After the client has received and processed an
+                    // Initial or Retry packet from the server, it MUST discard any subsequent
+                    // Retry packets that it receives", and the same word in
+                    // TlsQuicVersionNegotiation's contract: a Version Negotiation packet "MUST
+                    // be ignored once a packet for the connection has been successfully
+                    // processed". PROCESSED IS THE AEAD'S VERDICT, not the parser's, which is
+                    // what stops an off-path sender arming either rule with a forgery.
+                    _processedServerPacket = true;
+
+                    // RFC 9000 s10.1: "An endpoint restarts its idle timer when a packet from
+                    // its peer is received and processed successfully."
+                    _idleSince = now;
+                    _sentAckElicitingSinceReceive = false;
+                }
+
+                if (peerClosed)
+                {
+                    // s10.2.2: "While otherwise identical to the closing state, an endpoint in
+                    // the draining state MUST NOT send any packets." Set before the send below
+                    // rather than after it, which is the whole content of the MUST here.
+                    _draining = true;
+                }
+
+                if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
+                {
+                    // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
+                    // why this sits after the AEAD. A Source Connection ID taken off
+                    // unauthenticated input would let an off-path sender choose the value every
+                    // later packet is measured against, which is the influence s7.3's last
+                    // paragraph exists to deny.
+                    _validatedServerSourceConnectionId ??= validated;
+
+                    // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
+                    // FINDING 7. "Upon first receiving an Initial or Retry packet from the
+                    // server, the client uses the Source Connection ID supplied by the server
+                    // as the Destination Connection ID for subsequent packets." This used to
+                    // run in AcceptedUnderSection122, before _receiver.Receive and therefore
+                    // before any AEAD, so one injected long header - the client's Initial
+                    // Destination Connection ID is in the clear, so it is guessable or simply
+                    // observable - permanently redirected this endpoint. See the note left at
+                    // the old site for the whole argument.
+                    //
+                    // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
+                    // optimisation: "A client MUST change the Destination Connection ID it uses
+                    // for sending packets in response to only the first received Initial or
+                    // Retry packet." The flag below is that MUST, and it is witnessed rather
+                    // than assumed - deleting it used to leave the whole gate green.
+                    //
+                    // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
+                    // the Destination Connection ID of the client's FIRST Initial packet, which
+                    // is OriginalDestinationConnectionId and is not touched here. Adoption
+                    // changes what we ADDRESS, not what we key with. (Retry is the one thing
+                    // that moves both, and HandleRetryAsync owns it under its own flag.)
+                    //
+                    // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
+                    // runs to completion before any answer is built, so the datagram that
+                    // replies to this packet already carries the server's chosen value.
+                    if (!_adoptedServerConnectionId)
+                    {
+                        _destinationConnectionId = validated;
+                        _adoptedServerConnectionId = true;
+                    }
+                }
+
                 // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
+                //
+                // BELOW s7.2's ADOPTION, AND THAT POSITION IS THE ADDRESS ON THE CLOSE. These
+                // four used to sit above it, which was correct until finding 7 moved the
+                // adoption behind the AEAD and left them running first: a violation found in
+                // the server's FIRST authenticated Initial then sent its CONNECTION_CLOSE to
+                // the client's own original Destination Connection ID - the value s7.2 says
+                // must already have changed, because "Upon first receiving an Initial or Retry
+                // packet from the server, the client uses the Source Connection ID supplied by
+                // the server as the Destination Connection ID for subsequent packets", and a
+                // close is a subsequent packet. Servers route handshake Initials by the
+                // original value, so the practical cost was small; the rule is not conditional
+                // on that. The packet that taught us the address is the same packet that
+                // raised the failure, so the close is addressed with what it taught us.
+                //
+                // ARGUED RATHER THAN WITNESSED, AND THE REASON IS THE HARNESS. Separating the
+                // two addresses needs a server that both picks its own Source Connection ID and
+                // commits a violation in the same authenticated packet. LoopbackQuicPeer.ForServer
+                // cannot: its Source Connection ID is "the client-chosen Destination Connection
+                // ID it learned from the wire", so the adoption is value-neutral against it, and
+                // the scripted transport that CAN choose a Source Connection ID builds only
+                // conforming replies. A witness would be new harness plumbing rather than a new
+                // assertion; the ordering is stated here so a later reader does not restore it.
+                //
+                // AND BELOW `peerClosed`, WHICH IS A SECOND RULE RATHER THAN A SIDE EFFECT.
+                // s10.2.2: "While otherwise identical to the closing state, an endpoint in the
+                // draining state MUST NOT send any packets." A datagram that carries both the
+                // peer's CONNECTION_CLOSE and a violation now sends nothing and only throws -
+                // CloseCoreAsync's own draining guard sees the flag - which is what that MUST
+                // asks for.
+                //
+                // STILL ABOVE ProcessCryptoDataAsync, unchanged: a datagram that violates the
+                // protocol must not advance the TLS handshake first.
+                //
                 // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
                 // can be used after the handshake is complete or during the handshake ... An
                 // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
@@ -2649,74 +2750,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                     await CloseAsync(closeError, message, cancellationToken)
                         .ConfigureAwait(false);
                     throw new InvalidOperationException(message);
-                }
-
-                AccountForPacket(outcome);
-
-                if (outcome.Processed > 0)
-                {
-                    // RFC 9000 s17.2.5.2's "After the client has received and processed an
-                    // Initial or Retry packet from the server, it MUST discard any subsequent
-                    // Retry packets that it receives", and the same word in
-                    // TlsQuicVersionNegotiation's contract: a Version Negotiation packet "MUST
-                    // be ignored once a packet for the connection has been successfully
-                    // processed". PROCESSED IS THE AEAD'S VERDICT, not the parser's, which is
-                    // what stops an off-path sender arming either rule with a forgery.
-                    _processedServerPacket = true;
-
-                    // RFC 9000 s10.1: "An endpoint restarts its idle timer when a packet from
-                    // its peer is received and processed successfully."
-                    _idleSince = now;
-                    _sentAckElicitingSinceReceive = false;
-                }
-
-                if (peerClosed)
-                {
-                    // s10.2.2: "While otherwise identical to the closing state, an endpoint in
-                    // the draining state MUST NOT send any packets." Set before the send below
-                    // rather than after it, which is the whole content of the MUST here.
-                    _draining = true;
-                }
-
-                if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
-                {
-                    // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
-                    // why this sits after the AEAD. A Source Connection ID taken off
-                    // unauthenticated input would let an off-path sender choose the value every
-                    // later packet is measured against, which is the influence s7.3's last
-                    // paragraph exists to deny.
-                    _validatedServerSourceConnectionId ??= validated;
-
-                    // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
-                    // FINDING 7. "Upon first receiving an Initial or Retry packet from the
-                    // server, the client uses the Source Connection ID supplied by the server
-                    // as the Destination Connection ID for subsequent packets." This used to
-                    // run in AcceptedUnderSection122, before _receiver.Receive and therefore
-                    // before any AEAD, so one injected long header - the client's Initial
-                    // Destination Connection ID is in the clear, so it is guessable or simply
-                    // observable - permanently redirected this endpoint. See the note left at
-                    // the old site for the whole argument.
-                    //
-                    // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
-                    // optimisation: "A client MUST change the Destination Connection ID it uses
-                    // for sending packets in response to only the first received Initial or
-                    // Retry packet." The flag below is that MUST, and it is witnessed rather
-                    // than assumed - deleting it used to leave the whole gate green.
-                    //
-                    // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
-                    // the Destination Connection ID of the client's FIRST Initial packet, which
-                    // is OriginalDestinationConnectionId and is not touched here. Adoption
-                    // changes what we ADDRESS, not what we key with. (Retry is the one thing
-                    // that moves both, and HandleRetryAsync owns it under its own flag.)
-                    //
-                    // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
-                    // runs to completion before any answer is built, so the datagram that
-                    // replies to this packet already carries the server's chosen value.
-                    if (!_adoptedServerConnectionId)
-                    {
-                        _destinationConnectionId = validated;
-                        _adoptedServerConnectionId = true;
-                    }
                 }
 
                 foreach (var chunk in chunks)
