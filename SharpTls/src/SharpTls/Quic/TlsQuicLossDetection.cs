@@ -905,11 +905,39 @@ internal sealed partial class TlsQuicConnection
             take++;
         }
 
-        // ONE FRAME LARGER THAN THE WHOLE BUDGET IS NOT LEFT TO STARVE. It cannot be split here
-        // - a CRYPTO frame's offsets belong to the TLS endpoint that produced it - so it goes
-        // out oversized and the send path reports the refusal, which is a legible failure
-        // rather than a queue that never drains and a handshake that never completes.
-        if (take == 0)
+        // A CRYPTO FRAME THAT DOES NOT FIT IS SPLIT, AND THE CLAIM THAT IT COULD NOT BE WAS
+        // THIS METHOD'S OWN AND WAS WRONG. RFC 9000 s19.6 gives CRYPTO an explicit Offset, so a
+        // frame carrying the tail of a message is complete in itself - which is exactly why the
+        // fresh-CRYPTO arm in BuildAnswerDatagram chunks. What the offsets being "the TLS
+        // endpoint's" rules out is INVENTING one, not advancing a known one by the bytes
+        // already taken.
+        //
+        // THIS IS THE ARM THE FIELD REPORTS LANDED ON. SendInitialFlightAsync records the whole
+        // ClientHello as ONE repairable frame at offset 0 - deliberately, so the ledger carries
+        // no second copy of the builder's chunking - so a lost opening flight comes back as a
+        // single ~1486-byte repair. The escape below then took it whole and built a 1525-byte
+        // Initial packet that a DF-set socket refuses, at a budget that had already said 1170.
+        TlsQuicFrame? split = null;
+        if (take < owed.Count && owed[take].Type == TlsQuicFrameType.Crypto)
+        {
+            var room = payloadBudget - bytes - CryptoRepairFrameOverheadBound;
+            if (room > 0)
+            {
+                var head = owed[take];
+                split = head with { Data = head.Data[..room] };
+                owed[take] = head with
+                {
+                    Offset = head.Offset + (ulong)room,
+                    Data = head.Data[room..],
+                };
+                bytes += room;
+            }
+        }
+
+        // AND THE ESCAPE STAYS FOR EVERYTHING ELSE. A MAX_DATA is one value, not a byte range;
+        // splitting it has no meaning. Such a frame goes out oversized and the send path reports
+        // a legible refusal, which beats a queue that never drains and a handshake that hangs.
+        if (take == 0 && split is null)
         {
             take = 1;
             bytes = owed[0].Data.Length;
@@ -925,9 +953,23 @@ internal sealed partial class TlsQuicConnection
             frames.Add(owed[i]);
         }
 
+        // AFTER the whole frames and never instead of them: the split head is the NEXT frame in
+        // queue order, and s13.3's order is what keeps two frames on one stream in offset order.
+        if (split is { } prefix)
+        {
+            frames.Add(prefix);
+            _framesRetransmitted++;
+        }
+
         owed.RemoveRange(0, take);
         _framesRetransmitted += take;
     }
+
+    /// <summary>An upper bound on a CRYPTO frame's own framing, RFC 9000 s19.6.</summary>
+    /// <remarks>Type byte plus Offset and Length at s16 Table 4's widest eight bytes each.
+    /// Pessimistic on purpose - it is subtracted from a budget, so over-stating it costs a few
+    /// bytes and under-stating it builds the datagram that cannot be sent.</remarks>
+    private const int CryptoRepairFrameOverheadBound = 1 + 8 + 8;
 
     /// <summary>RFC 9002 s6.2.4's "Previously sent data MAY be sent if no new data can be sent":
     /// fills a probe packet with the information the probed space is still waiting on.</summary>

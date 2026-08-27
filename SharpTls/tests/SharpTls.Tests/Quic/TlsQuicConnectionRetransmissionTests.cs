@@ -238,36 +238,44 @@ public sealed partial class TlsQuicConnectionTests
         var first = new List<TlsQuicFrame>();
         connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, first, 1100);
 
-        // ONE OF THE TWO, WHICHEVER THE LOSS PASS QUEUED FIRST - the assertion is the BUDGET,
-        // not the order. Queue order is send order within a level, but which of two packets
-        // declared lost in the same pass is walked first is loss detection's business and not
-        // this bound's; a CRYPTO frame carries its own offset, so either order reassembles.
-        Assert.Single(first);
+        // WHAT FITS, AND NOT A BYTE MORE. One whole frame plus the front of the next, which is
+        // the split arm filling the leftover room - the assertion is the BUDGET, not how many
+        // frames it took to reach it.
         Assert.True(
-            first[0].Data.Length <= 1100,
-            $"a {first[0].Data.Length}-byte repair went into a 1100-byte budget");
+            first.Sum(f => f.Data.Length) <= 1100,
+            $"{first.Sum(f => f.Data.Length)} bytes of repair went into a 1100-byte budget");
 
         // AND THE REMAINDER IS STILL OWED, NOT DROPPED. A bound that discarded the overflow
         // would pass the assertion above and stall the handshake, which is a worse failure
         // than the one being fixed.
-        var stillOwed = Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
-        Assert.NotEqual(first[0].Data.Length, stillOwed.Data.Length);
+        Assert.NotEmpty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
 
-        // The next datagram takes it, and the two together are the whole flight - 1491 bytes
-        // that never shared one datagram.
-        var second = new List<TlsQuicFrame>();
-        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, second, 1100);
-        Assert.Single(second);
-        Assert.Equal(1491, first[0].Data.Length + second[0].Data.Length);
+        // Drain to empty, and the whole 1491 bytes arrive across the datagrams - none of which
+        // ever carried more than it had room for.
+        var total = first.Sum(f => f.Data.Length);
+        for (var pass = 0; pass < 8 && connection.RepairsOwed(
+            TlsQuicEncryptionLevel.Initial).Count > 0; pass++)
+        {
+            var next = new List<TlsQuicFrame>();
+            connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, next, 1100);
+            Assert.True(
+                next.Sum(f => f.Data.Length) <= 1100,
+                $"{next.Sum(f => f.Data.Length)} bytes went into a 1100-byte budget");
+            total += next.Sum(f => f.Data.Length);
+        }
+
+        Assert.Equal(1491, total);
         Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
     }
 
     /// <summary>
-    /// A SINGLE FRAME LARGER THAN THE WHOLE BUDGET STILL GOES OUT. It cannot be split here - a
-    /// CRYPTO frame's offsets belong to the TLS endpoint that produced it - so the choice is
-    /// between an oversized datagram the send path reports as a refusal, and a queue that never
-    /// drains behind a frame that never fits. The second is a handshake that hangs with no
-    /// error, which is strictly worse than the size bug this budget exists to fix.
+    /// A SINGLE FRAME LARGER THAN THE WHOLE BUDGET STILL GOES OUT, WHEN IT IS ONE THE DRAIN
+    /// CANNOT SPLIT. CRYPTO can be split and now is - see the sibling test - so the escape is
+    /// witnessed here with a frame that has no offset the drain may advance on its own. The
+    /// choice for such a frame is between an oversized datagram the send path reports as a
+    /// refusal, and a queue that never drains behind a frame that never fits. The second is a
+    /// handshake that hangs with no error, which is strictly worse than the size bug the budget
+    /// exists to fix.
     /// </summary>
     [Fact]
     public async Task ARepairTooLargeForTheBudgetIsStillSentRatherThanStarved()
@@ -281,7 +289,8 @@ public sealed partial class TlsQuicConnectionTests
             [
                 new TlsQuicFrame
                 {
-                    RawType = (ulong)TlsQuicFrameType.Crypto,
+                    RawType = (ulong)TlsQuicFrameType.Stream,
+                    StreamId = 0,
                     Offset = 0,
                     Data = new byte[1400],
                 },
@@ -298,6 +307,70 @@ public sealed partial class TlsQuicConnectionTests
         connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, drained, 1100);
 
         Assert.Equal(1400, Assert.Single(drained).Data.Length);
+        Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+    }
+
+    /// <summary>
+    /// A CRYPTO REPAIR TOO LARGE FOR THE DATAGRAM IS SPLIT, NOT SENT WHOLE. This is the bug
+    /// four rounds of field reports narrowed to, and the frame list is what named it:
+    /// <c>frames Initial[Crypto 1490]</c> at a stated 1170-byte budget.
+    /// <para>SendInitialFlightAsync records the WHOLE ClientHello as ONE repairable CRYPTO
+    /// frame at offset 0 - deliberately, so that the repair ledger does not carry a second copy
+    /// of the builder's chunking arithmetic. The flight goes out as two datagrams; the repair
+    /// comes back as one ~1486-byte frame. The drain's starvation escape then took it whole
+    /// rather than starve, and built a 1525-byte Initial packet a DF-set socket refuses.</para>
+    /// <para>THE ESCAPE WAS RIGHT AND ITS SCOPE WAS WRONG. RFC 9000 s19.6 gives CRYPTO an
+    /// explicit Offset, so a frame carrying the tail of a message is complete in itself and the
+    /// drain can split it exactly as the fresh-CRYPTO arm does. The escape stays for frames
+    /// that genuinely cannot be split - a MAX_DATA is one value, not a byte range.</para>
+    /// </summary>
+    [Fact]
+    public async Task ACryptoRepairLargerThanTheBudgetIsSplitRatherThanSentWhole()
+    {
+        var clock = FakeClock();
+        await using var connection = LossDetectionConnectionOn(clock);
+
+        // The shape SendInitialFlightAsync records: one frame, offset 0, the whole hello.
+        connection.RecordRepairable(
+            TlsQuicEncryptionLevel.Initial,
+            0,
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.Crypto,
+                    Offset = 0,
+                    Data = new byte[1486],
+                },
+            ]);
+
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 0, clock.GetUtcNow()));
+        connection.OnPacketSent(PacketAt(TlsQuicEncryptionLevel.Initial, 1, clock.GetUtcNow()));
+
+        clock.Advance(TimeThresholdGap);
+        Acknowledge(connection, TlsQuicEncryptionLevel.Initial, 1);
+        Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+
+        var first = new List<TlsQuicFrame>();
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, first, 1100);
+
+        var head = Assert.Single(first);
+        Assert.Equal(TlsQuicFrameType.Crypto, head.Type);
+        Assert.Equal(0UL, head.Offset);
+        Assert.True(
+            head.Data.Length <= 1100,
+            $"a {head.Data.Length}-byte CRYPTO repair went into a 1100-byte budget");
+
+        // THE REMAINDER IS OWED AT THE ADVANCED OFFSET, which is the half that makes the split
+        // legal rather than merely small: a peer reassembles by offset, so a tail queued at the
+        // wrong one is silent corruption instead of a size error.
+        var rest = Assert.Single(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
+        Assert.Equal((ulong)head.Data.Length, rest.Offset);
+        Assert.Equal(1486, head.Data.Length + rest.Data.Length);
+
+        // And the next datagram carries the tail.
+        var second = new List<TlsQuicFrame>();
+        connection.TakeRepairsInto(TlsQuicEncryptionLevel.Initial, second, 1100);
+        Assert.Equal(rest.Data.Length, Assert.Single(second).Data.Length);
         Assert.Empty(connection.RepairsOwed(TlsQuicEncryptionLevel.Initial));
     }
 
