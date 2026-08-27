@@ -5732,16 +5732,23 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
     // datagram", so this is one datagram carrying two packets, not two sends.
     //
-    // THE ORDER IS THE CANDIDATE LIST'S, HIGHEST PROTECTION FIRST, and it is deliberate against
-    // s12.2's ascending-order SUGGESTION ("makes it more likely that the receiver will be able
-    // to process all the packets in a single pass"). That is a preference about the receiver's
-    // buffering; s10.2.3's Generally - "sending the frame in a packet with the highest level of
-    // packet protection to avoid the packet being discarded" - is about which copy of a close
-    // the peer is most likely to be ABLE to open, and on the teardown path that is the one to
-    // lead with. It also keeps the close's leading packet type stable for the witnesses that
-    // read it off the clear-text header, which is what
-    // TlsQuicConnectionTests.AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
-    // ParameterError asserts.
+    // THE ORDER IS THE SPEC'S KNOB, NOT THIS METHOD'S, FOR THE REASON BuildAnswerDatagram GIVES
+    // ABOUT THE SAME KNOB. Until a coalesced close existed there was no order here to decide -
+    // the walk picked ONE level and returned - so the list could be written in whatever sequence
+    // read best. Coalescing turned it into a per-datagram flight plan, and this connection
+    // already has exactly one owner for that: TlsQuicConnectionSpec.CoalesceAscendingByLevel,
+    // which BuildAnswerDatagram reads and which the design constraints put on the list of things
+    // nothing may hardcode a literal for. A second, contradictory order on the close datagram
+    // would be one connection emitting two different coalescing habits on one wire.
+    //
+    // s10.2.3 IS SATISFIED BY THE SET, NOT BY THE SEQUENCE, which is what makes deferring to the
+    // knob legitimate rather than a shrug. Its Generally - "sending the frame in a packet with
+    // the highest level of packet protection to avoid the packet being discarded" - is about
+    // WHICH copy the peer is likely to be able to open, and both copies now go; nothing in
+    // s10.2.3 speaks to their order inside the datagram. s12.2 does, and only as a preference:
+    // ascending "makes it more likely that the receiver will be able to process all the packets
+    // in a single pass". So the knob's own default - ascending - decides, and the highest-
+    // protection-first reading survives as the other setting rather than as a literal.
     //
     // THE PACKET NUMBER IS DRAWN PER LEVEL, from that level's own counter, because RFC 9000
     // s12.3 gives each packet number space its own - and the two packets in this datagram are in
@@ -5765,9 +5772,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return 0;
         }
 
+        // The confirmed arm has one candidate, so the knob has nothing to order there; RFC 9001
+        // s4.9 has already discarded both handshake levels by then anyway.
         ReadOnlySpan<TlsQuicEncryptionLevel> candidates = _confirmed
             ? [TlsQuicEncryptionLevel.Application]
-            : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
+            : _options.Spec.CoalesceAscendingByLevel
+                ? [TlsQuicEncryptionLevel.Initial, TlsQuicEncryptionLevel.Handshake]
+                : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
 
         var packets = new List<TlsQuicPacketToSend>();
         var sentAsApplicationForm = false;
