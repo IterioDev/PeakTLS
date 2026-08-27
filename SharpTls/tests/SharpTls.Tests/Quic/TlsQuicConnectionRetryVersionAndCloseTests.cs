@@ -227,18 +227,26 @@ public sealed partial class TlsQuicConnectionTests
         await using var transport = new ScriptedDatagramTransport();
         await using var connection = Connection(transport, pki);
 
-        // THE SAME MUST AS ARetryWhoseSourceConnectionIdEqualsOurDestinationIsIgnored, AGAINST
-        // THE OPERAND THAT ROW SILENTLY GETS RIGHT FOR FREE. RFC 9000 s17.2.5.1: "A client MUST
-        // discard a Retry packet that contains a Source Connection ID field that is identical to
-        // the Destination Connection ID field of ITS INITIAL PACKET." Before anything has moved,
-        // the connection ID we drew and the one we are currently addressing are the same bytes,
-        // so a comparison against either passes that row. This one prises them apart.
+        // THE SAME MUST AS ARetryWhoseSourceConnectionIdEqualsOurDestinationIsIgnored. RFC 9000
+        // s17.2.5.1: "A client MUST discard a Retry packet that contains a Source Connection ID
+        // field that is identical to the Destination Connection ID field of ITS INITIAL PACKET."
         //
-        // AN INJECTED INITIAL MOVES THE WRONG OPERAND AND NOTHING ELSE. It is sealed with RFC
-        // 9001 s5.2's CLIENT secret, so a client cannot open it and _processedServerPacket stays
-        // false - which is what keeps the Retry path reachable at all - but s7.2's adoption runs
-        // before the AEAD, so our Destination Connection ID is the attacker's value by the time
-        // the Retry lands.
+        // THE TWO OPERANDS THIS ROW ONCE PRISED APART CAN NO LONGER BE SEPARATED, AND SAYING SO
+        // IS THE POINT OF KEEPING IT. It used to inject an unopenable Initial to move the
+        // CURRENT Destination Connection ID away from the one we DREW, so that a comparison
+        // written against the wrong operand would read "ODCID != attacker value" and adopt the
+        // forgery. Audit finding 7 put s7.2's adoption behind the AEAD, so nothing an attacker
+        // can send moves it - and before any packet the AEAD opens, the drawn value and the
+        // addressed value are the same bytes by construction. The only thing that could separate
+        // them now is a VALID server Initial, and ARetryThatFollowsASuccessfullyProcessedServer
+        // PacketIsIgnored is the rule that makes the Retry unreachable after one of those. So
+        // the mutation "compare against the current Destination Connection ID" is vacuous today;
+        // the source keeps OriginalDestinationConnectionId because s17.2.5.1 names it, not
+        // because a test can tell.
+        //
+        // THE INJECTION IS KEPT AS THE INERTNESS CHECK IT HAS BECOME. It is sealed with RFC 9001
+        // s5.2's CLIENT secret, so a client cannot open it and _processedServerPacket stays
+        // false - which is what keeps the Retry path reachable at all.
         var attackerConnectionId = Convert.FromHexString("ADADADADADADADAD");
         transport.EnqueueReceive(sent => ClientSecretInitialReply(sent, attackerConnectionId));
 
@@ -259,7 +267,7 @@ public sealed partial class TlsQuicConnectionTests
 
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
         Assert.Equal(1, connection.DiscardedPackets);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.NotEqual(attackerConnectionId, connection.DestinationConnectionId.ToArray());
 
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
 
@@ -268,10 +276,12 @@ public sealed partial class TlsQuicConnectionTests
         Assert.True(connection.RetryToken.IsEmpty);
 
         // Neither the token nor a second flight went anywhere: the opening flight is still the
-        // only datagram on the wire, and we are still addressing the injected value rather than
-        // the one the discarded Retry offered.
+        // only datagram on the wire, and we are still addressing the connection ID we drew -
+        // neither the injected value nor the one the discarded Retry offered.
         Assert.Single(transport.Sent);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.Equal(
+            connection.OriginalDestinationConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
     }
 
     [Fact]
@@ -1433,7 +1443,7 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     [Fact]
-    public async Task AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73()
+    public async Task AnInjectedFirstInitialDoesNotMoveTheDestinationConnectionId()
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
         using var pki = TestPki.Create();
@@ -1446,17 +1456,23 @@ public sealed partial class TlsQuicConnectionTests
 
         await connection.StartAsync(cancellation.Token);
 
-        // THE ATTACK RFC 9000 s7.3 NAMES, BUILT. "Including connection ID values in transport
-        // parameters and verifying them ensures that an attacker cannot influence the choice of
-        // connection ID for a successful connection by injecting packets carrying
-        // attacker-chosen connection IDs during the handshake."
+        // THE ATTACK RFC 9000 s7.3 NAMES, BUILT - AND SINCE AUDIT FINDING 7 IT COSTS NOTHING AT
+        // ALL. s7.3's purpose clause is the sentence that used to be the only thing standing
+        // behind the adoption: "Including connection ID values in transport parameters and
+        // verifying them ensures that an attacker cannot influence the choice of connection ID
+        // for a successful connection by injecting packets carrying attacker-chosen connection
+        // IDs during the handshake." Note what it promises and what it does not - no SUCCESSFUL
+        // connection is influenced. The attempt still died, on every injection, from anywhere on
+        // the internet, with no key material at all.
         //
-        // ZERO KEY MATERIAL IS NEEDED FOR THE INJECTION, because this implementation adopts
-        // BEFORE the AEAD. So this packet, sealed with the CLIENT secret and therefore
-        // unopenable by a client, still moves the Destination Connection ID before its AEAD
-        // fails. The pre-AEAD placement is a choice rather than a necessity - the Initial keys
-        // come from the ORIGINAL Destination Connection ID, which never moves - and s7.3 is
-        // what makes it safe.
+        // ZERO KEY MATERIAL IS STILL NEEDED TO SEND THIS PACKET, which is exactly why the
+        // adoption may not read it. Our Initial Destination Connection ID travels in the clear
+        // - RFC 9001 s5.2 keys the Initial secrets from it, so it cannot be hidden - so an
+        // off-path sender who observes or guesses it can put this long header on the path ahead
+        // of the server's reply. It is sealed with s5.2's CLIENT secret, so a client cannot
+        // open it; the adoption used to run before _receiver.Receive and take its Source
+        // Connection ID anyway, and _adoptedServerConnectionId latched, so the genuine server
+        // packet could never correct it.
         var attackerConnectionId = Convert.FromHexString("ADADADADADADADAD");
         await serverTransport.SendAsync(
             clientTransport.LocalEndPoint,
@@ -1465,28 +1481,35 @@ public sealed partial class TlsQuicConnectionTests
                 attackerConnectionId),
             cancellation.Token);
 
-        // The forgery is discarded by the AEAD and does NOT end the attempt - s12.2 - but it
-        // has already taken s7.2's once-only adoption with it.
+        // The forgery is discarded by the AEAD and does NOT end the attempt - s12.2 - and it now
+        // takes nothing with it: s7.2's adoption sits behind `outcome.Processed > 0`, which this
+        // packet never reaches.
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
         Assert.Equal(1, connection.DiscardedPackets);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.NotEqual(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.Equal(
+            connection.OriginalDestinationConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
 
         // The honest server now answers, and its flight opens perfectly well: the AEAD key comes
         // from the Destination Connection ID of our FIRST Initial packet, not from the field on
-        // any later one, so nothing before s7.3 can notice.
+        // any later one, so the injection could not have stopped it either.
         Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await connection.PumpOnceAsync(cancellation.Token));
+        // AND THE HANDSHAKE PROCEEDS RATHER THAN CLOSING. This is the whole of the finding: the
+        // same script used to end here in a TRANSPORT_PARAMETER_ERROR raised by s7.3 against the
+        // attacker's value, which is a connection killed by a stranger's datagram. s7.3 still
+        // runs - AConformingServersConnectionIdParametersPassSection73 is its witness - it just
+        // has nothing to catch, because the value it checks was never moved.
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Null(connection.ClosedWith);
+        Assert.False(connection.IsDraining);
 
-        // s7.3: the parameter must match "the values that an endpoint used in the Destination
-        // and Source Connection ID fields of Initial packets that it sent" - which after the
-        // injection is the attacker's value, not the server's. A comparison against the Source
-        // Connection ID we merely OBSERVED would agree here and let the connection succeed
-        // while addressed to a connection ID an attacker chose.
-        Assert.Contains("initial_source_connection_id (0x0F)", error.Message, StringComparison.Ordinal);
-        Assert.Contains("adadadadadadadad", error.Message, StringComparison.Ordinal);
-        Assert.Equal(TlsQuicTransportError.TransportParameterError, connection.ClosedWith);
+        // We are addressing the server's Source Connection ID, taken from the packet its AEAD
+        // opened - not the attacker's, and not our own draw any more either.
+        Assert.Equal(
+            serverPeer.SourceConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
     }
 
     [Theory]

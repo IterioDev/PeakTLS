@@ -180,7 +180,7 @@ namespace SharpTls.Quic;
 //   33. The coalescing order knob ignored        [WAS-SURVIVOR] -> now ONLY ThePacketsOfOneDatagramAreCoalescedInTheOrderTheSpecAsksFor(False)
 //   34. The ACK-position knob ignored            [WAS-SURVIVOR] -> now ONLY TheAcksPositionInsideThePacketIsTheOneTheSpecAsksFor(False)
 //   35. The trailing-ACK branch deleted          ONLY TheAcksPositionInsideThePacketIsTheOneTheSpecAsksFor(False)
-//   36. s7.2's once-only adoption guard neutered  [WAS-SURVIVOR] -> now ONLY OnlyTheFirstServerPacketMovesOurDestinationConnectionId
+//   36. s7.2's once-only adoption guard neutered  [NOW VACUOUS] - see OnlyTheFirstServerPacketMovesOurDestinationConnectionId's closing note
 //   37. s7.2's changed-Source-CID discard deleted  ONLY APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded
 //   38. s7.2's "valid" dropped - the Source CID recorded before the AEAD  2 tests
 //   39. The ack_delay_exponent reconciliation deleted  ONLY AnAdvertisedAckDelayExponentThatDisagreesWithTheOneWeScaleByIsRefused
@@ -227,7 +227,7 @@ namespace SharpTls.Quic;
 //   79. s7.3 compares LENGTHS instead of bytes                    4 tests
 //   80. s7.3 absence not treated as an error                      3 tests
 //   81. s7.3 retry_source without a Retry accepted                ONLY ARetrySourceConnectionIdSentWithoutARetryClosesWithTransportParameterError
-//   82. s7.3 initial_source compared against the OBSERVED CID     [WAS-SURVIVOR] -> now ONLY AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73
+//   82. s7.3 initial_source compared against the OBSERVED CID     [NOW VACUOUS] - see below
 //   83. s7.3 original_destination compared against the current CID 4 tests
 //   84. s7.3 retry_source never checked after a Retry             ONLY AHandshakeAfterARetryValidatesRetrySourceConnectionId
 //   85. "successfully processed" never becomes true               2 tests
@@ -2509,11 +2509,42 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
                 {
                     // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
-                    // why this sits after the AEAD rather than beside the adoption. A Source
-                    // Connection ID taken off unauthenticated input would let an off-path
-                    // sender choose the value every later packet is measured against, which is
-                    // the influence s7.3's last paragraph exists to deny.
+                    // why this sits after the AEAD. A Source Connection ID taken off
+                    // unauthenticated input would let an off-path sender choose the value every
+                    // later packet is measured against, which is the influence s7.3's last
+                    // paragraph exists to deny.
                     _validatedServerSourceConnectionId ??= validated;
+
+                    // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
+                    // FINDING 7. "Upon first receiving an Initial or Retry packet from the
+                    // server, the client uses the Source Connection ID supplied by the server
+                    // as the Destination Connection ID for subsequent packets." This used to
+                    // run in AcceptedUnderSection122, before _receiver.Receive and therefore
+                    // before any AEAD, so one injected long header - the client's Initial
+                    // Destination Connection ID is in the clear, so it is guessable or simply
+                    // observable - permanently redirected this endpoint. See the note left at
+                    // the old site for the whole argument.
+                    //
+                    // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
+                    // optimisation: "A client MUST change the Destination Connection ID it uses
+                    // for sending packets in response to only the first received Initial or
+                    // Retry packet." The flag below is that MUST, and it is witnessed rather
+                    // than assumed - deleting it used to leave the whole gate green.
+                    //
+                    // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
+                    // the Destination Connection ID of the client's FIRST Initial packet, which
+                    // is OriginalDestinationConnectionId and is not touched here. Adoption
+                    // changes what we ADDRESS, not what we key with. (Retry is the one thing
+                    // that moves both, and HandleRetryAsync owns it under its own flag.)
+                    //
+                    // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
+                    // runs to completion before any answer is built, so the datagram that
+                    // replies to this packet already carries the server's chosen value.
+                    if (!_adoptedServerConnectionId)
+                    {
+                        _destinationConnectionId = validated;
+                        _adoptedServerConnectionId = true;
+                    }
                 }
 
                 foreach (var chunk in chunks)
@@ -2741,48 +2772,49 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return false;
         }
 
-        // RFC 9000 s7.2, verbatim from the extract: "Upon first receiving an Initial or Retry
-        // packet from the server, the client uses the Source Connection ID supplied by the
-        // server as the Destination Connection ID for subsequent packets". Get this wrong and
-        // the handshake fails with no useful error.
+        // THE s7.2 ADOPTION USED TO SIT HERE AND NO LONGER DOES - AUDIT FINDING 7. RFC 9000
+        // s7.2 conditions the switch on a VALID packet, in its own words: "Once a client has
+        // received a valid Initial packet from the server..." and, for the adoption itself,
+        // "Upon first receiving an Initial or Retry packet from the server, the client uses the
+        // Source Connection ID supplied by the server as the Destination Connection ID for
+        // subsequent packets."
         //
-        // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an optimisation:
-        // "A client MUST change the Destination Connection ID it uses for sending packets in
-        // response to only the first received Initial or Retry packet." The flag below is that
-        // MUST, and it is witnessed rather than assumed - deleting it used to leave the whole
-        // gate green.
+        // THIS METHOD CANNOT SAY "VALID", WHICH IS THE WHOLE OF THE MOVE. It runs before
+        // _receiver.Receive and therefore before any AEAD ran, on bytes anyone can write: the
+        // client's Initial Destination Connection ID travels in the clear on the wire (RFC 9001
+        // s5.2 keys Initial from it, so it cannot be hidden), so an off-path sender who observes
+        // or guesses it can put one long header on the path before the server's reply. The
+        // adoption latched on _adoptedServerConnectionId, so the genuine server packet arriving
+        // afterwards could never correct it, and every later packet this endpoint sent was
+        // addressed to a connection ID the attacker chose. A cheap, reliable off-path kill.
         //
-        // ONLY THE INITIAL KEYS' INPUT STAYS PUT. s5.2 of [QUIC-TLS] derives them from the
-        // Destination Connection ID of the client's FIRST Initial packet, which is
-        // OriginalDestinationConnectionId and is not touched here. Adoption changes what we
-        // ADDRESS, not what we key with. (Retry is the one thing that moves both, and it is
-        // task 9b's.)
+        // IT IS NOW WHERE _validatedServerSourceConnectionId ALREADY WAS, in PumpOnceAsync
+        // under `outcome.Processed > 0` - the AEAD's verdict, not a parser's. Two rules about
+        // the same value, taken from the same authenticated packet, at the same instant.
         //
-        // AND IT READS UNAUTHENTICATED INPUT, DELIBERATELY - BUT NOT BECAUSE IT HAS TO. The
-        // earlier draft of this remark argued that the adoption "necessarily precedes the AEAD"
-        // because the Initial keys cannot be derived from a value this packet supplies. That
-        // does not follow. The Initial keys come from OriginalDestinationConnectionId, which
-        // never moves, so the AEAD can open this packet whether or not the adoption has already
-        // run - and _validatedServerSourceConnectionId, recorded in PumpOnceAsync only after
-        // outcome.Processed > 0, is the standing proof that a post-AEAD hook exists and is
-        // usable. Placing the adoption here is a CHOICE: s7.2 phrases it on "upon FIRST
-        // receiving an Initial or Retry packet from the server", and a Retry never reaches an
-        // AEAD at all, so one placement covers both triggers.
+        // BEFORE THE NEXT PACKET IS BUILT, AND AFTER THE CURRENT ONE IS OPENED, which is the
+        // ordering the move has to respect and does: that site sits inside PumpOnceAsync's
+        // per-packet walk and ahead of SendAnswerAsync, so the first flight still addresses the
+        // answer to the server's chosen value. Nothing in the AEAD depends on the adoption
+        // having run - RFC 9001 s5.2 derives the Initial keys from
+        // OriginalDestinationConnectionId, which never moves.
         //
-        // WHAT MAKES THE CHOICE SAFE IS s7.3, NOT AN IMPOSSIBILITY. RFC 9000 s7.3 authenticates
-        // both connection IDs in transport parameters at the end of the handshake, and says why
-        // in as many words - "Including connection ID values in transport parameters and
-        // verifying them ensures
-        // that an attacker cannot influence the choice of connection ID for a successful
-        // connection by injecting packets carrying attacker-chosen connection IDs during the
-        // handshake." An injected first packet therefore costs this attempt, and cannot cost
-        // more than this attempt.
-        if (!_adoptedServerConnectionId)
-        {
-            _destinationConnectionId = longHeader.SourceConnectionId.ToArray();
-            _adoptedServerConnectionId = true;
-        }
-
+        // RETRY IS UNAFFECTED AND KEEPS ITS OWN FLAG. s7.2 names two triggers and a Retry never
+        // reaches an AEAD at all; HandleRetryAsync adopts under _adoptedFromRetry after
+        // TlsQuicRetry.TryVerify has checked the Retry Integrity Tag, which is that packet's own
+        // authentication. See the note there on why the two flags are separate.
+        //
+        // s7.3 IS STILL THE BACKSTOP AND IS NO LONGER THE ONLY ONE. Its own reason - "Including
+        // connection ID values in transport parameters and verifying them ensures that an
+        // attacker cannot influence the choice of connection ID for a successful connection by
+        // injecting packets carrying attacker-chosen connection IDs during the handshake" -
+        // makes an injection cost at most the attempt. What it never did was stop the attempt
+        // being cost.
+        //
+        // TlsQuicConnectionTests.AnInjectedFirstInitialDoesNotMoveTheDestinationConnectionId is
+        // the witness. It is the scenario the old s7.3 test built, with the opposite outcome:
+        // the injection is now inert rather than merely survivable, and the handshake it used
+        // to poison completes.
         return true;
     }
 
@@ -5670,8 +5702,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // handshake." Under the observed-value reading, an injected first Initial moves the
         // adoption, the parameter still agrees with the honest server's Source Connection ID,
         // and the connection SUCCEEDS while addressing the attacker's value - the exact
-        // outcome that sentence exists to deny. Witnessed by
-        // AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73.
+        // outcome that sentence exists to deny.
+        //
+        // AND THAT MUTATION IS NOW VACUOUS, WHICH IS SAID HERE RATHER THAN LEFT FOR THE NEXT
+        // SWEEP TO REDISCOVER. Ledger row 82 - "initial_source compared against the OBSERVED
+        // CID" - had exactly one witness, and it worked only because the adoption ran on
+        // unauthenticated input, so the observed value and the addressed value could disagree.
+        // Audit finding 7 moved the adoption behind the AEAD to the very line that records
+        // _validatedServerSourceConnectionId, so the two are now written from one value at one
+        // instant and no input can separate them. The comparison stays as it is, because the
+        // READING is still the one s7.3's purpose clause asks for and the equality is a
+        // property of the current call sites rather than of the rule.
         await RequireParameterAsync(
             parameters,
             TlsQuicTransportParameterId.InitialSourceConnectionId,

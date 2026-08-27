@@ -711,35 +711,51 @@ public sealed partial class TlsQuicConnectionTests
         var first = Convert.FromHexString("5E5E5E5E5E5E");
         var second = Convert.FromHexString("A1A1A1A1A1A1");
 
-        // THE FIRST ONE CANNOT BE OPENED, AND THAT IS WHAT SEPARATES THIS CLAUSE FROM THE ONE
-        // APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded WITNESSES. That clause
-        // binds only "Once a client has received a VALID Initial packet from the server", so a
-        // datagram sealed with the client secret never arms it - and the packet still moves our
-        // Destination Connection ID, because s7.2's adoption sentence says "Upon first
-        // receiving an Initial or Retry packet" and this implementation runs it before the
-        // AEAD. That placement is a CHOICE, not a necessity - the Initial keys come from the
-        // ORIGINAL Destination Connection ID, which never moves, so a post-AEAD placement would
-        // open the same packets - and s7.3 is what makes the choice safe, by authenticating
-        // both connection IDs in transport parameters.
+        // THE FIRST ONE CANNOT BE OPENED, AND SINCE AUDIT FINDING 7 THAT IS WHY IT MOVES
+        // NOTHING. s7.2's adoption sentence reads "Upon first receiving an Initial or Retry
+        // packet from the server", and the section's own next clause supplies the word the
+        // sentence leans on - "Once a client has received a VALID Initial packet from the
+        // server". This datagram is sealed with RFC 9001 s5.2's CLIENT secret, so a client
+        // cannot open it; it is a datagram from the server only in the sense that anyone can
+        // write one. The adoption used to run before _receiver.Receive and take it anyway,
+        // which handed any off-path sender who could observe or guess our Initial Destination
+        // Connection ID - it travels in the clear, because s5.2 keys Initial from it - a
+        // permanent redirect of this endpoint.
         transport.EnqueueReceive(sent => ClientSecretInitialReply(sent, first));
         transport.EnqueueReceive(sent => ServerInitialReply(sent, second));
 
+        var drawn = connection.OriginalDestinationConnectionId.ToArray();
+
         await connection.StartAsync(cancellation.Token);
         await connection.PumpOnceAsync(cancellation.Token);
-        Assert.Equal(first, connection.DestinationConnectionId.ToArray());
+
+        // INERT. The forgery was counted as discarded and changed nothing: we are still
+        // addressing the connection ID this client drew for itself.
+        Assert.Equal(drawn, connection.DestinationConnectionId.ToArray());
         Assert.Equal(1, connection.DiscardedPackets);
 
         await connection.PumpOnceAsync(cancellation.Token);
 
-        // STILL THE FIRST ONE, and read off the wire as well as off the field: a connection
-        // that adopted again would address this answer to A1A1A1A1A1A1. The second datagram
-        // was processed - it answered the PING - so this is the once-only guard and not a
-        // packet that failed to arrive.
-        Assert.Equal(first, connection.DestinationConnectionId.ToArray());
+        // AND THE FIRST PACKET THE AEAD ACTUALLY OPENED IS THE ONE THAT MOVES IT - read off the
+        // wire as well as off the field, because the field alone would not show that the answer
+        // went to the new value.
+        Assert.Equal(second, connection.DestinationConnectionId.ToArray());
         Assert.Equal(2, transport.Sent.Count);
         Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
             transport.Sent[1].Payload, out var answer, out _));
-        Assert.Equal(first, answer.DestinationConnectionId.ToArray());
+        Assert.Equal(second, answer.DestinationConnectionId.ToArray());
+
+        // THE ONCE-ONLY GUARD IS NOW SUBSUMED RATHER THAN UNWITNESSED, AND THE LEDGER SHOULD
+        // SAY SO. s7.2's "A client MUST change the Destination Connection ID it uses for sending
+        // packets in response to only the first received Initial or Retry packet" used to need
+        // its own row here, because a second unauthenticated packet could reach the adoption.
+        // It no longer can: the adoption sits on the same line as
+        // _validatedServerSourceConnectionId, and every later packet carrying a DIFFERENT Source
+        // Connection ID is discarded before that line by the clause
+        // APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded pins, while one
+        // carrying the SAME value would re-adopt the value already held. The latch stays in the
+        // source as the MUST written down; there is no input left that can separate keeping it
+        // from dropping it.
     }
 
     [Fact]
