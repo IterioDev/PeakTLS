@@ -1843,11 +1843,29 @@ internal sealed class TlsQuicStreamSet
     /// STREAM frame to one datagram's worth; this bounds the NUMBER of them that go into one
     /// datagram. A body chopped into ten conforming frames still makes one oversized datagram
     /// if all ten are handed to the same packet.</para>
-    /// <para>AT LEAST ONE FRAME ALWAYS GOES, even if it does not fit. A budget smaller than a
-    /// single frame would otherwise return nothing forever while the queue stayed non-empty -
-    /// a stall, and a silent one. Taking it means the datagram is over budget, which the
-    /// transport will refuse loudly; that is the better failure and it cannot arise from the
-    /// segmentation above, which sizes frames against this same budget.</para>
+    /// <para>NO FRAME IS ADMITTED UNMEASURED, AND THE FIRST ONE USED TO BE. The test read
+    /// <c>taken.Count > 0 &amp;&amp; spent + size > payloadBudget</c>, so the head of the queue
+    /// went into every datagram whatever its size. The claim justifying that - "it cannot arise
+    /// from the segmentation above, which sizes frames against this same budget" - was false in
+    /// two ways at once: <see cref="Drain"/> chunks at QUEUE time against
+    /// <see cref="DatagramPayloadBudget"/> as it stood then, and the caller passes
+    /// <c>budget - spent</c>, already reduced by an ACK and by RFC 9000 s12.2's coalesced
+    /// Initial or Handshake prefix. A frame queued under a larger PMTU, or one queued before a
+    /// prefix appeared in front of it, therefore overran the budget it was measured against and
+    /// surfaced downstream as TlsQuicPacketBuilder.Build's "Packet needs N bytes, destination
+    /// has M" or as a datagram a DF-set socket refuses with WSAEMSGSIZE.</para>
+    /// <para>AN OVERSIZED STREAM HEAD IS SPLIT RATHER THAN REFUSED OR STALLED, on exactly the
+    /// argument TlsQuicLossDetection.TakeRepairsInto now makes for a CRYPTO repair: RFC 9000
+    /// s19.8 gives STREAM an explicit Offset, so a frame carrying the tail of a stream is
+    /// complete in itself and advancing a known offset by the bytes already taken invents
+    /// nothing. That is what keeps progress guaranteed - the queue cannot stall behind a frame
+    /// that is too big for today's datagram and small enough for yesterday's.</para>
+    /// <para>AND THE STARVATION ESCAPE STAYS FOR FRAMES THAT GENUINELY CANNOT BE SPLIT. A
+    /// MAX_DATA is one value, not a byte range. If nothing has been taken and the head is one
+    /// of those, it goes out oversized and the send path reports a legible refusal naming the
+    /// frame and the budget - which beats a queue that never drains and a connection that hangs
+    /// with nothing to say why. Every such frame this set queues is a few tens of bytes, so the
+    /// escape needs a budget smaller than a single varint triple to fire at all.</para>
     /// <para>ORDER IS PRESERVED ACROSS THE SPLIT: repairs before new data, s13.3's
     /// "prioritize retransmission of data over sending new data", and the remainder keeps its
     /// place at the head of its own queue.</para>
@@ -1865,8 +1883,36 @@ internal sealed class TlsQuicStreamSet
             while (queue.Count > 0)
             {
                 var size = TlsQuicFrames.MeasureFrame(_measureScratch, queue[0]);
-                if (taken.Count > 0 && spent + size > payloadBudget)
+                if (spent + size > payloadBudget)
                 {
+                    // s19.8's explicit Offset makes the tail of a stream a frame in its own
+                    // right, so the head is cut to what the budget covers and the remainder
+                    // keeps its place at the front of the queue. The datagram is full by
+                    // construction afterwards - the split took every byte that fitted - so
+                    // there is nothing left to measure.
+                    if (TrySplitStreamHead(queue, size, payloadBudget - spent, out var head))
+                    {
+                        taken.Add(head);
+                        if (source == 0)
+                        {
+                            RepairsSent++;
+                        }
+                    }
+                    else if (taken.Count == 0)
+                    {
+                        // The escape, and it is now the LAST resort rather than the first: a
+                        // frame that cannot be split and cannot fit goes out oversized so the
+                        // queue drains, and the send path names it. Reached only when nothing
+                        // else has been taken, so a datagram that is already carrying frames
+                        // never grows past its budget.
+                        taken.Add(queue[0]);
+                        queue.RemoveAt(0);
+                        if (source == 0)
+                        {
+                            RepairsSent++;
+                        }
+                    }
+
                     return taken;
                 }
 
@@ -1881,6 +1927,55 @@ internal sealed class TlsQuicStreamSet
         }
 
         return taken;
+    }
+
+    // Cuts the head of `queue` down to `room` bytes if it is an s19.8 STREAM frame with data,
+    // leaving the remainder at the front of the queue. Reports whether it did.
+    //
+    // THE FIN GOES WITH THE REMAINDER AND NEVER WITH THE HEAD, which is TryTakeSendable's rule
+    // stated a second time because this is a second place a write gets split: s19.8's FIN
+    // "indicates that the frame marks the end of the stream", and the tail has not left yet.
+    //
+    // THE REMAINDER ALWAYS CARRIES THE OFF BIT. Its offset is the head's plus what was taken,
+    // so it is non-zero even when the head's was zero - and s19.8's implicit form, "When the
+    // Offset field is absent, the offset is 0", would put the tail back at the start of the
+    // stream. That is silent corruption rather than a size error, because a peer reassembles
+    // by offset, which is why it is stated rather than left to the caller to notice.
+    private bool TrySplitStreamHead(
+        List<TlsQuicFrame> queue, int size, int room, out TlsQuicFrame head)
+    {
+        head = default;
+
+        var frame = queue[0];
+        if (frame.Type != TlsQuicFrameType.Stream || frame.Data.Length == 0)
+        {
+            return false;
+        }
+
+        // What the frame costs beyond its payload, MEASURED rather than recomputed - the same
+        // reason MeasureFrame exists at all. Conservative in the safe direction too: s16 lets
+        // the Length varint get shorter as the payload shrinks and never longer, so the head
+        // built below is never larger than the room it was cut to.
+        var take = room - (size - frame.Data.Length);
+        if (take <= 0)
+        {
+            return false;
+        }
+
+        head = frame with
+        {
+            RawType = frame.RawType & ~TlsQuicStreamFrames.FinBit,
+            Data = frame.Data[..take],
+        };
+
+        queue[0] = frame with
+        {
+            RawType = frame.RawType | TlsQuicStreamFrames.OffsetBit,
+            Offset = frame.Offset + (ulong)take,
+            Data = frame.Data[take..],
+        };
+
+        return true;
     }
 
     internal IReadOnlyList<TlsQuicFrame> TakePendingFrames()

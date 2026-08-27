@@ -1561,6 +1561,77 @@ public sealed class TlsQuicStreamsTests
         Assert.Equal(4UL, stream.SendOffset);
     }
 
+    // ---- the audit's finding 12: the frame that was admitted without being measured --------
+
+    // THE BUDGET MOVES BETWEEN QUEUEING AND SENDING, WHICH IS THE WHOLE FINDING. Drain chunks a
+    // write to DatagramPayloadBudget - OneRttStreamFrameOverheadBound at QUEUE time; the caller
+    // passes budget - spent at SEND time, already reduced by an ACK and by RFC 9000 s12.2's
+    // coalesced Initial or Handshake prefix. TakePendingFrames exempted the first frame from
+    // its own test - `taken.Count > 0 && spent + size > payloadBudget` - so whatever was at the
+    // head of the queue went out at whatever size it happened to be.
+    //
+    // Downstream that is TlsQuicPacketBuilder.Build's "Packet needs N bytes, destination has M"
+    // or a datagram a DF-set socket refuses with WSAEMSGSIZE, which is how it reached the field
+    // reports. RFC 9000 s14.2 is the sentence being broken: "All QUIC packets that are not sent
+    // in a PMTU probe SHOULD be sized to fit within the maximum datagram size."
+    //
+    // THE SHRINK IS SIMULATED BY THE TWO ARGUMENTS AND NOT BY A PATH MTU EVENT, because the
+    // budget the caller passes is the only thing this method can see: queue against 1200, take
+    // against 400. That is exactly what a 800-byte coalesced Handshake packet in front of the
+    // 1-RTT one does, and it needs no transport.
+    //
+    // THREE ASSERTIONS, BECAUSE A SPLIT CAN BE THE RIGHT SIZE AND STILL BE WRONG. The frame has
+    // to fit; the remainder has to keep its place with an ADVANCED offset, since s19.8 makes a
+    // peer reassemble by offset and a tail replayed at the head's offset is silent corruption
+    // rather than a size error; and the bytes have to come back out in stream order.
+    [Fact]
+    public void AFrameQueuedUnderALargerBudgetIsSplitRatherThanOverrunningTheDatagram()
+    {
+        var streams = Set();
+        streams.DatagramPayloadBudget = 1200;
+
+        var stream = streams.OpenUnidirectional();
+        var body = new byte[1000];
+        for (var index = 0; index < body.Length; index++)
+        {
+            body[index] = (byte)((index * 13) + 5);
+        }
+
+        streams.Send(stream, body);
+
+        // One frame, queued whole: 1000 bytes is inside 1200 less the overhead bound.
+        const int shrunken = 400;
+        var first = Assert.Single(streams.TakePendingFrames(shrunken));
+        var firstSize = TlsQuicFrames.MeasureFrame([], first);
+        Assert.True(
+            firstSize <= shrunken,
+            $"Took a {firstSize}-byte frame against a {shrunken}-byte budget, which is the "
+                + "over-MTU datagram RFC 9000 s14.2 forbids.");
+        Assert.Equal(0UL, first.Offset);
+
+        // s19.8's FIN is not on the head - there is none here - but the OFF bit must be on the
+        // remainder whatever the head carried, or the tail claims offset 0.
+        var rest = new List<byte>(first.Data.ToArray());
+        var offset = (ulong)first.Data.Length;
+        while (streams.HasPendingFrames)
+        {
+            var next = Assert.Single(streams.TakePendingFrames(shrunken));
+            Assert.True(
+                TlsQuicFrames.MeasureFrame([], next) <= shrunken,
+                "A later frame overran the budget, so the split is not repeatable.");
+            Assert.Equal(offset, next.Offset);
+            Assert.True(
+                TlsQuicStreamFrames.HasOffset(next.RawType),
+                "The remainder omitted s19.8's OFF bit, so it claims offset 0 and a peer "
+                    + "reassembling by offset would overwrite the head.");
+
+            rest.AddRange(next.Data.ToArray());
+            offset += (ulong)next.Data.Length;
+        }
+
+        Assert.Equal(body, rest.ToArray());
+    }
+
     private static ulong Id(
         TlsQuicStreamInitiator initiator, TlsQuicStreamDirection direction, ulong ordinal) =>
         TlsQuicStreamId.From(initiator, direction, ordinal);
