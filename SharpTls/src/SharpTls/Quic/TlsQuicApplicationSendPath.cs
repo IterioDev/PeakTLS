@@ -637,10 +637,16 @@ internal sealed partial class TlsQuicConnection
             }
 
             // A prefix that already fills the datagram leaves nothing for stream data, and the
-            // take's own first-frame exemption - it always takes one frame however large, so a
-            // pass can never make zero progress - would otherwise turn "no room" into "one
-            // frame anyway". The frames stay queued and go out in the next datagram, which by
-            // then has no prefix in front of it.
+            // take's own starvation escape - which still takes one frame however large, but now
+            // only when nothing else has been taken AND the head cannot be split - would
+            // otherwise turn "no room" into "one frame anyway". The frames stay queued and go
+            // out in the next datagram, which by then has no prefix in front of it.
+            //
+            // THE ESCAPE USED TO BE UNCONDITIONAL, which is what made this guard load-bearing
+            // rather than an optimisation: TakePendingFrames admitted its first frame without
+            // measuring it at all. It measures every frame now and splits an oversized STREAM
+            // head, so a positive budget always makes progress and this guard is back to
+            // meaning what it says.
             var taken = budget - spent > 0
                 ? streams.TakePendingFrames(budget - spent)
                 : [];

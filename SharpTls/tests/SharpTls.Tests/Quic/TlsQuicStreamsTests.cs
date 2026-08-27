@@ -1446,6 +1446,180 @@ public sealed class TlsQuicStreamsTests
         Assert.Equal(0UL, stream.UndeliveredBytes);
     }
 
+    // THE MERGE PATHS THE FLOOD ABOVE CANNOT REACH. Every frame in the descending-overlap test
+    // is fully CONTAINED in the range the first one opened, so it exercises one arm of Buffer
+    // and leaves the rest - the gap fill, the partial overlap from either side, and a range
+    // that swallows several held ones - with no witness at all. Each row below lands on a
+    // different arm and every one of them asserts the same two things: the retained total is
+    // the count of DISTINCT bytes covered, and the stream reassembles to the original.
+    //
+    // THE BYTE TOTAL IS THE ASSERTION AND NOT THE PIECE COUNT, because coalescing that split a
+    // range in two where one would do is a representation detail; storing a byte twice or
+    // losing one is the defect. RFC 9000 s2.2's MAY is what makes the second copy droppable:
+    // "An endpoint MAY treat receipt of different data at the same offset within a stream as a
+    // connection error of type PROTOCOL_VIOLATION" - this endpoint takes the other branch, so
+    // the held bytes win and the duplicate is not stored.
+    [Theory]
+    // Exact adjacency: [10,20) then [20,30) - touching, neither overlapping nor gapped.
+    [InlineData(new[] { 10, 20, 20, 30 }, 20)]
+    // Partial overlap from the RIGHT: [10,20) then [15,25) adds only [20,25).
+    [InlineData(new[] { 10, 20, 15, 25 }, 15)]
+    // Partial overlap from the LEFT: [15,25) then [10,20) adds only [10,15).
+    [InlineData(new[] { 15, 25, 10, 20 }, 15)]
+    // Full containment, the arm the flood already covers, kept so the row set is complete.
+    [InlineData(new[] { 10, 30, 15, 20 }, 20)]
+    // One range swallowing several: three islands, then a frame spanning all of them and the
+    // two gaps between - which is the arm that inserts MORE than one piece for one frame.
+    [InlineData(new[] { 10, 12, 16, 18, 22, 24, 10, 24 }, 14)]
+    public void OverlappingPiecesAreStoredOnceWhicheverWayTheyMeet(
+        int[] ranges, int expectedDistinctBytes)
+    {
+        var streams = Set();
+
+        // Content keyed to the ABSOLUTE offset, so a piece stitched at the wrong place is a
+        // comparison failure rather than a length that happens to match.
+        static byte At(int offset) => (byte)((offset * 37) + 11);
+
+        for (var pair = 0; pair < ranges.Length; pair += 2)
+        {
+            var start = ranges[pair];
+            var data = new byte[ranges[pair + 1] - start];
+            for (var index = 0; index < data.Length; index++)
+            {
+                data[index] = At(start + index);
+            }
+
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)start, data), out var error),
+                $"Refused [{start},{ranges[pair + 1]}) with {error}.");
+        }
+
+        var stream = streams.PeerInitiated[0];
+
+        // Nothing has been delivered - offset 0 never arrived - so every distinct byte the
+        // frames covered is still held, exactly once.
+        Assert.Empty(stream.Received);
+        Assert.Equal((ulong)expectedDistinctBytes, stream.UndeliveredBytes);
+
+        // And the gap in front is filled, so the whole run drains in stream order.
+        var lowest = ranges[0];
+        var highest = 0;
+        for (var pair = 0; pair < ranges.Length; pair += 2)
+        {
+            lowest = Math.Min(lowest, ranges[pair]);
+            highest = Math.Max(highest, ranges[pair + 1]);
+        }
+
+        var prefix = new byte[lowest];
+        for (var index = 0; index < prefix.Length; index++)
+        {
+            prefix[index] = At(index);
+        }
+
+        Assert.True(streams.TryReceive(Frame(3, 0, prefix), out _));
+
+        var expected = new byte[highest];
+        for (var index = 0; index < expected.Length; index++)
+        {
+            expected[index] = At(index);
+        }
+
+        Assert.Equal(expected, stream.Received.ToArray());
+        Assert.Equal(0UL, stream.UndeliveredBytes);
+    }
+
+    // ---- the time bound the memory bound did not buy ---------------------------------------
+
+    // COALESCING CAPPED THE BYTES AND NOT THE WORK, which is the half the first fix left open.
+    // Every frame walks the held ranges to find its insertion point and the insert is a List
+    // memmove, so a peer that opens a new range with every frame pays O(k) and the stream pays
+    // O(k^2). At a 1 MiB window that is around 5*10^11 element moves bought with about 12 MB of
+    // traffic - the same attacker cost as the memory amplification it replaced.
+    //
+    // A DESCENDING SEQUENCE OF DISJOINT ONE-BYTE FRAMES IS THE WORST CASE and it is what this
+    // sends: each one lands in front of everything held, so every frame is a new range at index
+    // 0 and every insert moves the whole list.
+    //
+    // s20.1's INTERNAL_ERROR IS THE CODE AND THE ASSERTION IS ON IT, not merely on a refusal.
+    // The peer is inside every limit it was advertised, so FLOW_CONTROL_ERROR would be a lie
+    // about whose bound was hit and PROTOCOL_VIOLATION would claim a compliance failure that
+    // did not happen. What was exceeded is ours.
+    [Fact]
+    public void AStreamFragmentedPastTheRetainedRangeCapClosesWithInternalError()
+    {
+        var streams = Set();
+        streams.MaximumUndeliveredRangesPerStream = 8;
+
+        // Offsets 100, 98, 96 ... - disjoint, descending, one byte each, so no two can merge.
+        for (var range = 0; range < 8; range++)
+        {
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)(100 - (range * 2)), [1]), out var error),
+                $"Refused range {range} with {error}, before the cap was reached.");
+        }
+
+        var stream = streams.PeerInitiated[0];
+        Assert.Equal(8UL, stream.UndeliveredBytes);
+
+        Assert.False(
+            streams.TryReceive(Frame(3, 82, [1]), out var refused),
+            "The ninth disjoint range was accepted against a cap of eight.");
+        Assert.Equal(TlsQuicTransportError.InternalError, refused);
+    }
+
+    // THE FALSE POSITIVE THE CAP WOULD HAVE SHIPPED WITHOUT COMPACTION, and it is the most
+    // ordinary loss there is: ONE dropped datagram at the front of a response, and every packet
+    // after it arriving in order. Each of those frames abuts the last, so the reassembler holds
+    // one contiguous run stored as many pieces - Buffer joins nothing on the way past, it only
+    // declines to store a byte twice. A cap read off the raw piece count would close a
+    // conforming connection on a single lost packet, which is the exact opposite of what the
+    // bound is for.
+    //
+    // FORTY FRAMES THROUGH A CAP OF FOUR, so the count passes the ceiling ten times over and
+    // the only thing that can keep the stream alive is the pieces being joined. The gap at the
+    // front is never filled, so nothing drains and nothing is quietly discarded either.
+    [Fact]
+    public void AContiguousRunBehindOneGapIsCompactedRatherThanCountedAgainstTheCap()
+    {
+        var streams = Set();
+        streams.MaximumUndeliveredRangesPerStream = 4;
+
+        for (var frame = 0; frame < 40; frame++)
+        {
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)(10 + frame), [(byte)frame]), out var error),
+                $"Refused in-order frame {frame} with {error} - forty frames behind one gap "
+                    + "are one range, not forty.");
+        }
+
+        var stream = streams.PeerInitiated[0];
+        Assert.Empty(stream.Received);
+        Assert.Equal(40UL, stream.UndeliveredBytes);
+    }
+
+    // AND A FRAME THAT ADDS NO RANGE AT ALL IS NEVER REFUSED. A retransmission of bytes already
+    // held stores nothing, and s13.3 makes a retransmission ordinary rather than hostile; a cap
+    // that refused one would close conforming connections under nothing worse than packet loss.
+    [Fact]
+    public void ARetransmissionAtTheCapIsAccepted()
+    {
+        var streams = Set();
+        streams.MaximumUndeliveredRangesPerStream = 4;
+
+        // Disjoint and descending, so no two of them can be joined by the compaction above -
+        // this is the shape that genuinely occupies the cap.
+        foreach (var offset in (ulong[])[100, 98, 96, 94])
+        {
+            Assert.True(streams.TryReceive(Frame(3, offset, [1]), out _));
+        }
+
+        Assert.True(
+            streams.TryReceive(Frame(3, 96, [1]), out var duplicate),
+            $"A retransmission at the cap was refused with {duplicate}.");
+
+        Assert.Equal(4UL, streams.PeerInitiated[0].UndeliveredBytes);
+    }
+
     // ---- the audit's finding 3: the two frames that were parsed, policed and discarded ------
 
     // FOUR ASSERTIONS BECAUSE THE DROP COST FOUR SEPARATE THINGS, and a test that checked only
@@ -1461,8 +1635,7 @@ public sealed class TlsQuicStreamsTests
     //
     // THE STREAM IS RESET WITH DATA STILL MISSING, which is the shape that separates a reset
     // from a FIN: two bytes arrived, the peer claims a final size of nine, and seven of them
-    // will never come. `_finalSize == _delivered.Count` is false forever on this input, so a
-    // completion test written only as that comparison cannot pass however the reset is stored.
+    // will never come.
     [Fact]
     public void AResetStreamEndsTheStreamAndReportsThePeersApplicationErrorCode()
     {
@@ -1483,10 +1656,106 @@ public sealed class TlsQuicStreamsTests
         Assert.Equal(0x010cUL, stream.ResetErrorCode);
         Assert.Equal(9UL, stream.FinalSize);
 
-        // THE ONE THE HTTP/3 LAYER HANGS ON. Seven bytes below the final size never arrived
-        // and never will, so this can only be true if the reset ends the stream in its own
-        // right rather than through the length comparison a FIN completes.
-        Assert.True(stream.ReceiveComplete);
+        // AND ReceiveComplete STAYS FALSE, WHICH IS THE ASSERTION THIS TEST GOT WRONG FIRST
+        // TIME. It briefly asserted the opposite, on the reasoning that a reset stream will
+        // deliver nothing further - true, and the wrong question. TlsQuicHttp3Connection reads
+        // ReceiveComplete as `endOfStream` and TlsQuicHttp3Request.TryRead turns that plus an
+        // empty pending buffer into IsComplete, so a reset landing on a frame boundary would
+        // have been handed to the caller as a SUCCESSFUL response with seven bytes missing.
+        // RFC 9114 s4.1 makes a reset response incomplete; a hang is the lesser failure and
+        // silent truncation is the worse one.
+        Assert.False(
+            stream.ReceiveComplete,
+            "A reset stream reported normal completion, which hands the HTTP/3 layer a "
+                + "truncated body as a successful response.");
+    }
+
+    // s13.3: "An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the receiving part of
+    // the stream enters a "Size Known" or "Reset Recvd" state." TlsQuicStreamSet.TryRefreshGrant
+    // quotes that sentence as its reason for refusing to REPAIR such a grant, so originating one
+    // is this file disagreeing with itself one method away - and it is wire output the reset fix
+    // does not need.
+    //
+    // THE RESET HAS TO CROSS THE THRESHOLD OR THERE IS NOTHING TO SUPPRESS. A 16-byte window
+    // puts the update threshold at 8, so a final size of 12 is what makes CreditReceiveWindow
+    // want to raise the limit; a smaller reset would queue nothing either way and the test
+    // would pass against the bug.
+    //
+    // MAX_DATA IS ASSERTED PRESENT IN THE SAME BREATH, because the suppression is s13.3's
+    // per-stream sentence and not a general silence: the connection window this stream will
+    // never use again still has to go back, or the leak CreditedPrefix closes reopens.
+    [Fact]
+    public void AResetStreamQueuesNoMaxStreamDataButStillReturnsTheConnectionWindow()
+    {
+        var local = new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxStreamDataUni = 16,
+            InitialMaxData = 16,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+        };
+        var streams = Set(local: local);
+
+        Assert.True(streams.TryReceive(Frame(3, 0, [1, 2]), out _));
+        Assert.Empty(streams.TakePendingFrames());
+
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Reset(3, finalSize: 12, errorCode: 0x010c),
+            out var error),
+            $"Refused a conforming RESET_STREAM with {error}.");
+
+        var queued = streams.TakePendingFrames();
+        Assert.DoesNotContain(
+            queued, f => f.RawType == (ulong)TlsQuicFrameType.MaxStreamData);
+
+        var maximumData = Assert.Single(
+            queued, f => f.RawType == (ulong)TlsQuicFrameType.MaxData);
+
+        // The final size (12) plus one whole connection window (16). s4.5's "MUST use the final
+        // size ... in its connection level flow controller" charged all 12 when the reset
+        // arrived, so all 12 are what comes back.
+        Assert.Equal(28UL, maximumData.MaximumData);
+    }
+
+    // s20.1's FINAL_SIZE_ERROR case (2) is about "the size of stream data that was already
+    // received", and the two comparisons this used to make - the delivered prefix and the
+    // highest buffered end - both count stored BYTES. s19.8 makes a zero-length frame an
+    // assertion about position instead: "When a Stream Data field has a length of 0, the offset
+    // in the STREAM frame is the offset of the next byte that would be sent."
+    //
+    // SO THE PEER CAN SPEND WINDOW WITHOUT STORING ANYTHING. STREAM(offset=500, len=0) charges
+    // 500 bytes of connection window through TryAdmitConnectionData and leaves both old
+    // comparisons at zero, and a final size of 100 then passed. On the RESET_STREAM row that is
+    // not just a missed error: CreditedPrefix credits the connection window back at the final
+    // size, so 400 of the 500 charged went to neither the peer nor the pool.
+    //
+    // BOTH FRAMES THAT CARRY A FINAL SIZE, because s20.1 case (2) names both and they reach the
+    // check through different methods - TryReceive's FIN arm and TryReceiveReset.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AFinBelowAZeroLengthFrameThatAlreadySpentTheWindowIsFinalSizeError(bool reset)
+    {
+        var streams = Set();
+
+        // No bytes, but s19.8 says the next byte goes at 500 - and the connection window has
+        // been charged for the distance.
+        Assert.True(streams.TryReceive(Frame(3, 500, []), out _));
+        Assert.Equal(500UL, streams.PeerInitiated[0].LargestReceivedOffset);
+        Assert.Empty(streams.PeerInitiated[0].Received);
+
+        var refused = reset
+            ? streams.TryReceiveStreamStateSignal(
+                Reset(3, finalSize: 100, errorCode: 0x010c), out var error)
+            : streams.TryReceive(Frame(3, 0, new byte[100], fin: true), out error);
+
+        Assert.False(refused, "A final size below what the peer already claimed was accepted.");
+        Assert.Equal(TlsQuicTransportError.FinalSizeError, error);
     }
 
     // s20.1's FINAL_SIZE_ERROR names RESET_STREAM in two of its three cases and neither could
@@ -1515,6 +1784,48 @@ public sealed class TlsQuicStreamsTests
                 Reset(3, resetFinalSize, errorCode: 0x010c), out var error),
             $"s20.1's case ({expectedCase}) accepted a contradictory final size.");
         Assert.Equal(TlsQuicTransportError.FinalSizeError, error);
+    }
+
+    // s4.6 binds every frame that NAMES a stream and not only the STREAM frame that creates
+    // one: "An endpoint that receives a frame with a stream ID exceeding the limit it has sent
+    // MUST treat this as a connection error of type STREAM_LIMIT_ERROR." TryReceive has always
+    // enforced it for s19.8 and these three types fell straight through - harmless while the
+    // arm did nothing, and not harmless once a RESET_STREAM establishes a final size and spends
+    // connection window on a stream identifier we never agreed to.
+    //
+    // ONE ROW PER TYPE, because they reach the check through the same line but a reader cannot
+    // tell that from a single-type test, and s19.13's STREAM_DATA_BLOCKED is the one that would
+    // be quietly dropped from the arm without any other row noticing.
+    [Theory]
+    [InlineData((ulong)TlsQuicFrameType.ResetStream)]
+    [InlineData((ulong)TlsQuicFrameType.StopSending)]
+    [InlineData((ulong)TlsQuicFrameType.StreamDataBlocked)]
+    public void AStreamStateSignalAboveTheAdvertisedStreamLimitIsStreamLimitError(ulong frameType)
+    {
+        var local = new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxStreamsUni = 2,
+            InitialMaxStreamsBidi = 2,
+            InitialMaxData = 1_000_000,
+            InitialMaxStreamDataUni = 100_000,
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+        };
+        var streams = Set(local: local);
+
+        // s2.1 ordinal 1 of the server-initiated bidirectional type, inside a limit of 2. A
+        // bidirectional id so that no row is refused by the DIRECTION rules instead, which
+        // would make every row pass for the wrong reason.
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Signal(frameType, 5), out var inside),
+            $"Refused an identifier inside the advertised limit with {inside}.");
+
+        // Ordinal 2, one past it - s19.11's worked example read at the identifier rather than
+        // at a count of live streams.
+        Assert.False(
+            streams.TryReceiveStreamStateSignal(Signal(frameType, 9), out var beyond),
+            "An identifier past the advertised stream limit was accepted.");
+        Assert.Equal(TlsQuicTransportError.StreamLimitError, beyond);
     }
 
     // RFC 9000 s3.5: "An endpoint that receives a STOP_SENDING frame MUST send a RESET_STREAM
