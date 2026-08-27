@@ -1024,7 +1024,7 @@ public sealed partial class TlsQuicConnectionTests
 
         Assert.True(stream.TryReceive(
             (ulong)stream.Received.Count, ReadOnlySpan<byte>.Empty, true, out _));
-        Assert.True(stream.FinReceived);
+        Assert.True(stream.FinalSizeKnown);
 
         Assert.False(streams.TryRefreshGrant(lost, out _));
     }

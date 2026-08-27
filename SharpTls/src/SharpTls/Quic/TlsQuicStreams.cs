@@ -759,26 +759,6 @@ internal sealed class TlsQuicStream
     /// </remarks>
     internal bool FinalSizeKnown => _finalSize is not null;
 
-    /// <summary>The former name of <see cref="FinalSizeKnown"/>, kept only until its last
-    /// caller moves across.</summary>
-    /// <remarks>MISNAMED, WHICH IS THE WHOLE REASON IT IS BEING RETIRED: RFC 9000 s4.5 has
-    /// RESET_STREAM establish a final size too, so this answers true on a stream where no FIN
-    /// has ever arrived. NOTHING IN <c>src/</c> READS IT ANY MORE - TlsQuicHttp3Streams and
-    /// TlsQuicStreamSet.TryRefreshGrant both say <see cref="FinalSizeKnown"/> now. It survives
-    /// only for three TEST files owned elsewhere, which is a compile dependency rather than a
-    /// design one:
-    /// <list type="bullet">
-    /// <item>TlsQuicConnectionTests.APeerInitiatedUnidirectionalStreamIsAcceptedAndItsBytes
-    /// DeliveredInOrder</item>
-    /// <item>TlsQuicConnectionTests.AGrantIsNotRepairedOnceThePeersFinalSizeIsKnown - whose
-    /// own NAME already says final size rather than FIN</item>
-    /// <item>QuicPublicEndpointInteropTests.AnHttp3RequestReturnsTheLiveFingerprintFromBoth
-    /// Endpoints, in a diagnostic summary string</item>
-    /// </list>
-    /// Delete this property the moment those three read <see cref="FinalSizeKnown"/>; there is
-    /// no caller left that wants the old spelling for its own sake.</remarks>
-    internal bool FinReceived => FinalSizeKnown;
-
     /// <summary>Gets the stream's final size once one is established - s19.8: "The final size
     /// of the stream is the sum of the offset and the length of this frame", or s19.4's Final
     /// Size field where a RESET_STREAM established it instead.</summary>

@@ -480,7 +480,7 @@ public sealed class QuicPublicEndpointInteropTests
             summary.Append($" response_ms={(clock.Elapsed - handshakeAt).TotalMilliseconds:F0}");
             summary.Append($" status={response?.Status ?? -1}");
             summary.Append($" body_bytes={response?.Body.Length ?? 0}");
-            summary.Append($" fin={stream.FinReceived}");
+            summary.Append($" fin={stream.FinalSizeKnown}");
             summary.Append($" h3_error=0x{refusedAt:x}");
             // Two counters, never one number - the neighbouring test's header explains why.
             summary.Append($" discarded={connection.DiscardedPackets}");

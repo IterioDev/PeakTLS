@@ -156,7 +156,7 @@ public sealed partial class TlsQuicConnectionTests
         Assert.True(await connection.PumpOnceAsync(cancellation.Token));
 
         Assert.Equal(new byte[] { 0xc0, 0xd1, 0xd2, 0xd3, 0xd4 }, control.Received);
-        Assert.False(control.FinReceived);
+        Assert.False(control.FinalSizeKnown);
     }
 
     [Fact]
