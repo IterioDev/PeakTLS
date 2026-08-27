@@ -711,35 +711,51 @@ public sealed partial class TlsQuicConnectionTests
         var first = Convert.FromHexString("5E5E5E5E5E5E");
         var second = Convert.FromHexString("A1A1A1A1A1A1");
 
-        // THE FIRST ONE CANNOT BE OPENED, AND THAT IS WHAT SEPARATES THIS CLAUSE FROM THE ONE
-        // APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded WITNESSES. That clause
-        // binds only "Once a client has received a VALID Initial packet from the server", so a
-        // datagram sealed with the client secret never arms it - and the packet still moves our
-        // Destination Connection ID, because s7.2's adoption sentence says "Upon first
-        // receiving an Initial or Retry packet" and this implementation runs it before the
-        // AEAD. That placement is a CHOICE, not a necessity - the Initial keys come from the
-        // ORIGINAL Destination Connection ID, which never moves, so a post-AEAD placement would
-        // open the same packets - and s7.3 is what makes the choice safe, by authenticating
-        // both connection IDs in transport parameters.
+        // THE FIRST ONE CANNOT BE OPENED, AND SINCE AUDIT FINDING 7 THAT IS WHY IT MOVES
+        // NOTHING. s7.2's adoption sentence reads "Upon first receiving an Initial or Retry
+        // packet from the server", and the section's own next clause supplies the word the
+        // sentence leans on - "Once a client has received a VALID Initial packet from the
+        // server". This datagram is sealed with RFC 9001 s5.2's CLIENT secret, so a client
+        // cannot open it; it is a datagram from the server only in the sense that anyone can
+        // write one. The adoption used to run before _receiver.Receive and take it anyway,
+        // which handed any off-path sender who could observe or guess our Initial Destination
+        // Connection ID - it travels in the clear, because s5.2 keys Initial from it - a
+        // permanent redirect of this endpoint.
         transport.EnqueueReceive(sent => ClientSecretInitialReply(sent, first));
         transport.EnqueueReceive(sent => ServerInitialReply(sent, second));
 
+        var drawn = connection.OriginalDestinationConnectionId.ToArray();
+
         await connection.StartAsync(cancellation.Token);
         await connection.PumpOnceAsync(cancellation.Token);
-        Assert.Equal(first, connection.DestinationConnectionId.ToArray());
+
+        // INERT. The forgery was counted as discarded and changed nothing: we are still
+        // addressing the connection ID this client drew for itself.
+        Assert.Equal(drawn, connection.DestinationConnectionId.ToArray());
         Assert.Equal(1, connection.DiscardedPackets);
 
         await connection.PumpOnceAsync(cancellation.Token);
 
-        // STILL THE FIRST ONE, and read off the wire as well as off the field: a connection
-        // that adopted again would address this answer to A1A1A1A1A1A1. The second datagram
-        // was processed - it answered the PING - so this is the once-only guard and not a
-        // packet that failed to arrive.
-        Assert.Equal(first, connection.DestinationConnectionId.ToArray());
+        // AND THE FIRST PACKET THE AEAD ACTUALLY OPENED IS THE ONE THAT MOVES IT - read off the
+        // wire as well as off the field, because the field alone would not show that the answer
+        // went to the new value.
+        Assert.Equal(second, connection.DestinationConnectionId.ToArray());
         Assert.Equal(2, transport.Sent.Count);
         Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
             transport.Sent[1].Payload, out var answer, out _));
-        Assert.Equal(first, answer.DestinationConnectionId.ToArray());
+        Assert.Equal(second, answer.DestinationConnectionId.ToArray());
+
+        // THE ONCE-ONLY GUARD IS NOW SUBSUMED RATHER THAN UNWITNESSED, AND THE LEDGER SHOULD
+        // SAY SO. s7.2's "A client MUST change the Destination Connection ID it uses for sending
+        // packets in response to only the first received Initial or Retry packet" used to need
+        // its own row here, because a second unauthenticated packet could reach the adoption.
+        // It no longer can: the adoption sits on the same line as
+        // _validatedServerSourceConnectionId, and every later packet carrying a DIFFERENT Source
+        // Connection ID is discarded before that line by the clause
+        // APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded pins, while one
+        // carrying the SAME value would re-adopt the value already held. The latch stays in the
+        // source as the MUST written down; there is no input left that can separate keeping it
+        // from dropping it.
     }
 
     [Fact]
@@ -947,6 +963,67 @@ public sealed partial class TlsQuicConnectionTests
     // arbitrary and that nothing may depend on its value, only on differences from it.
     private static readonly DateTimeOffset StartOfScriptedTime =
         new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    /// <summary>
+    /// AUDIT FINDING 4. <c>BuildAnswerDatagram</c> probed for write keys AFTER it had already
+    /// taken from its two sources - <c>TakeRepairsInto</c>, which removes from the owed-repair
+    /// list, and the pending-CRYPTO loop, which removes from the caller's list. On the discarded
+    /// arm it then dropped the frame list it had moved everything into, with
+    /// <c>RecordRepairable</c> not yet reached, so the bytes were neither on the wire nor
+    /// retransmittable. <c>SendAnswerAsync</c> saw <c>written &lt;= 0</c> and a <c>crypto</c> list
+    /// shorter than it should be, raised nothing, and the handshake stalled to the abandonment
+    /// deadline.
+    /// <para>DRIVEN DIRECTLY, AND THE REASON IS RECORDED RATHER THAN ASSUMED. The state the
+    /// finding needs - a level whose write keys are Discarded while CRYPTO for it is queued -
+    /// cannot be produced through <c>PumpOnceAsync</c>: <c>crypto</c> is rebuilt per call from
+    /// that pump's own results, and every discard this client performs happens after
+    /// <c>SendAnswerAsync</c>'s loop. So the KEYS are real - RFC 9001 s4.9.1's "a client MUST
+    /// discard Initial keys when it first sends a Handshake packet", reached by a real handshake
+    /// against a real peer - and only the arrival of the CRYPTO is supplied here, in the shape
+    /// the TLS stack would have supplied it.</para>
+    /// <para>WHAT IS ASSERTED IS THAT NOTHING WAS TAKEN. The bytes cannot go out at a level
+    /// whose keys are gone - RFC 9001 s4.9.1 forbids it in as many words, "Endpoints MUST NOT
+    /// send Initial packets after this point" - so the correct outcome is that they stay
+    /// exactly where they were, at the offset they had, for whatever the caller does next.
+    /// Before the fix this list came back empty.</para>
+    /// </summary>
+    [Fact]
+    public async Task CryptoQueuedForALevelWhoseWriteKeysAreGoneIsLeftQueuedRatherThanConsumedAndDropped()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+
+        // RFC 9001 s4.9.1's trigger has fired: the answer above carried this connection's first
+        // Handshake packet. Asserted, because the whole test is about what happens at a level in
+        // this state and a level that was merely never keyed would take a different arm.
+        Assert.Equal(
+            TlsQuicKeyLevelState.Discarded,
+            connection.WriteStateOf(TlsQuicEncryptionLevel.Initial));
+
+        var stranded = new byte[64];
+        stranded.AsSpan().Fill(0x5A);
+        var crypto = new List<TlsQuicConnection.PendingCrypto>
+        {
+            new(TlsQuicEncryptionLevel.Initial, 17, stranded),
+        };
+
+        connection.BuildAnswerDatagram(crypto, SentAt, out _, out _);
+
+        var left = Assert.Single(crypto);
+        Assert.Equal(TlsQuicEncryptionLevel.Initial, left.Level);
+        Assert.Equal(17UL, left.Offset);
+        Assert.Equal(stranded, left.Data.ToArray());
+    }
 
     // No clock in the loopback half: LoopbackQuicPeer builds every packet at one instant and
     // reads no clock of its own.

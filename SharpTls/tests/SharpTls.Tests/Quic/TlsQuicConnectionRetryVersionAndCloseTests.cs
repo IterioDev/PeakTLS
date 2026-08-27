@@ -227,18 +227,26 @@ public sealed partial class TlsQuicConnectionTests
         await using var transport = new ScriptedDatagramTransport();
         await using var connection = Connection(transport, pki);
 
-        // THE SAME MUST AS ARetryWhoseSourceConnectionIdEqualsOurDestinationIsIgnored, AGAINST
-        // THE OPERAND THAT ROW SILENTLY GETS RIGHT FOR FREE. RFC 9000 s17.2.5.1: "A client MUST
-        // discard a Retry packet that contains a Source Connection ID field that is identical to
-        // the Destination Connection ID field of ITS INITIAL PACKET." Before anything has moved,
-        // the connection ID we drew and the one we are currently addressing are the same bytes,
-        // so a comparison against either passes that row. This one prises them apart.
+        // THE SAME MUST AS ARetryWhoseSourceConnectionIdEqualsOurDestinationIsIgnored. RFC 9000
+        // s17.2.5.1: "A client MUST discard a Retry packet that contains a Source Connection ID
+        // field that is identical to the Destination Connection ID field of ITS INITIAL PACKET."
         //
-        // AN INJECTED INITIAL MOVES THE WRONG OPERAND AND NOTHING ELSE. It is sealed with RFC
-        // 9001 s5.2's CLIENT secret, so a client cannot open it and _processedServerPacket stays
-        // false - which is what keeps the Retry path reachable at all - but s7.2's adoption runs
-        // before the AEAD, so our Destination Connection ID is the attacker's value by the time
-        // the Retry lands.
+        // THE TWO OPERANDS THIS ROW ONCE PRISED APART CAN NO LONGER BE SEPARATED, AND SAYING SO
+        // IS THE POINT OF KEEPING IT. It used to inject an unopenable Initial to move the
+        // CURRENT Destination Connection ID away from the one we DREW, so that a comparison
+        // written against the wrong operand would read "ODCID != attacker value" and adopt the
+        // forgery. Audit finding 7 put s7.2's adoption behind the AEAD, so nothing an attacker
+        // can send moves it - and before any packet the AEAD opens, the drawn value and the
+        // addressed value are the same bytes by construction. The only thing that could separate
+        // them now is a VALID server Initial, and ARetryThatFollowsASuccessfullyProcessedServer
+        // PacketIsIgnored is the rule that makes the Retry unreachable after one of those. So
+        // the mutation "compare against the current Destination Connection ID" is vacuous today;
+        // the source keeps OriginalDestinationConnectionId because s17.2.5.1 names it, not
+        // because a test can tell.
+        //
+        // THE INJECTION IS KEPT AS THE INERTNESS CHECK IT HAS BECOME. It is sealed with RFC 9001
+        // s5.2's CLIENT secret, so a client cannot open it and _processedServerPacket stays
+        // false - which is what keeps the Retry path reachable at all.
         var attackerConnectionId = Convert.FromHexString("ADADADADADADADAD");
         transport.EnqueueReceive(sent => ClientSecretInitialReply(sent, attackerConnectionId));
 
@@ -259,7 +267,7 @@ public sealed partial class TlsQuicConnectionTests
 
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
         Assert.Equal(1, connection.DiscardedPackets);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.NotEqual(attackerConnectionId, connection.DestinationConnectionId.ToArray());
 
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
 
@@ -268,10 +276,12 @@ public sealed partial class TlsQuicConnectionTests
         Assert.True(connection.RetryToken.IsEmpty);
 
         // Neither the token nor a second flight went anywhere: the opening flight is still the
-        // only datagram on the wire, and we are still addressing the injected value rather than
-        // the one the discarded Retry offered.
+        // only datagram on the wire, and we are still addressing the connection ID we drew -
+        // neither the injected value nor the one the discarded Retry offered.
         Assert.Single(transport.Sent);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.Equal(
+            connection.OriginalDestinationConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
     }
 
     [Fact]
@@ -559,6 +569,80 @@ public sealed partial class TlsQuicConnectionTests
             async () => await connection.PumpOnceAsync(cancellation.Token));
         Assert.Contains("s10.2", stopped.Message, StringComparison.Ordinal);
         Assert.Equal(2, transport.Sent.Count);
+    }
+
+    /// <summary>
+    /// AUDIT FINDING 9. RFC 9000 s10.2: "An endpoint sends a CONNECTION_CLOSE frame (Section
+    /// 19.19) to terminate the connection immediately." <c>PumpOnceAsync</c> raised an
+    /// <see cref="InvalidOperationException"/> for four classes of peer violation - a malformed
+    /// ACK, a refused STREAM frame, a connection-scoped protocol failure, and any close the
+    /// receiver signalled - each with the right s20.1 code spelled into the message text, and
+    /// sent NOTHING. The peer then waited out s10.1's idle period to discover a connection that
+    /// had ended one datagram ago.
+    /// <para>RETIRE_CONNECTION_ID IS THE CHEAPEST OF THE FOUR TO PROVOKE and needs no forged
+    /// bytes: s19.16 makes it a PROTOCOL_VIOLATION outright against an endpoint with a
+    /// zero-length source connection ID, which is what
+    /// <c>TlsQuicConnectionSpec.SourceConnectionIdLength</c> gives the shipped profiles.</para>
+    /// </summary>
+    [Fact]
+    public async Task APeerProtocolViolationSendsConnectionCloseBeforeItThrows()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // DRAINED, FOR THE REASON AfterConfirmationTheCloseGoesOutInAOneRttPacketAsSection1023
+        // Requires gives: the pump above answered HANDSHAKE_DONE with a 1-RTT ACK, and
+        // LoopbackQuicPeer.PumpOnceAsync reads ONE datagram per call - so without this the pump
+        // after the close would open the ACK and the close assertions would read a stale null.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Null(serverPeer.LastConnectionClose);
+
+        var sentBefore = clientTransport.Sent.Count;
+
+        // s19.16: "An endpoint that provides a zero-length connection ID MUST treat receipt of a
+        // RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION."
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.RetireConnectionId,
+                    SequenceNumber = 0,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("RETIRE_CONNECTION_ID", error.Message, StringComparison.Ordinal);
+
+        // THE FRAME WENT OUT BEFORE THE THROW, which is the whole finding. A datagram left, the
+        // connection recorded what it closed with, and s10.2's closing state was entered.
+        Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
+        Assert.Equal(TlsQuicTransportError.ProtocolViolation, connection.ClosedWith);
+        Assert.True(connection.IsDraining);
+
+        // AND THE PEER CAN READ IT. s19.19's type 0x1c - the transport form, because this is an
+        // s20.1 code and not an application one - carrying PROTOCOL_VIOLATION (0x0a) in a 1-RTT
+        // packet, which is where s10.2.3's confirmed arm requires it: "After the handshake is
+        // confirmed ... an endpoint MUST send any CONNECTION_CLOSE frames in a 1-RTT packet."
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        var close = Assert.NotNull(serverPeer.LastConnectionClose);
+        Assert.Equal((ulong)TlsQuicFrameType.ConnectionClose, close.RawType);
+        Assert.Equal((ulong)TlsQuicTransportError.ProtocolViolation, close.ErrorCode);
+        Assert.Equal(TlsQuicEncryptionLevel.Application, close.Level);
     }
 
     [Fact]
@@ -1058,6 +1142,79 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(510, close.ReasonPhrase.Length);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 10. RFC 9000 s10.2.3, the unconfirmed arm: "Prior to confirming the
+    /// handshake, a peer might be unable to process 1-RTT packets, so an endpoint SHOULD send a
+    /// CONNECTION_CLOSE frame in both Handshake and 1-RTT packets." The same reasoning runs one
+    /// level further down - a server that has not yet installed our Handshake keys can read only
+    /// the Initial packet - and s10.2.3 names the shape of the answer in the next breath: "The
+    /// CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
+    /// datagram."
+    /// <para>THE WALK USED TO <c>return</c> ON ITS FIRST HIT, so [Handshake, Initial] produced a
+    /// Handshake close and nothing else, and the Initial copy the section asks for was never
+    /// built. Deleting the second copy again turns this test's <c>Equal(2, ...)</c> red.</para>
+    /// <para>READ OFF THE CLEAR-TEXT HEADER FIRST, because RFC 9000 s17.2's Long Packet Type
+    /// bits sit above the four bits RFC 9001 s5.4.1's header protection masks - so the two
+    /// packet types are legible with no key at all, which is exactly the position the server
+    /// this defends against is in. The peer then opens both, which is what turns "two packets"
+    /// into "two closes".</para>
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+
+        // The s7.3 refusal is used only as a way of reaching an UNCONFIRMED close with both
+        // handshake levels keyed - which is the one window s10.2.3's SHOULD is about. What the
+        // close SAYS is AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
+        // ParameterError's claim, and is not re-asserted here.
+        await using var server = Server(
+            credential,
+            connection.OriginalDestinationConnectionId,
+            overrideOriginalDestination: Convert.FromHexString("F0F1F2F3F4F5F6F7"));
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.False(connection.IsHandshakeConfirmed);
+        Assert.True(connection.IsDraining);
+
+        // TWO PACKETS IN ONE DATAGRAM, highest protection first. The order is s10.2.3's
+        // "Generally ... the highest level of packet protection" rather than s12.2's ascending
+        // suggestion, because on the teardown path the copy most likely to be openable is the
+        // one to lead with.
+        var closeDatagram = clientTransport.Sent[^1];
+        var coalesced = TlsQuicDatagramReader.Read(closeDatagram).ToList();
+        Assert.Equal(2, coalesced.Count);
+
+        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
+            coalesced[0].Packet, out var handshakeHeader, out _));
+        Assert.Equal(TlsQuicLongPacketType.Handshake, handshakeHeader.Type);
+
+        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
+            coalesced[1].Packet, out var initialHeader, out _));
+        Assert.Equal(TlsQuicLongPacketType.Initial, initialHeader.Type);
+
+        // AND BOTH CARRY THE FRAME, which the header bits alone cannot say. The peer holds read
+        // keys at both levels, so this is the AEAD's answer rather than a parser's.
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Handshake, TlsQuicFrameType.ConnectionClose),
+            serverPeer.LastDatagramFrames);
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Initial, TlsQuicFrameType.ConnectionClose),
+            serverPeer.LastDatagramFrames);
+    }
+
     // ---- RFC 9000 s10.1: idle timeout ----------------------------------------------------
 
     [Fact]
@@ -1100,6 +1257,63 @@ public sealed partial class TlsQuicConnectionTests
         // minimum-of-both rule buys and what makes silence correct rather than rude.
         Assert.Single(transport.Sent);
         Assert.Null(connection.ClosedWith);
+    }
+
+    /// <summary>
+    /// AUDIT FINDING 15. RFC 9000 s10.1's third paragraph: "To avoid excessively small idle
+    /// timeout periods, endpoints MUST increase the idle timeout period to be at least three
+    /// times the current Probe Timeout (PTO). This allows for multiple PTOs to expire, and
+    /// therefore multiple probes to be sent and lost, prior to idle timeout." <c>IdleDeadline</c>
+    /// was <c>_idleSince + EffectiveIdleTimeout()</c> and nothing else, so an endpoint that
+    /// advertised a small max_idle_timeout gave up on a slow path before it had finished probing
+    /// - and before the peer, whose PTO is measured on the same RTT, expected it to.
+    /// <para>ONE MILLISECOND ADVERTISED, AND A DATAGRAM 100 MILLISECONDS LATE. Without the floor
+    /// the receive is bounded at one millisecond and the pump abandons; with it the period is
+    /// three PTOs - about three seconds on kInitialRtt - and the datagram is simply received. The
+    /// gap between the two outcomes is three orders of magnitude, so no clock jitter can blur
+    /// it.</para>
+    /// <para>THE DELAY SITS BELOW ONE PTO ON PURPOSE, asserted rather than assumed below: the
+    /// probe timeout is the OTHER thing that can wake this receive, and a datagram scheduled
+    /// after it would be measuring A.9 rather than s10.1.</para>
+    /// </summary>
+    [Fact]
+    public async Task AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        await using var transport = new ScriptedDatagramTransport();
+
+        // An hour of deadline and three hours of local policy, so neither can be what ends -
+        // or fails to end - this pump. The advertised millisecond is the only short bound.
+        await using var connection = Connection(
+            transport,
+            pki,
+            handshakeDeadline: TimeSpan.FromHours(1),
+            idleTimeout: TimeSpan.FromHours(3),
+            maxIdleTimeoutMilliseconds: 1);
+
+        var late = TimeSpan.FromMilliseconds(100);
+        transport.EnqueueReceive([1, 2, 3, 4], delay: late);
+
+        await connection.StartAsync(cancellation.Token);
+
+        // The advertised value is unchanged by the floor, which is the whole reason the floor
+        // lives in IdleDeadline and not in EffectiveIdleTimeout: s10.1's "minimum of the two
+        // advertised values" is a fact about the advertisements and stays assertable.
+        Assert.Equal(TimeSpan.FromMilliseconds(1), connection.EffectiveIdleTimeout());
+
+        // THE PRECONDITIONS, BOTH OF THEM. The delay must be past the advertised period - or
+        // the old behaviour would have received the datagram too and this test would witness
+        // nothing - and short of one PTO, or the probe timer would be what woke the receive.
+        Assert.True(late > connection.EffectiveIdleTimeout());
+        Assert.True(InitialPtoPeriod > late);
+
+        // RECEIVED, NOT ABANDONED. The four bytes are rubbish and are discarded by the packet
+        // layer under RFC 9000 s12.2, which is all this needs: the claim is that the receive was
+        // still open at 100 milliseconds, and a TimeoutException here is the pre-fix behaviour.
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(connection.IdleTimedOut);
+        Assert.Equal(late, transport.Clock.GetUtcNow() - StartOfScriptedTime);
     }
 
     [Fact]
@@ -1433,7 +1647,7 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     [Fact]
-    public async Task AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73()
+    public async Task AnInjectedFirstInitialDoesNotMoveTheDestinationConnectionId()
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
         using var pki = TestPki.Create();
@@ -1446,17 +1660,23 @@ public sealed partial class TlsQuicConnectionTests
 
         await connection.StartAsync(cancellation.Token);
 
-        // THE ATTACK RFC 9000 s7.3 NAMES, BUILT. "Including connection ID values in transport
-        // parameters and verifying them ensures that an attacker cannot influence the choice of
-        // connection ID for a successful connection by injecting packets carrying
-        // attacker-chosen connection IDs during the handshake."
+        // THE ATTACK RFC 9000 s7.3 NAMES, BUILT - AND SINCE AUDIT FINDING 7 IT COSTS NOTHING AT
+        // ALL. s7.3's purpose clause is the sentence that used to be the only thing standing
+        // behind the adoption: "Including connection ID values in transport parameters and
+        // verifying them ensures that an attacker cannot influence the choice of connection ID
+        // for a successful connection by injecting packets carrying attacker-chosen connection
+        // IDs during the handshake." Note what it promises and what it does not - no SUCCESSFUL
+        // connection is influenced. The attempt still died, on every injection, from anywhere on
+        // the internet, with no key material at all.
         //
-        // ZERO KEY MATERIAL IS NEEDED FOR THE INJECTION, because this implementation adopts
-        // BEFORE the AEAD. So this packet, sealed with the CLIENT secret and therefore
-        // unopenable by a client, still moves the Destination Connection ID before its AEAD
-        // fails. The pre-AEAD placement is a choice rather than a necessity - the Initial keys
-        // come from the ORIGINAL Destination Connection ID, which never moves - and s7.3 is
-        // what makes it safe.
+        // ZERO KEY MATERIAL IS STILL NEEDED TO SEND THIS PACKET, which is exactly why the
+        // adoption may not read it. Our Initial Destination Connection ID travels in the clear
+        // - RFC 9001 s5.2 keys the Initial secrets from it, so it cannot be hidden - so an
+        // off-path sender who observes or guesses it can put this long header on the path ahead
+        // of the server's reply. It is sealed with s5.2's CLIENT secret, so a client cannot
+        // open it; the adoption used to run before _receiver.Receive and take its Source
+        // Connection ID anyway, and _adoptedServerConnectionId latched, so the genuine server
+        // packet could never correct it.
         var attackerConnectionId = Convert.FromHexString("ADADADADADADADAD");
         await serverTransport.SendAsync(
             clientTransport.LocalEndPoint,
@@ -1465,28 +1685,35 @@ public sealed partial class TlsQuicConnectionTests
                 attackerConnectionId),
             cancellation.Token);
 
-        // The forgery is discarded by the AEAD and does NOT end the attempt - s12.2 - but it
-        // has already taken s7.2's once-only adoption with it.
+        // The forgery is discarded by the AEAD and does NOT end the attempt - s12.2 - and it now
+        // takes nothing with it: s7.2's adoption sits behind `outcome.Processed > 0`, which this
+        // packet never reaches.
         Assert.False(await connection.PumpOnceAsync(cancellation.Token));
         Assert.Equal(1, connection.DiscardedPackets);
-        Assert.Equal(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.NotEqual(attackerConnectionId, connection.DestinationConnectionId.ToArray());
+        Assert.Equal(
+            connection.OriginalDestinationConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
 
         // The honest server now answers, and its flight opens perfectly well: the AEAD key comes
         // from the Destination Connection ID of our FIRST Initial packet, not from the field on
-        // any later one, so nothing before s7.3 can notice.
+        // any later one, so the injection could not have stopped it either.
         Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await connection.PumpOnceAsync(cancellation.Token));
+        // AND THE HANDSHAKE PROCEEDS RATHER THAN CLOSING. This is the whole of the finding: the
+        // same script used to end here in a TRANSPORT_PARAMETER_ERROR raised by s7.3 against the
+        // attacker's value, which is a connection killed by a stranger's datagram. s7.3 still
+        // runs - AConformingServersConnectionIdParametersPassSection73 is its witness - it just
+        // has nothing to catch, because the value it checks was never moved.
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Null(connection.ClosedWith);
+        Assert.False(connection.IsDraining);
 
-        // s7.3: the parameter must match "the values that an endpoint used in the Destination
-        // and Source Connection ID fields of Initial packets that it sent" - which after the
-        // injection is the attacker's value, not the server's. A comparison against the Source
-        // Connection ID we merely OBSERVED would agree here and let the connection succeed
-        // while addressed to a connection ID an attacker chose.
-        Assert.Contains("initial_source_connection_id (0x0F)", error.Message, StringComparison.Ordinal);
-        Assert.Contains("adadadadadadadad", error.Message, StringComparison.Ordinal);
-        Assert.Equal(TlsQuicTransportError.TransportParameterError, connection.ClosedWith);
+        // We are addressing the server's Source Connection ID, taken from the packet its AEAD
+        // opened - not the attacker's, and not our own draw any more either.
+        Assert.Equal(
+            serverPeer.SourceConnectionId.ToArray(),
+            connection.DestinationConnectionId.ToArray());
     }
 
     [Theory]

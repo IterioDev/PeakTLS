@@ -180,7 +180,7 @@ namespace SharpTls.Quic;
 //   33. The coalescing order knob ignored        [WAS-SURVIVOR] -> now ONLY ThePacketsOfOneDatagramAreCoalescedInTheOrderTheSpecAsksFor(False)
 //   34. The ACK-position knob ignored            [WAS-SURVIVOR] -> now ONLY TheAcksPositionInsideThePacketIsTheOneTheSpecAsksFor(False)
 //   35. The trailing-ACK branch deleted          ONLY TheAcksPositionInsideThePacketIsTheOneTheSpecAsksFor(False)
-//   36. s7.2's once-only adoption guard neutered  [WAS-SURVIVOR] -> now ONLY OnlyTheFirstServerPacketMovesOurDestinationConnectionId
+//   36. s7.2's once-only adoption guard neutered  [NOW VACUOUS] - see OnlyTheFirstServerPacketMovesOurDestinationConnectionId's closing note
 //   37. s7.2's changed-Source-CID discard deleted  ONLY APacketWhoseSourceConnectionIdChangedAfterAValidOneIsDiscarded
 //   38. s7.2's "valid" dropped - the Source CID recorded before the AEAD  2 tests
 //   39. The ack_delay_exponent reconciliation deleted  ONLY AnAdvertisedAckDelayExponentThatDisagreesWithTheOneWeScaleByIsRefused
@@ -227,7 +227,7 @@ namespace SharpTls.Quic;
 //   79. s7.3 compares LENGTHS instead of bytes                    4 tests
 //   80. s7.3 absence not treated as an error                      3 tests
 //   81. s7.3 retry_source without a Retry accepted                ONLY ARetrySourceConnectionIdSentWithoutARetryClosesWithTransportParameterError
-//   82. s7.3 initial_source compared against the OBSERVED CID     [WAS-SURVIVOR] -> now ONLY AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73
+//   82. s7.3 initial_source compared against the OBSERVED CID     [NOW VACUOUS] - see below
 //   83. s7.3 original_destination compared against the current CID 4 tests
 //   84. s7.3 retry_source never checked after a Retry             ONLY AHandshakeAfterARetryValidatesRetrySourceConnectionId
 //   85. "successfully processed" never becomes true               2 tests
@@ -1514,7 +1514,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// immutable and should stay both. What the send path needs is a queue it can take the front
     /// of and put the remainder back into, which is a different thing from the event the TLS
     /// stack raised.</remarks>
-    private readonly record struct PendingCrypto(
+    /// <remarks>INTERNAL FOR THE SAME REASON <see cref="ForgetSpace"/> IS: it is the argument
+    /// <see cref="BuildAnswerDatagram"/> takes, and audit finding 4 - the take that ran before
+    /// the key probe - is a claim about what that method does to this list. The alternative was
+    /// a witness that fabricated a <see cref="TlsQuicProcessResult"/> carrying a
+    /// <see cref="TlsQuicCryptoDataEvent"/>, which would have been witnessing its own fake.
+    /// </remarks>
+    internal readonly record struct PendingCrypto(
         TlsQuicEncryptionLevel Level, ulong Offset, ReadOnlyMemory<byte> Data);
 
     /// <summary>An upper bound on a CRYPTO frame's own framing, RFC 9000 s19.6.</summary>
@@ -1575,8 +1581,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal static long IntegrityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
         cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305 ? 1L << 36 : 1L << 52;
 
-    // RFC 9001 s6's two reasons to rotate, in the order they bind. Called once per receive,
-    // between the frame walk and the answer.
+    // RFC 9001 s6's two reasons to rotate, in the order they bind.
+    //
+    // TWO CALLERS, NOT ONE, AND THE COMMENT USED TO SAY "called once per receive". PumpOnceAsync
+    // calls it between the frame walk and the answer, which is s6.2's "Sending keys MUST be
+    // updated before sending an acknowledgment for the packet that was received with updated
+    // keys"; TlsQuicApplicationSendPath calls it again on the send path, which is s6.6's
+    // confidentiality limit, a count of packets SENT that a receive-only trigger would miss on a
+    // connection doing nothing but sending. Both arms below are idempotent - ConsumeKeyUpdate
+    // takes the flag and the confidentiality test re-reads the live counter - so the second call
+    // is a second question rather than a second rotation.
     private void ApplyKeyUpdateIfNeeded()
     {
         // s6.2's response. The receiver has already promoted its READ keys - it had to, to
@@ -1721,6 +1735,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                     ? "carried no max_datagram_frame_size transport parameter"
                     : "advertised max_datagram_frame_size = 0")
                 + ", so s3 makes it a PROTOCOL_VIOLATION.";
+
+            // THE CODE, BESIDE THE MESSAGE THAT NAMES IT. RFC 9221 s3: "An endpoint that
+            // receives a DATAGRAM frame when it has not indicated support via the transport
+            // parameter MUST terminate the connection with an error of type
+            // PROTOCOL_VIOLATION." Set here so that s10.2's close carries what this arm's prose
+            // argues for rather than the fallback PumpOnceAsync would otherwise apply.
+            ProtocolFailureCode ??= TlsQuicTransportError.ProtocolViolation;
             return;
         }
 
@@ -1733,6 +1754,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             failure ??= "The peer sent a DATAGRAM frame (RFC 9221 s4) of "
                 + $"{frame.EncodedLength} byte(s) against the max_datagram_frame_size of "
                 + $"{limit} this endpoint advertised, so s3 makes it a PROTOCOL_VIOLATION.";
+
+            // s3's other sentence, same code: "An endpoint that receives a DATAGRAM frame that
+            // is larger than the value it sent in its max_datagram_frame_size transport
+            // parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION."
+            ProtocolFailureCode ??= TlsQuicTransportError.ProtocolViolation;
             return;
         }
 
@@ -1742,6 +1768,61 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // is still what happens to the bytes. What may not be dropped is RFC 9297 s2.1's two
         // checks on them, which belong to HTTP/3 and are applied by TlsQuicHttp3Connection.
         _receivedDatagrams.Add(frame.Data.ToArray());
+    }
+
+    // RFC 9000 s19.11's MAX_STREAMS dispatch arm's body - audit finding 11.
+    //
+    // THE FRAME TYPE CARRIES THE DIRECTION AND NOTHING ELSE DOES. s19.11: "Type (i) =
+    // 0x12..0x13 ... A MAX_STREAMS frame with a type of 0x12 applies to bidirectional streams,
+    // and a MAX_STREAMS frame with a type of 0x13 applies to unidirectional streams."
+    // TlsQuicFlowControlFrames.IsUnidirectional is the one reader of that bit, which is why the
+    // mask is not written out here - see its own remark for why it exists at all.
+    //
+    // A DECREASE IS IGNORED AND IS NOT AN ERROR, which is s19.11 stated twice: "MAX_STREAMS
+    // frames that do not increase the stream limit MUST be ignored", with its cause named -
+    // "Loss or reordering can cause an endpoint to receive a MAX_STREAMS frame with a lower
+    // stream limit than was previously received." No error code is attached to the case, and
+    // inventing one would end connections the network merely shuffled. The two TryRaise methods
+    // return whether the allowance moved; nothing here needs the answer, and it is the budget's
+    // own witnesses that read it.
+    //
+    // THE 2^60 CEILING IS ENFORCED BEFORE THIS METHOD AND IS NOT RE-ENFORCED IN IT. s19.11:
+    // "This value cannot exceed 2^60 ... Receipt of a frame that permits opening of a stream
+    // larger than this limit MUST be treated as a connection error of type
+    // FRAME_ENCODING_ERROR." TlsQuicFlowControlFrames.TryReadMaximumStreams already refuses such
+    // a frame against MaximumStreamCount, so it never becomes a TlsQuicFrame and never reaches
+    // this switch arm; the refusal surfaces as TlsQuicPacketReceiver's CloseError and closes the
+    // connection with that code. Writing the bound a second time here would be two owners for
+    // one wire constant, which is the shape of defect this file's other advertisement rules
+    // exist to prevent. TlsQuicConnectionTests.AMaximumStreamsFrameAboveTheStreamCountBound
+    // ClosesWithFrameEncodingError pins the outcome rather than the parser, so the MUST has a
+    // witness at the level a peer can see.
+    //
+    // THE NULL BUDGET IS A REFUSAL AND NOT A THROW, exactly as it is for its two neighbours in
+    // TlsQuicStreams.cs: s12.4 Table 3 gives 0x12 and 0x13 the row "__01", which
+    // TlsQuicFrameLegality already enforces, so 1-RTT read keys - and therefore the peer's
+    // transport parameters - are in hand by the time one arrives. Unreachable, and deliberately
+    // unwitnessed; reaching PeerFlowControl's throw on peer input would be the off-path kill
+    // switch 9a-ii shipped.
+    //
+    // The witness is
+    // TlsQuicConnectionTests.AMaximumStreamsFrameRaisesTheExhaustedBidirectionalAllowance.
+    private void ReceiveMaximumStreamsFrame(in TlsQuicFrame frame, ref string? failure)
+    {
+        if (_peerFlowControl is null)
+        {
+            failure ??= "A MAX_STREAMS frame arrived before the peer's transport parameters, "
+                + "so there is no RFC 9000 s18.2 stream allowance to raise.";
+            return;
+        }
+
+        if (TlsQuicFlowControlFrames.IsUnidirectional(frame.RawType))
+        {
+            _peerFlowControl.TryRaiseUnidirectionalStreamLimit(frame.MaximumStreams);
+            return;
+        }
+
+        _peerFlowControl.TryRaiseBidirectionalStreamLimit(frame.MaximumStreams);
     }
 
     /// <summary>The Destination Connection ID currently on our outgoing packets. RFC 9000
@@ -2338,6 +2419,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 ReceiveFlowControlFrame(frame, ref streamFailure);
                                 break;
 
+                            case TlsQuicFrameType.MaxStreams:
+                                // The peer raising OUR stream-count allowance - RFC 9000
+                                // s19.11, types 0x12 and 0x13. Until this arm existed the frame
+                                // was parsed in full by
+                                // TlsQuicFlowControlFrames.TryReadMaximumStreams and then
+                                // dropped into the default arm below, so the allowance could
+                                // only ever go down and OpenBidirectionalStream threw once the
+                                // advertised count ran out. That is audit finding 11, and it is
+                                // an HTTP/3 fault rather than a theoretical one: RFC 9114 s4.1
+                                // spends one client-initiated bidirectional stream per request,
+                                // so request N+1 on a reused connection died with an exception
+                                // where the RFC has it wait for credit.
+                                ReceiveMaximumStreamsFrame(frame, ref streamFailure);
+                                break;
+
                             case TlsQuicFrameType.ResetStream:
                             case TlsQuicFrameType.StopSending:
                             case TlsQuicFrameType.StreamDataBlocked:
@@ -2440,6 +2536,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                     + "issued: its source connection ID is "
                                     + $"{_sourceConnectionId.Length} byte(s) long and no "
                                     + "NEW_CONNECTION_ID frame is ever sent.";
+
+                                // s19.16 names ONE code for all three readings above - "MUST be
+                                // treated as a connection error of type PROTOCOL_VIOLATION" for
+                                // the zero-length case and for a sequence number never sent,
+                                // and "MAY treat this as a connection error of type
+                                // PROTOCOL_VIOLATION" for the one that names this packet's own
+                                // Destination Connection ID. Written here rather than left to
+                                // the close's fallback, so that the code the peer is told is
+                                // the code this arm's prose argues for.
+                                ProtocolFailureCode ??=
+                                    TlsQuicTransportError.ProtocolViolation;
                                 break;
 
                             default:
@@ -2466,30 +2573,82 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
                 ThrowIfIntegrityLimitReached();
 
+                // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
+                // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
+                // can be used after the handshake is complete or during the handshake ... An
+                // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
+                // connection immediately." All three used to throw locally with the right s20.1
+                // code spelled into the message text and no frame on the wire at all, which
+                // left the peer to discover the failure by idle timeout - s10.1's period rather
+                // than one datagram. ProtocolFailureCode was assigned and never read; it is now
+                // what the close carries.
+                //
+                // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
+                // paragraph is why both happen rather than one: "An immediate close ... causes
+                // all streams to become immediately closed; open streams can be assumed to be
+                // implicitly reset." The local exception is how this endpoint learns; the frame
+                // is how the peer does, and a peer told nothing waits out s10.1's idle period.
+                //
+                // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
+                // without sending when the connection is already draining or was never started,
+                // and BuildCloseDatagram returns 0 rather than throwing when no level has write
+                // keys or the code will not encode - so every "cannot tell the peer" case still
+                // ends in s10.2's closing state and still reaches the throw below. What is
+                // deliberately NOT swallowed is a transport failure out of the send: that is
+                // the IOException any other send raises, and hiding it behind the protocol
+                // error would lose the one fact that says the socket rather than the peer is
+                // the problem.
                 if (frameError is { } malformed)
                 {
-                    // A CONNECTION-LEVEL FAILURE, NOT A LOOP KILL. Task 9b turns this into an
-                    // RFC 9000 s10.2 immediate close carrying the code; until then a poisoned
-                    // one-shot attempt that throws is what a close would have achieved minus
-                    // the frame on the wire.
-                    throw new InvalidOperationException(
-                        $"The peer sent a malformed ACK frame: {malformed}.");
+                    var message = $"The peer sent a malformed ACK frame: {malformed}.";
+                    await CloseAsync(malformed, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
                 }
 
                 // The same connection-level failure, for the same reason, one frame type
-                // along. Task 14e.
+                // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
+                // the message chose it - and StreamFailureCode is how it travels here.
                 if (streamFailure is { } badStream)
                 {
+                    await CloseAsync(
+                            StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            badStream,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     throw new InvalidOperationException(badStream);
                 }
 
                 // And once more for the frames whose rule is not about a stream at all. Kept
                 // separate from streamFailure rather than folded into it because the two carry
-                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and task
-                // 9b's immediate close will need to tell them apart.
+                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
+                // immediate close above is what needed them told apart.
                 if (protocolFailure is { } violation)
                 {
+                    await CloseAsync(
+                            ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            violation,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     throw new InvalidOperationException(violation);
+                }
+
+                // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
+                // AccountForPacket. Hoisted out of that method rather than made async there,
+                // because everything else it does is counters and s10.2's close is not one.
+                // AUTHENTICATED, which is what makes ending the attempt on it safe: per
+                // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
+                // AEAD-opened packet, so no off-path sender can reach this line. That is the
+                // whole of the distinction AccountForPacket's own remarks draw between this and
+                // a failed decrypt.
+                if (outcome.CloseError is { } closeError)
+                {
+                    var message =
+                        $"The peer's packet requires the connection to close with {closeError}: "
+                        + $"{outcome.CloseReason}";
+                    await CloseAsync(closeError, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
                 }
 
                 AccountForPacket(outcome);
@@ -2522,11 +2681,42 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
                 {
                     // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
-                    // why this sits after the AEAD rather than beside the adoption. A Source
-                    // Connection ID taken off unauthenticated input would let an off-path
-                    // sender choose the value every later packet is measured against, which is
-                    // the influence s7.3's last paragraph exists to deny.
+                    // why this sits after the AEAD. A Source Connection ID taken off
+                    // unauthenticated input would let an off-path sender choose the value every
+                    // later packet is measured against, which is the influence s7.3's last
+                    // paragraph exists to deny.
                     _validatedServerSourceConnectionId ??= validated;
+
+                    // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
+                    // FINDING 7. "Upon first receiving an Initial or Retry packet from the
+                    // server, the client uses the Source Connection ID supplied by the server
+                    // as the Destination Connection ID for subsequent packets." This used to
+                    // run in AcceptedUnderSection122, before _receiver.Receive and therefore
+                    // before any AEAD, so one injected long header - the client's Initial
+                    // Destination Connection ID is in the clear, so it is guessable or simply
+                    // observable - permanently redirected this endpoint. See the note left at
+                    // the old site for the whole argument.
+                    //
+                    // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
+                    // optimisation: "A client MUST change the Destination Connection ID it uses
+                    // for sending packets in response to only the first received Initial or
+                    // Retry packet." The flag below is that MUST, and it is witnessed rather
+                    // than assumed - deleting it used to leave the whole gate green.
+                    //
+                    // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
+                    // the Destination Connection ID of the client's FIRST Initial packet, which
+                    // is OriginalDestinationConnectionId and is not touched here. Adoption
+                    // changes what we ADDRESS, not what we key with. (Retry is the one thing
+                    // that moves both, and HandleRetryAsync owns it under its own flag.)
+                    //
+                    // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
+                    // runs to completion before any answer is built, so the datagram that
+                    // replies to this packet already carries the server's chosen value.
+                    if (!_adoptedServerConnectionId)
+                    {
+                        _destinationConnectionId = validated;
+                        _adoptedServerConnectionId = true;
+                    }
                 }
 
                 foreach (var chunk in chunks)
@@ -2754,48 +2944,49 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return false;
         }
 
-        // RFC 9000 s7.2, verbatim from the extract: "Upon first receiving an Initial or Retry
-        // packet from the server, the client uses the Source Connection ID supplied by the
-        // server as the Destination Connection ID for subsequent packets". Get this wrong and
-        // the handshake fails with no useful error.
+        // THE s7.2 ADOPTION USED TO SIT HERE AND NO LONGER DOES - AUDIT FINDING 7. RFC 9000
+        // s7.2 conditions the switch on a VALID packet, in its own words: "Once a client has
+        // received a valid Initial packet from the server..." and, for the adoption itself,
+        // "Upon first receiving an Initial or Retry packet from the server, the client uses the
+        // Source Connection ID supplied by the server as the Destination Connection ID for
+        // subsequent packets."
         //
-        // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an optimisation:
-        // "A client MUST change the Destination Connection ID it uses for sending packets in
-        // response to only the first received Initial or Retry packet." The flag below is that
-        // MUST, and it is witnessed rather than assumed - deleting it used to leave the whole
-        // gate green.
+        // THIS METHOD CANNOT SAY "VALID", WHICH IS THE WHOLE OF THE MOVE. It runs before
+        // _receiver.Receive and therefore before any AEAD ran, on bytes anyone can write: the
+        // client's Initial Destination Connection ID travels in the clear on the wire (RFC 9001
+        // s5.2 keys Initial from it, so it cannot be hidden), so an off-path sender who observes
+        // or guesses it can put one long header on the path before the server's reply. The
+        // adoption latched on _adoptedServerConnectionId, so the genuine server packet arriving
+        // afterwards could never correct it, and every later packet this endpoint sent was
+        // addressed to a connection ID the attacker chose. A cheap, reliable off-path kill.
         //
-        // ONLY THE INITIAL KEYS' INPUT STAYS PUT. s5.2 of [QUIC-TLS] derives them from the
-        // Destination Connection ID of the client's FIRST Initial packet, which is
-        // OriginalDestinationConnectionId and is not touched here. Adoption changes what we
-        // ADDRESS, not what we key with. (Retry is the one thing that moves both, and it is
-        // task 9b's.)
+        // IT IS NOW WHERE _validatedServerSourceConnectionId ALREADY WAS, in PumpOnceAsync
+        // under `outcome.Processed > 0` - the AEAD's verdict, not a parser's. Two rules about
+        // the same value, taken from the same authenticated packet, at the same instant.
         //
-        // AND IT READS UNAUTHENTICATED INPUT, DELIBERATELY - BUT NOT BECAUSE IT HAS TO. The
-        // earlier draft of this remark argued that the adoption "necessarily precedes the AEAD"
-        // because the Initial keys cannot be derived from a value this packet supplies. That
-        // does not follow. The Initial keys come from OriginalDestinationConnectionId, which
-        // never moves, so the AEAD can open this packet whether or not the adoption has already
-        // run - and _validatedServerSourceConnectionId, recorded in PumpOnceAsync only after
-        // outcome.Processed > 0, is the standing proof that a post-AEAD hook exists and is
-        // usable. Placing the adoption here is a CHOICE: s7.2 phrases it on "upon FIRST
-        // receiving an Initial or Retry packet from the server", and a Retry never reaches an
-        // AEAD at all, so one placement covers both triggers.
+        // BEFORE THE NEXT PACKET IS BUILT, AND AFTER THE CURRENT ONE IS OPENED, which is the
+        // ordering the move has to respect and does: that site sits inside PumpOnceAsync's
+        // per-packet walk and ahead of SendAnswerAsync, so the first flight still addresses the
+        // answer to the server's chosen value. Nothing in the AEAD depends on the adoption
+        // having run - RFC 9001 s5.2 derives the Initial keys from
+        // OriginalDestinationConnectionId, which never moves.
         //
-        // WHAT MAKES THE CHOICE SAFE IS s7.3, NOT AN IMPOSSIBILITY. RFC 9000 s7.3 authenticates
-        // both connection IDs in transport parameters at the end of the handshake, and says why
-        // in as many words - "Including connection ID values in transport parameters and
-        // verifying them ensures
-        // that an attacker cannot influence the choice of connection ID for a successful
-        // connection by injecting packets carrying attacker-chosen connection IDs during the
-        // handshake." An injected first packet therefore costs this attempt, and cannot cost
-        // more than this attempt.
-        if (!_adoptedServerConnectionId)
-        {
-            _destinationConnectionId = longHeader.SourceConnectionId.ToArray();
-            _adoptedServerConnectionId = true;
-        }
-
+        // RETRY IS UNAFFECTED AND KEEPS ITS OWN FLAG. s7.2 names two triggers and a Retry never
+        // reaches an AEAD at all; HandleRetryAsync adopts under _adoptedFromRetry after
+        // TlsQuicRetry.TryVerify has checked the Retry Integrity Tag, which is that packet's own
+        // authentication. See the note there on why the two flags are separate.
+        //
+        // s7.3 IS STILL THE BACKSTOP AND IS NO LONGER THE ONLY ONE. Its own reason - "Including
+        // connection ID values in transport parameters and verifying them ensures that an
+        // attacker cannot influence the choice of connection ID for a successful connection by
+        // injecting packets carrying attacker-chosen connection IDs during the handshake" -
+        // makes an injection cost at most the attempt. What it never did was stop the attempt
+        // being cost.
+        //
+        // TlsQuicConnectionTests.AnInjectedFirstInitialDoesNotMoveTheDestinationConnectionId is
+        // the witness. It is the scenario the old s7.3 test built, with the opposite outcome:
+        // the injection is now inert rather than merely survivable, and the handshake it used
+        // to poison completes.
         return true;
     }
 
@@ -3079,19 +3270,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // into DeadlineExceeded's message. A non-zero DiscardedForMissingKeys there is the
     // coalescing stall PumpOnceAsync's remarks describe, told apart from a packet that simply
     // did not open, exactly as before.
+    // NOTHING HERE THROWS ANY MORE. The CloseError arm moved to PumpOnceAsync when audit
+    // finding 9 turned it into RFC 9000 s10.2's immediate close, which is a send and therefore
+    // an await; what is left is counters, and counters have no verdict to reach.
     private void AccountForPacket(TlsQuicReceiveResult outcome)
     {
-        if (outcome.CloseError is { } closeError)
-        {
-            // THE ONE THING HERE THAT STILL THROWS, AND THE ONE THING HERE THAT IS
-            // AUTHENTICATED: per Receive, CloseError is set only by a check that ran on an
-            // AEAD-authenticated packet, so no off-path sender can reach it. Task 9b turns it
-            // into an s10.2 immediate close.
-            throw new InvalidOperationException(
-                $"The peer's packet requires the connection to close with {closeError}: "
-                    + $"{outcome.CloseReason}");
-        }
-
         DiscardedPackets += outcome.Discarded;
         DiscardedForMissingKeys += outcome.DiscardedForMissingKeys;
         if (outcome.Unprocessed != TlsQuicUnprocessedPacket.None)
@@ -3101,6 +3284,20 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             UnprocessedPackets++;
         }
     }
+
+    /// <summary>The RFC 9000 s20.1 code the last refused STREAM, MAX_STREAM_DATA or
+    /// stream-state frame chose, carried out of the refusal so that s10.2's close can name
+    /// it.</summary>
+    /// <remarks>
+    /// SET WHERE THE MESSAGE IS SET, in TlsQuicStreams.cs, and for the same reason: the frame
+    /// that ended the connection is the one worth reporting, so both halves use <c>??=</c> and
+    /// the FIRST failure of a datagram wins. Kept apart from <see cref="ProtocolFailureCode"/>
+    /// because the two answer different questions - this one carries s20.1's STREAM_STATE_ERROR,
+    /// FLOW_CONTROL_ERROR, STREAM_LIMIT_ERROR or FINAL_SIZE_ERROR, whichever the stream set
+    /// chose, and that one carries the PROTOCOL_VIOLATION family the connection-scoped frames
+    /// raise. Folding them would have made the close say one when it meant the other.
+    /// </remarks>
+    internal TlsQuicTransportError? StreamFailureCode { get; private set; }
 
     private void InstallSecrets(TlsQuicProcessResult result)
     {
@@ -4713,20 +4910,49 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private async ValueTask SendInitialFlightAsync(
         ReadOnlyMemory<byte> cryptoStream, CancellationToken cancellationToken)
     {
+        // THE COUNTER IS ALREADY PAST THESE NUMBERS BEFORE THE FIRST await, AND THAT IS THE
+        // WHOLE POINT OF THE SPLIT. BuildInitialFlight advances it, because BuildInitialFlight
+        // is where the numbers are spent; see the AEAD nonce argument on that method.
         var datagrams = BuildInitialFlight(cryptoStream);
         foreach (var datagram in datagrams)
         {
             await SendDatagramAsync(datagram, cancellationToken).ConfigureAwait(false);
         }
-
-        // BuildInitialFlight advances the packet number by one per datagram from the template
-        // (RFC 9000 s12.3 forbids reuse within a space), so the counter moves by the datagram
-        // count and not by one.
-        _nextPacketNumber[(int)TlsQuicEncryptionLevel.Initial] += (ulong)datagrams.Count;
     }
 
     // NOT async, and it cannot be: TlsQuicWriteKeyMaterial is a ref struct, so key material
     // never lives in an async state machine.
+    //
+    // AND IT IS THIS METHOD, NOT ITS CALLER, THAT ADVANCES THE INITIAL PACKET NUMBER - which
+    // is a confidentiality rule rather than a tidiness one. RFC 9001 s5.3 builds the AEAD nonce
+    // by padding the packet number to the IV's length and XOR-ing the two
+    // (TlsQuicPacketProtection.cs, BuildNonce), so a packet number reused under one key is a
+    // REUSED NONCE, and s5.3 states the consequence in the RFC's own words: "The nonce, N, is
+    // formed by combining the packet protection IV with the packet number." For AES-GCM a
+    // repeated nonce under one key discloses the XOR of the two plaintexts and forfeits the
+    // authentication key outright - a break of confidentiality, not a stall.
+    //
+    // THE WINDOW THAT USED TO EXIST WAS BETWEEN THE SEAL AND THE SEND, AND IT WAS REACHABLE.
+    // SendInitialFlightAsync advanced the counter AFTER awaiting every SendDatagramAsync, so
+    // any refusal on the way out - SocketError.MessageSize is the documented one this file
+    // handles by name in SendDatagramAsync, and a cancellation is a second - left the counter
+    // pointing at numbers this method had already sealed packets under. RFC 9000 s17.2.5.2's
+    // Retry path then re-entered SendInitialFlightAsync and drew them again. Retry re-keys
+    // Initial from the new Destination Connection ID first, so a partial send BEFORE a Retry is
+    // survivable; a refusal on the FIRST flight, or a partial send after the Retry has already
+    // re-keyed, repeats a nonce under one key.
+    //
+    // SEALED IS SPENT, WHICH IS THE RULE THE POSITION ENCODES: the number is consumed by
+    // TlsQuicDatagramBuilder.BuildInitialFlight the moment it protects a packet with it,
+    // whether or not that packet ever reaches the socket. RFC 9000 s12.3 wants no more than
+    // that - "A QUIC endpoint MUST NOT reuse a packet number within the same packet number
+    // space in one connection" - and it says nothing about the packet having been sent.
+    // Skipping numbers is explicitly free: s12.3's next paragraph tolerates gaps, and the
+    // peer's ACK ranges simply never name them.
+    //
+    // TlsQuicConnectionTests.ARefusedInitialFlightDoesNotHandItsPacketNumbersToTheRetry is the
+    // witness: it fails the send, takes the Retry, and asserts the second flight's packet
+    // numbers are disjoint from the first's.
     private List<byte[]> BuildInitialFlight(ReadOnlyMemory<byte> cryptoStream)
     {
         if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out var state))
@@ -4760,6 +4986,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // empty list.
         var datagrams = TlsQuicDatagramBuilder.BuildInitialFlight(
             _options.Spec, template, cryptoStream, _options.TimeProvider.GetUtcNow(), _justSent);
+
+        // ONE PER DATAGRAM, AND ON THE LINE AFTER THE SEAL. The builder walks the template
+        // forward by one packet number per datagram it produces (RFC 9000 s12.3 forbids reuse
+        // within a space), so the counter moves by the datagram count and not by one. Nothing
+        // between this line and the builder call may await, and nothing does: see the nonce
+        // argument on this method's header for why the gap is measured in statements rather
+        // than in awaits.
+        _nextPacketNumber[(int)TlsQuicEncryptionLevel.Initial] += (ulong)datagrams.Count;
 
         // A3-8's LEDGER FOR THE OPENING FLIGHT, AND IT IS AN OVER-APPROXIMATION THAT IS SAID TO
         // BE ONE. The CRYPTO split across this flight's datagrams is TlsQuicDatagramBuilder's -
@@ -5011,7 +5245,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     ];
 
     // NOT async, for the same ref struct reason as BuildInitialFlight.
-    private int BuildAnswerDatagram(
+    //
+    // INTERNAL RATHER THAN PRIVATE, on ForgetSpace's precedent and for its reason: audit
+    // finding 4 is a claim about the ORDER in which this method takes from its inputs and
+    // probes for keys, and the state it needs - a level whose write keys are Discarded while
+    // CRYPTO for it is queued - cannot be produced through PumpOnceAsync, because `crypto` is
+    // rebuilt per call from that pump's own results and every discard this client performs
+    // happens after SendAnswerAsync's loop. A witness therefore drives the real method with
+    // real keys, reached by a real handshake, and supplies only the arrival the TLS stack
+    // would otherwise have supplied.
+    internal int BuildAnswerDatagram(
         List<PendingCrypto> crypto,
         DateTimeOffset now,
         out bool carriedHandshakePacket,
@@ -5043,6 +5286,63 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // "No write keys at EarlyData".
             if (level == TlsQuicEncryptionLevel.EarlyData)
             {
+                continue;
+            }
+
+            // THE KEY PROBE IS FIRST, BEFORE ANY FRAME IS TAKEN, AND THAT ORDER IS THE WHOLE OF
+            // AUDIT FINDING 4. It used to sit BELOW the two takes - TakeRepairsInto and the
+            // pending-CRYPTO loop - both of which CONSUME: the repair leaves _repairsOwed and
+            // the CRYPTO leaves the caller's list (`crypto.RemoveAt(c--)`). On the discarded
+            // arm the method then dropped `frames` and everything that had been moved into it,
+            // with RecordRepairable not yet reached, so the bytes were neither on the wire nor
+            // retransmittable. SendAnswerAsync's loop saw `written <= 0` and a `crypto` list
+            // shorter than it should be, and reported nothing: a silent stall to the
+            // abandonment deadline.
+            //
+            // TAKE NOTHING YOU CANNOT SEAL is the invariant, and probing first is the only
+            // ordering that states it. A level whose write keys have gone gets no ACK built for
+            // it (the tracker keeps its ranges), no repair drained (they stay owed - though
+            // ForgetSpace has usually already cleared them, per RFC 9000 s13.3), and no CRYPTO
+            // consumed (it stays in the caller's list for a level that can still carry it).
+            //
+            // THE THROW KEPT ITS CONDITION, EXPRESSED ONE LOOP EARLIER. It used to fire when
+            // `frames` had content at a level with no keys; the only content that can exist at
+            // a level whose keys were NEVER installed is pending CRYPTO, because an ACK needs a
+            // packet received at that level and a repair needs a packet sent at it, and both
+            // need keys. So the pending-CRYPTO test below is that guard, asked before the take
+            // rather than after it.
+            //
+            // TlsQuicConnectionTests.CryptoQueuedForALevelWhoseWriteKeysAreGoneIsLeftQueued
+            // RatherThanConsumedAndDropped is the witness.
+            if (!_keys.TryGetWriteKeys(level, out var keys, out var state))
+            {
+                // RFC 9001 s4.9.1: "Endpoints MUST NOT send Initial packets after this point."
+                // A pending ACK for a level whose keys have gone is not sent and is not an
+                // error - that is the ordinary post-discard steady state, and it is the one
+                // case where a missing key is correct rather than a sequencing bug.
+                //
+                // UNREACHABLE TODAY, MEASURED: narrowing this to NeverInstalled - so that a
+                // discarded level throws instead - used to leave 1043 of 1043 green, and the
+                // reason is that TlsQuicKeySet.DiscardKeys takes the READ keys with the write
+                // ones. After the Initial discard no further Initial packet can be opened, so
+                // no further Initial packet is ever recorded, so the ack tracker never has
+                // anything ack-eliciting pending at that level again. It is kept for the two
+                // paths that break that argument - task 9b's Retry, which re-keys Initial, and
+                // A3's retransmission, which resends at a level after the fact.
+                if (state == TlsQuicKeyLevelState.Discarded)
+                {
+                    continue;
+                }
+
+                // NeverInstalled with data queued for the level is a sequencing bug in this
+                // connection rather than anything the peer did, and it stays a throw.
+                if (crypto.Exists(pending => pending.Level == level))
+                {
+                    throw new InvalidOperationException(
+                        $"No write keys at {level} for a flight that carries {level} data; "
+                            + $"the level is {state}.");
+                }
+
                 continue;
             }
 
@@ -5177,33 +5477,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             if (frames.Count == 0)
             {
                 continue;
-            }
-
-            if (!_keys.TryGetWriteKeys(level, out var keys, out var state))
-            {
-                // RFC 9001 s4.9.1: "Endpoints MUST NOT send Initial packets after this point."
-                // A pending ACK for a level whose keys have gone is DROPPED, not sent and not
-                // an error - that is the ordinary post-discard steady state, and it is the one
-                // case where a missing key is correct rather than a sequencing bug.
-                //
-                // UNREACHABLE TODAY, MEASURED: narrowing this to NeverInstalled - so that a
-                // discarded level throws instead - leaves 1043 of 1043 green, and the reason
-                // is that TlsQuicKeySet.DiscardKeys takes the READ keys with the write ones.
-                // After the Initial discard no further Initial packet can be opened, so no
-                // further Initial packet is ever recorded, so the ack tracker never has
-                // anything ack-eliciting pending at that level again and TryBuildAck returns
-                // false before this line is reached. It is kept for the two paths that break
-                // that argument - task 9b's Retry, which re-keys Initial, and A3's
-                // retransmission, which resends at a level after the fact - and it is
-                // deliberately unwitnessed, because a test would have to build one of them.
-                if (state == TlsQuicKeyLevelState.Discarded)
-                {
-                    continue;
-                }
-
-                throw new InvalidOperationException(
-                    $"No write keys at {level} for a flight that carries {level} data; "
-                        + $"the level is {state}.");
             }
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);
@@ -5449,11 +5722,33 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // is not merely the level named - it is the only level TryGetWriteKeys could answer for
     // anyway. EarlyData is absent from both arms because this client never sends 0-RTT.
     //
-    // ONE PACKET AND NOT TWO, WHICH IS A NAMED AND NARROWER DEVIATION THAN IT WAS: only the
-    // unconfirmed arm's SHOULD is still unmet, and only in its "both" half. s10.2.3 permits the
-    // pair to be coalesced ("CONNECTION_CLOSE frames sent in multiple packet types can be
-    // coalesced into a single UDP datagram"), so the debt is a second TlsQuicPacketToSend in
-    // the list below rather than anything structural.
+    // EVERY APPLICABLE LEVEL, COALESCED, AND THAT DEBT IS NOW PAID - AUDIT FINDING 10. The walk
+    // used to `return written` on the first level that had keys, so the unconfirmed arm sent a
+    // Handshake close and never the Initial one beside it. s10.2.3 asks for both and says why:
+    // "Prior to confirming the handshake, a peer might be unable to process 1-RTT packets, so an
+    // endpoint SHOULD send a CONNECTION_CLOSE frame in both Handshake and 1-RTT packets" - the
+    // same reasoning one level down, because a server that has not yet processed our Handshake
+    // keys can read only the Initial packet. s10.2.3 also states the shape of the fix: "The
+    // CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
+    // datagram", so this is one datagram carrying two packets, not two sends.
+    //
+    // THE ORDER IS THE CANDIDATE LIST'S, HIGHEST PROTECTION FIRST, and it is deliberate against
+    // s12.2's ascending-order SUGGESTION ("makes it more likely that the receiver will be able
+    // to process all the packets in a single pass"). That is a preference about the receiver's
+    // buffering; s10.2.3's Generally - "sending the frame in a packet with the highest level of
+    // packet protection to avoid the packet being discarded" - is about which copy of a close
+    // the peer is most likely to be ABLE to open, and on the teardown path that is the one to
+    // lead with. It also keeps the close's leading packet type stable for the witnesses that
+    // read it off the clear-text header, which is what
+    // TlsQuicConnectionTests.AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
+    // ParameterError asserts.
+    //
+    // THE PACKET NUMBER IS DRAWN PER LEVEL, from that level's own counter, because RFC 9000
+    // s12.3 gives each packet number space its own - and the two packets in this datagram are in
+    // two spaces.
+    //
+    // TlsQuicConnectionTests.AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets is
+    // the witness.
     private int BuildCloseDatagram(bool application, ulong errorCode, string? reason)
     {
         // A TRANSPORT CODE THAT WILL NOT ENCODE SENDS NOTHING, AND THAT IS THE ABSENCE OF A
@@ -5473,6 +5768,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         ReadOnlySpan<TlsQuicEncryptionLevel> candidates = _confirmed
             ? [TlsQuicEncryptionLevel.Application]
             : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
+
+        var packets = new List<TlsQuicPacketToSend>();
+        var sentAsApplicationForm = false;
+        ulong sentErrorCode = 0;
 
         foreach (var candidate in candidates)
         {
@@ -5525,7 +5824,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 && (candidate != TlsQuicEncryptionLevel.Application
                     || !IsEncodableErrorCode(errorCode));
 
-            var sentAsApplicationForm = application && !convert;
+            // RECORDED ACROSS THE WALK RATHER THAN INSIDE IT, because the two properties below
+            // describe the close this connection sent and there is now more than one packet of
+            // it. Every candidate on one arm converts identically - the unconfirmed arm holds
+            // Handshake and Initial, neither of which is Application, so `convert` cannot differ
+            // between them, and the confirmed arm has one candidate - so the last assignment and
+            // the first are the same value. Written per candidate anyway, so that a future arm
+            // mixing levels reports what its LAST packet carried rather than silently reporting
+            // a form no packet had.
+            sentAsApplicationForm = application && !convert;
 
             var frame = new TlsQuicFrame
             {
@@ -5558,51 +5865,67 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 ReasonPhrase = convert ? default : ReasonPhraseBytes(reason),
             };
 
-            var written = TlsQuicDatagramBuilder.BuildDatagram(
-                _options.Spec,
-                [
-                    new TlsQuicPacketToSend
-                    {
-                        // RFC 9000 s17.3.1's short header has none of the four long-header
-                        // fields PlanFor sets, so the 1-RTT arm takes the plan the application
-                        // send path already builds rather than a fifth arm of PlanFor - which
-                        // is why PlanFor throws for Application rather than answering. Both
-                        // arms are decided above, with the keys, so that the pair cannot come
-                        // from two different key generations.
-                        Plan = closePlan,
-                        Frames = [frame],
-                        PacketProtectionCipher = keys.PacketCipher,
-                        Key = keys.Key,
-                        Iv = keys.Iv,
-                        HeaderProtectionCipher = keys.HeaderCipher,
-                        HeaderProtectionKey = keys.HeaderProtectionKey,
-                    },
-                ],
-                _options.TimeProvider.GetUtcNow(),
-                _sendBuffer,
-                _justSent);
-            RetainSentPackets();
+            sentErrorCode = frame.ErrorCode;
 
-            // RECORDED FROM THE FRAME THAT WAS BUILT, NOT FROM THE ARGUMENTS, so that the
-            // s10.2.3 conversion above is visible to a reader of these properties rather than
-            // hidden behind them: a 0x1d close that went out at Handshake reports the s20.1
-            // code it actually carried and no application code, because that is what left.
-            if (written > 0)
+            packets.Add(new TlsQuicPacketToSend
             {
-                if (sentAsApplicationForm)
-                {
-                    ClosedWithApplicationErrorCode = frame.ErrorCode;
-                }
-                else
-                {
-                    ClosedWith = (TlsQuicTransportError)frame.ErrorCode;
-                }
-            }
-
-            return written;
+                // RFC 9000 s17.3.1's short header has none of the four long-header fields
+                // PlanFor sets, so the 1-RTT arm takes the plan the application send path
+                // already builds rather than a fifth arm of PlanFor - which is why PlanFor
+                // throws for Application rather than answering.
+                //
+                // THE PLAN AND THE KEYS ARE BOTH DECIDED AT THE TOP OF THIS ITERATION, AS A
+                // PAIR, and are used here exactly as they were taken. Redrawing either one
+                // here is the shape that put an all-zero key on the wire once already:
+                // ShortHeaderPlan can run an RFC 9001 s6.6 key update, so a plan drawn at this
+                // point would carry a phase bit belonging to a generation the keys taken above
+                // are no longer part of - the peer would read the new phase and reach for keys
+                // this packet was not sealed with. PlanFor's arm has a second reason of its
+                // own: it consumes a packet number, so drawing one here would burn two numbers
+                // per close packet and seal this one under a number RetainSentPackets never
+                // recorded, which is a hole in loss recovery as well as a wasted number.
+                //
+                // Witnessed by TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsThe
+                // CrossingPacketWithTheNewGeneration for the plan/keys pairing, and by
+                // TlsQuicConnectionTests.AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAnd
+                // InitialPackets for the coalescing this loop performs. Both live in the
+                // TlsQuicConnectionTests partial, not in classes named for their files.
+                Plan = closePlan,
+                Frames = [frame],
+                PacketProtectionCipher = keys.PacketCipher,
+                Key = keys.Key,
+                Iv = keys.Iv,
+                HeaderProtectionCipher = keys.HeaderCipher,
+                HeaderProtectionKey = keys.HeaderProtectionKey,
+            });
         }
 
-        return 0;
+        if (packets.Count == 0)
+        {
+            return 0;
+        }
+
+        var written = TlsQuicDatagramBuilder.BuildDatagram(
+            _options.Spec, packets, _options.TimeProvider.GetUtcNow(), _sendBuffer, _justSent);
+        RetainSentPackets();
+
+        // RECORDED FROM THE FRAME THAT WAS BUILT, NOT FROM THE ARGUMENTS, so that the s10.2.3
+        // conversion above is visible to a reader of these properties rather than hidden behind
+        // them: a 0x1d close that went out at Handshake reports the s20.1 code it actually
+        // carried and no application code, because that is what left.
+        if (written > 0)
+        {
+            if (sentAsApplicationForm)
+            {
+                ClosedWithApplicationErrorCode = sentErrorCode;
+            }
+            else
+            {
+                ClosedWith = (TlsQuicTransportError)sentErrorCode;
+            }
+        }
+
+        return written;
     }
 
     // RFC 9000 s7.3, and the reason it is here rather than on TlsQuicTransportParameters: every
@@ -5664,8 +5987,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // handshake." Under the observed-value reading, an injected first Initial moves the
         // adoption, the parameter still agrees with the honest server's Source Connection ID,
         // and the connection SUCCEEDS while addressing the attacker's value - the exact
-        // outcome that sentence exists to deny. Witnessed by
-        // AnInjectedFirstInitialThatMovedTheAdoptionIsCaughtBySection73.
+        // outcome that sentence exists to deny.
+        //
+        // AND THAT MUTATION IS NOW VACUOUS, WHICH IS SAID HERE RATHER THAN LEFT FOR THE NEXT
+        // SWEEP TO REDISCOVER. Ledger row 82 - "initial_source compared against the OBSERVED
+        // CID" - had exactly one witness, and it worked only because the adoption ran on
+        // unauthenticated input, so the observed value and the addressed value could disagree.
+        // Audit finding 7 moved the adoption behind the AEAD to the very line that records
+        // _validatedServerSourceConnectionId, so the two are now written from one value at one
+        // instant and no input can separate them. The comparison stays as it is, because the
+        // READING is still the one s7.3's purpose clause asks for and the equality is a
+        // property of the current call sites rather than of the rule.
         await RequireParameterAsync(
             parameters,
             TlsQuicTransportParameterId.InitialSourceConnectionId,
@@ -5757,12 +6089,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // TlsQuicConnectionOptions.IdleTimeout is what bounds the attempt instead, and no s10.1
     // commitment has been made to anybody.
     //
-    // s10.1'S THIRD PARAGRAPH IS NOT IMPLEMENTED, AND IT IS A KNOWN GAP: "endpoints MUST
-    // increase the idle timeout period to be at least three times the current Probe Timeout
-    // (PTO)". The PTO is loss recovery's, which the user's decision defers to A3, so there is
-    // no current PTO to take three of. The consequence is one-directional - this connection can
-    // give up EARLIER than the RFC's floor, never later - and it is bounded below by the
-    // handshake deadline anyway.
+    // s10.1'S THIRD PARAGRAPH IS THE FLOOR, AND IT IS APPLIED IN IdleDeadline RATHER THAN HERE:
+    // "To avoid excessively small idle timeout periods, endpoints MUST increase the idle timeout
+    // period to be at least three times the current Probe Timeout (PTO). This allows for
+    // multiple PTOs to expire, and therefore multiple probes to be sent and lost, prior to idle
+    // timeout." It was a KNOWN GAP while loss recovery was deferred and there was no current PTO
+    // to take three of; A3 supplied one, and audit finding 15 is that this method was never
+    // revisited.
+    //
+    // THIS METHOD STAYS THE ADVERTISED MINIMUM AND NOTHING ELSE, which is what its two callers
+    // want. s10.1: "Each endpoint advertises a max_idle_timeout ... If a max_idle_timeout value
+    // is provided by either peer ... the effective value at an endpoint is computed as the
+    // minimum of the two advertised values." That is a fact about the two ADVERTISEMENTS, and
+    // TlsQuicConnectionTests.TheEffectiveIdleTimeoutIsTheMinimumOfTheTwoAdvertisedValues asserts
+    // it as one; the PTO floor is a fact about the local timer state, changes between calls, and
+    // would make this property un-assertable if it were folded in here.
     internal TimeSpan? EffectiveIdleTimeout() => (_ourMaxIdleTimeout, _peerMaxIdleTimeout) switch
     {
         ({ } ours, { } theirs) => ours <= theirs ? ours : theirs,
@@ -5789,8 +6130,57 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         return value >= (ulong)year.TotalMilliseconds ? year : TimeSpan.FromMilliseconds(value);
     }
 
-    private DateTimeOffset IdleDeadline() =>
-        _idleSince + (EffectiveIdleTimeout() ?? _options.IdleTimeout);
+    // RFC 9000 s10.1's effective idle period, WITH the floor its third paragraph makes a MUST:
+    // "endpoints MUST increase the idle timeout period to be at least three times the current
+    // Probe Timeout (PTO)", whose stated reason is "This allows for multiple PTOs to expire, and
+    // therefore multiple probes to be sent and lost, prior to idle timeout." Audit finding 15 is
+    // that this was `_idleSince + EffectiveIdleTimeout()` alone, so a peer advertising a small
+    // max_idle_timeout over a high-RTT path was given up on before it had finished probing.
+    //
+    // THE FLOOR APPLIES TO THE ADVERTISED PERIOD AND NOT TO THE LOCAL FALLBACK, WHICH IS A
+    // DISTINCTION THE RFC MAKES AND THIS METHOD HAD NO REASON TO BEFORE. Every sentence of
+    // s10.1 around the floor is about the negotiated value: "Each endpoint advertises a
+    // max_idle_timeout ... If a max_idle_timeout value is provided by either peer ... the
+    // effective value at an endpoint is computed as the minimum of the two advertised values",
+    // and s10.1's closing paragraph gives the floor's purpose as agreement with a peer - "If a
+    // max_idle_timeout is specified by either endpoint in its transport parameters (Section
+    // 18.2), the connection is silently closed and its state is discarded when it remains idle
+    // for longer than the minimum". The hazard is a peer still probing a connection we have
+    // already discarded, and it exists only where a peer was told a number.
+    //
+    // TlsQuicConnectionOptions.IdleTimeout is not that number. It is LOCAL POLICY - "give up on
+    // this attempt after this long" - promised to nobody, and s10.1's floor has no peer to
+    // protect there. Raising it would override an explicit caller instruction on the strength
+    // of a rule about a parameter that was never sent, and would silently multiply a
+    // 250-millisecond give-up into seconds on a slow path. So it is left exactly as the caller
+    // set it, and TlsQuicConnectionTests.APeerThatGoesSilentIsBoundedByTheIdleTimeoutToo is what
+    // holds that: it sets 250 ms with nothing advertised and still expects to be given up on.
+    //
+    // THE PTO IS THE ONE THE APPLICATION SPACE WOULD ARM, PtoDuration(_peerMaxAckDelay), which
+    // is the same expression GetPtoTimeAndSpace's Application arm uses. RFC 9002 s6.2.1 adds
+    // max_ack_delay only in that space - "When the PTO is armed for Initial or Handshake packet
+    // number spaces, the max_ack_delay in the PTO period computation is set to 0" - so this is
+    // the LARGEST of the three current PTOs, and a floor built from the largest satisfies
+    // "at least three times the current PTO" whichever space is armed. It carries A.9's pto_count
+    // backoff with it, which is the reading s10.1's own reason asks for: a connection that has
+    // already lost probes has a longer current PTO and needs a longer floor, not the same one.
+    //
+    // SATURATING, because PtoDuration saturates at TimeSpan.MaxValue on a peer-chosen
+    // max_ack_delay and an unbounded pto_count, and three of that overflows a plain multiply -
+    // which on the idle path would be an ArithmeticException instead of a timeout.
+    //
+    // The witness is
+    // TlsQuicConnectionTests.AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts.
+    private DateTimeOffset IdleDeadline()
+    {
+        if (EffectiveIdleTimeout() is not { } advertised)
+        {
+            return AddSaturating(_idleSince, _options.IdleTimeout);
+        }
+
+        var floor = FromTicksSaturating((double)PtoDuration(_peerMaxAckDelay).Ticks * 3.0);
+        return AddSaturating(_idleSince, advertised >= floor ? advertised : floor);
+    }
 
     private TimeSpan RemainingBeforeIdleTimeout() =>
         IdleDeadline() - _options.TimeProvider.GetUtcNow();

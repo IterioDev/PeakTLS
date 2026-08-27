@@ -262,6 +262,8 @@ internal sealed class TlsQuicPeerFlowControlBudget
         ConnectionLimit = InitialMaxData;
         _remainingBidirectionalStreams = InitialMaxStreamsBidi;
         _remainingUnidirectionalStreams = InitialMaxStreamsUni;
+        BidirectionalStreamLimit = InitialMaxStreamsBidi;
+        UnidirectionalStreamLimit = InitialMaxStreamsUni;
     }
 
     /// <summary>RFC 9114 s6.2's floor: "the transport parameters sent by both clients and
@@ -355,6 +357,84 @@ internal sealed class TlsQuicPeerFlowControlBudget
     /// <summary>Gets the bidirectional stream openings not yet spent.</summary>
     internal ulong RemainingBidirectionalStreams => _remainingBidirectionalStreams;
 
+    /// <summary>Gets the cumulative bidirectional stream limit currently in force:
+    /// initial_max_streams_bidi (0x08), raised by every larger MAX_STREAMS (RFC 9000 s19.11,
+    /// type 0x12) since.</summary>
+    /// <remarks>SEPARATE FROM <see cref="InitialMaxStreamsBidi"/> for the reason
+    /// <see cref="ConnectionLimit"/> is separate from <see cref="InitialMaxData"/>: that
+    /// property is named for what the peer ADVERTISED, and a property called "initial" that
+    /// moved would make its readers lie.</remarks>
+    internal ulong BidirectionalStreamLimit { get; private set; }
+
+    /// <summary>Gets the cumulative unidirectional stream limit currently in force:
+    /// initial_max_streams_uni (0x09), raised by every larger MAX_STREAMS (RFC 9000 s19.11,
+    /// type 0x13) since.</summary>
+    internal ulong UnidirectionalStreamLimit { get; private set; }
+
+    /// <summary>Raises the cumulative bidirectional stream limit to
+    /// <paramref name="maximumStreams"/>, crediting the difference, and reports whether the
+    /// allowance actually moved.</summary>
+    /// <remarks>
+    /// <para>RFC 9000 s19.11 IS EXPLICIT WHERE s19.9 WAS SILENT, which is why this needs none of
+    /// the reading-against-itself <see cref="TryRaiseConnectionLimit"/> records: "MAX_STREAMS
+    /// frames that do not increase the stream limit MUST be ignored", and s19.11 gives the cause
+    /// in the next breath - "Loss or reordering can cause an endpoint to receive a MAX_STREAMS
+    /// frame with a lower stream limit than was previously received." IGNORED, not an error:
+    /// s19.11 attaches no error code to a decrease, and treating a reordered datagram as a
+    /// protocol violation would kill connections the network merely shuffled.</para>
+    /// <para>CUMULATIVE AND NOT INCREMENTAL. s19.11's Maximum Streams field is "A count of the
+    /// cumulative number of streams of the corresponding type that can be opened over the
+    /// lifetime of the connection", so the frame carries the new TOTAL and the credit is the
+    /// difference - which is what makes a duplicated frame a no-op rather than a double
+    /// grant.</para>
+    /// <para>THE 2^60 BOUND IS NOT RE-CHECKED HERE, AND THAT IS DELIBERATE RATHER THAN MISSING.
+    /// s19.11: "This value cannot exceed 2^60, as it is not possible to encode stream IDs larger
+    /// than 2^62-1. Receipt of a frame that permits opening of a stream larger than this limit
+    /// MUST be treated as a connection error of type FRAME_ENCODING_ERROR." That MUST is already
+    /// enforced, once, by <c>TlsQuicFlowControlFrames.TryReadMaximumStreams</c> against
+    /// <c>MaximumStreamCount</c>, so a frame above the bound never becomes a
+    /// <c>TlsQuicFrame</c> at all and never reaches this method. A second copy of the same wire
+    /// constant here is exactly the divergence this library refuses elsewhere - one owner per
+    /// wire value - and it is what
+    /// TlsQuicConnectionTests.AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrame
+    /// EncodingError pins, by asserting the close rather than the parser.</para>
+    /// <para>OVERFLOW-FREE by the same invariant <see cref="TryRaiseConnectionLimit"/> keeps:
+    /// the remaining count never exceeds the limit, because it starts equal to it and only ever
+    /// decrements, so crediting the difference lands it at most back on the new limit.</para>
+    /// </remarks>
+    internal bool TryRaiseBidirectionalStreamLimit(ulong maximumStreams)
+    {
+        if (maximumStreams <= BidirectionalStreamLimit)
+        {
+            return false;
+        }
+
+        _remainingBidirectionalStreams += maximumStreams - BidirectionalStreamLimit;
+        BidirectionalStreamLimit = maximumStreams;
+        return true;
+    }
+
+    /// <summary>Raises the cumulative unidirectional stream limit to
+    /// <paramref name="maximumStreams"/>, crediting the difference, and reports whether the
+    /// allowance actually moved.</summary>
+    /// <remarks>The unidirectional half of <see cref="TryRaiseBidirectionalStreamLimit"/>, whose
+    /// remarks are the whole of RFC 9000 s19.11's reasoning for both. TWO METHODS AND NOT ONE
+    /// WITH A DIRECTION ARGUMENT, because s19.11 spends a whole frame type on the distinction -
+    /// "Type (i) = 0x12..0x13" - and a single method taking a bool would put the two counts one
+    /// negation apart, which is the swap TlsQuicConnectionSpec.PeerStreamLimitFor already needed
+    /// its own two-test witness for.</remarks>
+    internal bool TryRaiseUnidirectionalStreamLimit(ulong maximumStreams)
+    {
+        if (maximumStreams <= UnidirectionalStreamLimit)
+        {
+            return false;
+        }
+
+        _remainingUnidirectionalStreams += maximumStreams - UnidirectionalStreamLimit;
+        UnidirectionalStreamLimit = maximumStreams;
+        return true;
+    }
+
     /// <summary>Reads the peer's six s18.2 flow-control limits. An absent parameter reads as
     /// 0, which is s18.2's own default and not a stand-in for "unknown".</summary>
     /// <exception cref="ArgumentNullException"><paramref name="parameters"/> is
@@ -398,22 +478,22 @@ internal sealed class TlsQuicPeerFlowControlBudget
 
     /// <summary>Spends one unidirectional stream opening and returns that stream's own
     /// budget, taken from initial_max_stream_data_uni (0x07).</summary>
-    /// <remarks>THE ALLOWANCE DOES NOT REPLENISH. A4-minimal handles no MAX_STREAMS frame
-    /// (RFC 9000 s19.11) and sends no STREAMS_BLOCKED (s19.14), so once
-    /// initial_max_streams_uni openings are spent there is no path by which more become
-    /// available - that is A4-complete's. Throwing here is the whole point: it is the
-    /// alternative to opening a stream the peer never permitted.</remarks>
-    /// <exception cref="InvalidOperationException">The peer's initial_max_streams_uni is
+    /// <remarks>THE ALLOWANCE REPLENISHES ONLY ON THE PEER'S WORD. RFC 9000 s19.11's MAX_STREAMS
+    /// (type 0x13) raises it through <see cref="TryRaiseUnidirectionalStreamLimit"/> and nothing
+    /// else does; this endpoint sends no STREAMS_BLOCKED (s19.14), so it does not ASK for more
+    /// either. Throwing here is the whole point: it is the alternative to opening a stream the
+    /// peer never permitted.</remarks>
+    /// <exception cref="InvalidOperationException">The peer's unidirectional stream allowance is
     /// exhausted.</exception>
     internal TlsQuicStreamBudget OpenUnidirectionalStream()
     {
         if (_remainingUnidirectionalStreams == 0)
         {
             throw new InvalidOperationException(
-                "The peer's initial_max_streams_uni (0x09) allowance of "
-                    + $"{InitialMaxStreamsUni} unidirectional stream(s) is exhausted. This "
-                    + "budget is static: A4-minimal handles no MAX_STREAMS frame, so nothing "
-                    + "will raise it.");
+                "The peer's unidirectional stream allowance is exhausted at "
+                    + $"{UnidirectionalStreamLimit} stream(s) - initial_max_streams_uni (0x09) "
+                    + $"was {InitialMaxStreamsUni}. Only a MAX_STREAMS frame of type 0x13 (RFC "
+                    + "9000 s19.11) raises it, and the peer has sent none that does.");
         }
 
         _remainingUnidirectionalStreams--;
@@ -423,18 +503,22 @@ internal sealed class TlsQuicPeerFlowControlBudget
     /// <summary>Spends one bidirectional stream opening and returns that stream's own budget,
     /// taken from initial_max_stream_data_bidi_REMOTE (0x06) - the parameter s18.2 scopes to
     /// streams opened by the endpoint that receives it, which is us.</summary>
-    /// <remarks>Static for the same reason <see cref="OpenUnidirectionalStream"/> is.</remarks>
-    /// <exception cref="InvalidOperationException">The peer's initial_max_streams_bidi is
+    /// <remarks>Replenished the same way <see cref="OpenUnidirectionalStream"/>'s allowance is,
+    /// by <see cref="TryRaiseBidirectionalStreamLimit"/> and by nothing else. THIS IS THE
+    /// ALLOWANCE HTTP/3 SPENDS: RFC 9114 s4.1 puts each request on its own client-initiated
+    /// bidirectional stream, so request N+1 on a reused connection is exactly the call that used
+    /// to throw here once the advertised count ran out.</remarks>
+    /// <exception cref="InvalidOperationException">The peer's bidirectional stream allowance is
     /// exhausted.</exception>
     internal TlsQuicStreamBudget OpenBidirectionalStream()
     {
         if (_remainingBidirectionalStreams == 0)
         {
             throw new InvalidOperationException(
-                "The peer's initial_max_streams_bidi (0x08) allowance of "
-                    + $"{InitialMaxStreamsBidi} bidirectional stream(s) is exhausted. This "
-                    + "budget is static: A4-minimal handles no MAX_STREAMS frame, so nothing "
-                    + "will raise it.");
+                "The peer's bidirectional stream allowance is exhausted at "
+                    + $"{BidirectionalStreamLimit} stream(s) - initial_max_streams_bidi (0x08) "
+                    + $"was {InitialMaxStreamsBidi}. Only a MAX_STREAMS frame of type 0x12 (RFC "
+                    + "9000 s19.11) raises it, and the peer has sent none that does.");
         }
 
         _remainingBidirectionalStreams--;
