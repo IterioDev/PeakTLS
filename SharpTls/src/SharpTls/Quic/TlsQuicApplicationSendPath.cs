@@ -636,6 +636,26 @@ internal sealed partial class TlsQuicConnection
                 spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
             }
 
+            // AND THE ACK THAT HAS NOT BEEN ADDED YET, WHICH IS CHARGED BY WHETHER IT EXISTS
+            // RATHER THAN BY WHERE IT WILL SIT. TlsQuicConnectionSpec.AckLeadsInPacket decides
+            // the ACK's POSITION - RFC 9000 imposes no frame order inside a packet - and with
+            // it false the frame is appended AFTER this take, so the loop above cannot see it
+            // and the budget handed to the split was the whole packet's.
+            //
+            // IT ONLY BECAME AN OVERRUN WHEN THE SPLIT BECAME EXACT. The take used to move
+            // whole frames and inherited a cushion from the drain that happened to cover an
+            // ACK; the audit's oversized-first-frame fix now cuts a STREAM head to exactly
+            // `payloadBudget - spent`, so anything not in `spent` is a byte over RFC 9000
+            // s14.2's "sized to fit within the maximum datagram size" - and on a DF-set socket
+            // that is SocketError.MessageSize rather than a fragment. Default presets lead with
+            // the ACK and never saw it; the knob is the whole exposure, which is exactly the
+            // shape of defect a knob nothing measures produces. The witness is
+            // TlsQuicConnectionTests.ADatagramCarryingBothAnAckAndSplitStreamDataStaysWithinThePathMtu.
+            if (hasAck && !_options.Spec.AckLeadsInPacket)
+            {
+                spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, ack);
+            }
+
             // A prefix that already fills the datagram leaves nothing for stream data, and the
             // take's own starvation escape - which still takes one frame however large, but now
             // only when nothing else has been taken AND the head cannot be split - would
@@ -673,6 +693,16 @@ internal sealed partial class TlsQuicConnection
 
         if (!TryPlanShortHeaderPacket(out var plan, out var keys))
         {
+            // THE ORDINARY SEND EDGE, WHICH IS THE ONE PLACE RFC 9001 s6.6's state is allowed
+            // to become an exception. The PMTU probe, the PTO probe and the CONNECTION_CLOSE
+            // reach the same gate and take its `false` quietly; a caller with application data
+            // to send is owed the reason it will not go.
+            //
+            // AFTER THE GATE RATHER THAN BEFORE IT, so that the packet whose own plan crossed
+            // the limit is reported by the same pass that crossed it, and so that a level with
+            // no write keys at all - the gate's other `false` - is still the ordinary
+            // nothing-to-do return it has always been.
+            ThrowIfMustStopUsingConnection();
             return false;
         }
 
@@ -728,7 +758,34 @@ internal sealed partial class TlsQuicConnection
             return false;
         }
 
+        // RFC 9001 s6.6: "If a key update is not possible or integrity limits are reached, the
+        // endpoint MUST stop using the connection." A refusal rather than a throw, because the
+        // CONNECTION_CLOSE comes through this method too and s10.2's teardown path may not
+        // throw; ApplyKeyUpdateIfNeeded's own remarks carry the whole argument. The ordinary
+        // send edge turns the same state into an exception - see
+        // ThrowIfMustStopUsingConnection - so nothing is swallowed, it is only redirected.
+        //
+        // BEFORE THE PLAN, so that a connection in this state stops spending packet numbers
+        // and s6.6 counts on packets it will never send.
+        if (MustStopUsingConnection)
+        {
+            return false;
+        }
+
         plan = ShortHeaderPlan();
+
+        // AND ONCE MORE AFTER IT, BECAUSE THE CROSSING HAPPENS INSIDE THE PLAN. ShortHeaderPlan
+        // reads the Key Phase bit through ProtectOneMoreApplicationPacket, which is where the
+        // limit is tested, so THIS packet can be the one that sets the state. It may not be
+        // protected: s6.6's sentence is about the packets after the limit, and this is one.
+        // The number it spent is gone, and that is accepted rather than worked around - the
+        // connection is over by the RFC's own words, so no later packet needs it.
+        if (MustStopUsingConnection)
+        {
+            plan = default;
+            return false;
+        }
+
         return _keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out keys, out _);
     }
 
@@ -808,9 +865,10 @@ internal sealed partial class TlsQuicConnection
     };
 
     // RFC 9001 s6.6: "Endpoints MUST count the number of encrypted packets for each set of
-    // keys." Counted HERE, in the one method every 1-RTT packet's plan comes from - all three
-    // call sites reach it, and it is already the single place the Application packet number is
-    // spent, so a packet that is built and never sent still consumes both.
+    // keys." Counted HERE, in the one method every 1-RTT packet's plan comes from - all four
+    // call sites reach it, the same four TryPlanShortHeaderPacket's remarks name - and it is
+    // already the single place the Application packet number is spent, so a packet that is
+    // built and never sent still consumes both.
     //
     // RETURNING THE KEY PHASE IS WHAT MAKES THE COUNT UNSKIPPABLE. A separate void counter
     // beside `KeyPhase = _keys.WriteKeyPhase` could be deleted and every test would still
