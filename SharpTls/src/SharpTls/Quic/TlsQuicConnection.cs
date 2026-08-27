@@ -2573,84 +2573,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
                 ThrowIfIntegrityLimitReached();
 
-                // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
-                // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
-                // can be used after the handshake is complete or during the handshake ... An
-                // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
-                // connection immediately." All three used to throw locally with the right s20.1
-                // code spelled into the message text and no frame on the wire at all, which
-                // left the peer to discover the failure by idle timeout - s10.1's period rather
-                // than one datagram. ProtocolFailureCode was assigned and never read; it is now
-                // what the close carries.
-                //
-                // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
-                // paragraph is why both happen rather than one: "An immediate close ... causes
-                // all streams to become immediately closed; open streams can be assumed to be
-                // implicitly reset." The local exception is how this endpoint learns; the frame
-                // is how the peer does, and a peer told nothing waits out s10.1's idle period.
-                //
-                // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
-                // without sending when the connection is already draining or was never started,
-                // and BuildCloseDatagram returns 0 rather than throwing when no level has write
-                // keys or the code will not encode - so every "cannot tell the peer" case still
-                // ends in s10.2's closing state and still reaches the throw below. What is
-                // deliberately NOT swallowed is a transport failure out of the send: that is
-                // the IOException any other send raises, and hiding it behind the protocol
-                // error would lose the one fact that says the socket rather than the peer is
-                // the problem.
-                if (frameError is { } malformed)
-                {
-                    var message = $"The peer sent a malformed ACK frame: {malformed}.";
-                    await CloseAsync(malformed, message, cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(message);
-                }
-
-                // The same connection-level failure, for the same reason, one frame type
-                // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
-                // the message chose it - and StreamFailureCode is how it travels here.
-                if (streamFailure is { } badStream)
-                {
-                    await CloseAsync(
-                            StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
-                            badStream,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(badStream);
-                }
-
-                // And once more for the frames whose rule is not about a stream at all. Kept
-                // separate from streamFailure rather than folded into it because the two carry
-                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
-                // immediate close above is what needed them told apart.
-                if (protocolFailure is { } violation)
-                {
-                    await CloseAsync(
-                            ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
-                            violation,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(violation);
-                }
-
-                // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
-                // AccountForPacket. Hoisted out of that method rather than made async there,
-                // because everything else it does is counters and s10.2's close is not one.
-                // AUTHENTICATED, which is what makes ending the attempt on it safe: per
-                // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
-                // AEAD-opened packet, so no off-path sender can reach this line. That is the
-                // whole of the distinction AccountForPacket's own remarks draw between this and
-                // a failed decrypt.
-                if (outcome.CloseError is { } closeError)
-                {
-                    var message =
-                        $"The peer's packet requires the connection to close with {closeError}: "
-                        + $"{outcome.CloseReason}";
-                    await CloseAsync(closeError, message, cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(message);
-                }
-
                 AccountForPacket(outcome);
 
                 if (outcome.Processed > 0)
@@ -2717,6 +2639,133 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                         _destinationConnectionId = validated;
                         _adoptedServerConnectionId = true;
                     }
+                }
+
+                // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
+                //
+                // BELOW s7.2's ADOPTION, AND THAT POSITION IS THE ADDRESS ON THE CLOSE. These
+                // four used to sit above it, which was correct until finding 7 moved the
+                // adoption behind the AEAD and left them running first: a violation found in
+                // the server's FIRST authenticated Initial then sent its CONNECTION_CLOSE to
+                // the client's own original Destination Connection ID - the value s7.2 says
+                // must already have changed, because "Upon first receiving an Initial or Retry
+                // packet from the server, the client uses the Source Connection ID supplied by
+                // the server as the Destination Connection ID for subsequent packets", and a
+                // close is a subsequent packet. Servers route handshake Initials by the
+                // original value, so the practical cost was small; the rule is not conditional
+                // on that. The packet that taught us the address is the same packet that
+                // raised the failure, so the close is addressed with what it taught us.
+                //
+                // ARGUED RATHER THAN WITNESSED, AND THE REASON IS THE HARNESS. Separating the
+                // two addresses needs a server that both picks its own Source Connection ID and
+                // commits a violation in the same authenticated packet. LoopbackQuicPeer.ForServer
+                // cannot: its Source Connection ID is "the client-chosen Destination Connection
+                // ID it learned from the wire", so the adoption is value-neutral against it, and
+                // the scripted transport that CAN choose a Source Connection ID builds only
+                // conforming replies. A witness would be new harness plumbing rather than a new
+                // assertion; the ordering is stated here so a later reader does not restore it.
+                //
+                // AND BELOW `peerClosed`, WHICH IS A SECOND RULE RATHER THAN A SIDE EFFECT.
+                // s10.2.2: "While otherwise identical to the closing state, an endpoint in the
+                // draining state MUST NOT send any packets." A datagram that carries both the
+                // peer's CONNECTION_CLOSE and a violation now sends nothing and only throws -
+                // CloseCoreAsync's own draining guard sees the flag - which is what that MUST
+                // asks for.
+                //
+                // STILL ABOVE ProcessCryptoDataAsync, unchanged: a datagram that violates the
+                // protocol must not advance the TLS handshake first.
+                //
+                // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
+                // can be used after the handshake is complete or during the handshake ... An
+                // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
+                // connection immediately." All three used to throw locally with the right s20.1
+                // code spelled into the message text and no frame on the wire at all, which
+                // left the peer to discover the failure by idle timeout - s10.1's period rather
+                // than one datagram. ProtocolFailureCode was assigned and never read; it is now
+                // what the close carries.
+                //
+                // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
+                // paragraph is why both happen rather than one: "An immediate close ... causes
+                // all streams to become immediately closed; open streams can be assumed to be
+                // implicitly reset." The local exception is how this endpoint learns; the frame
+                // is how the peer does, and a peer told nothing waits out s10.1's idle period.
+                //
+                // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
+                // without sending when the connection is already draining or was never started,
+                // and BuildCloseDatagram returns 0 rather than throwing when no level has write
+                // keys or the code will not encode - so every "cannot tell the peer" case still
+                // ends in s10.2's closing state and still reaches the throw below. What is
+                // deliberately NOT swallowed is a transport failure out of the send: that is
+                // the IOException any other send raises, and hiding it behind the protocol
+                // error would lose the one fact that says the socket rather than the peer is
+                // the problem.
+                // UNREACHABLE THROUGH THE WIRE, AND THAT IS MEASURED RATHER THAN ASSUMED - so
+                // this arm is deliberately unwitnessed while its three siblings below are not.
+                // frameError is set only by TlsQuicAckTracker.ProcessAckFrame returning false,
+                // which happens only when TlsQuicAckFrames.TryGetRanges does, which is
+                // TryWalkRanges over frame.AckRanges - the identical walk, with the identical
+                // s19.3.1 underflow rules, that TryReadAck already ran over the identical bytes
+                // before this frame became a TlsQuicFrame at all. So a chain this rejects was
+                // rejected one layer down and arrived as the receiver's CloseError instead;
+                // AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrameEncodingError is
+                // what witnesses that route. Mutation-ledger rows 133 and 134 recorded the same
+                // equivalence from the other side.
+                //
+                // THE ARM STAYS FOR THE REJECTION THAT IS SEMANTIC RATHER THAN STRUCTURAL:
+                // s13.1's "if a packet number was never issued" is a question about what this
+                // endpoint sent, which no parser can ask, and on the day the tracker asks it
+                // this is the line that turns the answer into a close instead of a bare throw.
+                if (frameError is { } malformed)
+                {
+                    var message = $"The peer sent a malformed ACK frame: {malformed}.";
+                    await CloseAsync(malformed, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
+                }
+
+                // The same connection-level failure, for the same reason, one frame type
+                // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
+                // the message chose it - and StreamFailureCode is how it travels here.
+                if (streamFailure is { } badStream)
+                {
+                    await CloseAsync(
+                            StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            badStream,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(badStream);
+                }
+
+                // And once more for the frames whose rule is not about a stream at all. Kept
+                // separate from streamFailure rather than folded into it because the two carry
+                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
+                // immediate close above is what needed them told apart.
+                if (protocolFailure is { } violation)
+                {
+                    await CloseAsync(
+                            ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            violation,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(violation);
+                }
+
+                // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
+                // AccountForPacket. Hoisted out of that method rather than made async there,
+                // because everything else it does is counters and s10.2's close is not one.
+                // AUTHENTICATED, which is what makes ending the attempt on it safe: per
+                // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
+                // AEAD-opened packet, so no off-path sender can reach this line. That is the
+                // whole of the distinction AccountForPacket's own remarks draw between this and
+                // a failed decrypt.
+                if (outcome.CloseError is { } closeError)
+                {
+                    var message =
+                        $"The peer's packet requires the connection to close with {closeError}: "
+                        + $"{outcome.CloseReason}";
+                    await CloseAsync(closeError, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
                 }
 
                 foreach (var chunk in chunks)
@@ -5732,16 +5781,23 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
     // datagram", so this is one datagram carrying two packets, not two sends.
     //
-    // THE ORDER IS THE CANDIDATE LIST'S, HIGHEST PROTECTION FIRST, and it is deliberate against
-    // s12.2's ascending-order SUGGESTION ("makes it more likely that the receiver will be able
-    // to process all the packets in a single pass"). That is a preference about the receiver's
-    // buffering; s10.2.3's Generally - "sending the frame in a packet with the highest level of
-    // packet protection to avoid the packet being discarded" - is about which copy of a close
-    // the peer is most likely to be ABLE to open, and on the teardown path that is the one to
-    // lead with. It also keeps the close's leading packet type stable for the witnesses that
-    // read it off the clear-text header, which is what
-    // TlsQuicConnectionTests.AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
-    // ParameterError asserts.
+    // THE ORDER IS THE SPEC'S KNOB, NOT THIS METHOD'S, FOR THE REASON BuildAnswerDatagram GIVES
+    // ABOUT THE SAME KNOB. Until a coalesced close existed there was no order here to decide -
+    // the walk picked ONE level and returned - so the list could be written in whatever sequence
+    // read best. Coalescing turned it into a per-datagram flight plan, and this connection
+    // already has exactly one owner for that: TlsQuicConnectionSpec.CoalesceAscendingByLevel,
+    // which BuildAnswerDatagram reads and which the design constraints put on the list of things
+    // nothing may hardcode a literal for. A second, contradictory order on the close datagram
+    // would be one connection emitting two different coalescing habits on one wire.
+    //
+    // s10.2.3 IS SATISFIED BY THE SET, NOT BY THE SEQUENCE, which is what makes deferring to the
+    // knob legitimate rather than a shrug. Its Generally - "sending the frame in a packet with
+    // the highest level of packet protection to avoid the packet being discarded" - is about
+    // WHICH copy the peer is likely to be able to open, and both copies now go; nothing in
+    // s10.2.3 speaks to their order inside the datagram. s12.2 does, and only as a preference:
+    // ascending "makes it more likely that the receiver will be able to process all the packets
+    // in a single pass". So the knob's own default - ascending - decides, and the highest-
+    // protection-first reading survives as the other setting rather than as a literal.
     //
     // THE PACKET NUMBER IS DRAWN PER LEVEL, from that level's own counter, because RFC 9000
     // s12.3 gives each packet number space its own - and the two packets in this datagram are in
@@ -5765,9 +5821,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return 0;
         }
 
+        // The confirmed arm has one candidate, so the knob has nothing to order there; RFC 9001
+        // s4.9 has already discarded both handshake levels by then anyway.
         ReadOnlySpan<TlsQuicEncryptionLevel> candidates = _confirmed
             ? [TlsQuicEncryptionLevel.Application]
-            : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
+            : _options.Spec.CoalesceAscendingByLevel
+                ? [TlsQuicEncryptionLevel.Initial, TlsQuicEncryptionLevel.Handshake]
+                : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
 
         var packets = new List<TlsQuicPacketToSend>();
         var sentAsApplicationForm = false;
@@ -6171,15 +6231,24 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     //
     // The witness is
     // TlsQuicConnectionTests.AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts.
-    private DateTimeOffset IdleDeadline()
+    private DateTimeOffset IdleDeadline() => AddSaturating(_idleSince, EffectiveIdlePeriod());
+
+    /// <summary>The period this connection actually waits before giving up: the advertised value
+    /// raised by RFC 9000 s10.1's floor, or the local policy unraised.</summary>
+    /// <remarks>SPLIT OUT SO THE DEADLINE AND THE DIAGNOSTIC CANNOT DISAGREE. The message on the
+    /// TimeoutException used to read <see cref="EffectiveIdleTimeout"/> directly, which is the
+    /// value the two endpoints ADVERTISED and not the one the floor produced - so a connection
+    /// raised from 100 milliseconds to three seconds reported the 100. One expression, two
+    /// readers.</remarks>
+    private TimeSpan EffectiveIdlePeriod()
     {
         if (EffectiveIdleTimeout() is not { } advertised)
         {
-            return AddSaturating(_idleSince, _options.IdleTimeout);
+            return _options.IdleTimeout;
         }
 
         var floor = FromTicksSaturating((double)PtoDuration(_peerMaxAckDelay).Ticks * 3.0);
-        return AddSaturating(_idleSince, advertised >= floor ? advertised : floor);
+        return advertised >= floor ? advertised : floor;
     }
 
     private TimeSpan RemainingBeforeIdleTimeout() =>
@@ -6256,14 +6325,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     }
 
     private TimeoutException IdleTimeoutExceeded() => new(
-        $"The QUIC connection was idle for longer than {EffectiveIdleTimeout() ?? _options.IdleTimeout}"
+        $"The QUIC connection was idle for longer than {EffectiveIdlePeriod()}"
             + " and was closed under RFC 9000 s10.1. "
-            + (EffectiveIdleTimeout() is null
+            + (EffectiveIdleTimeout() is not { } advertised
                 ? "That period is TlsQuicConnectionOptions.IdleTimeout, local policy: neither "
                     + "endpoint advertised a non-zero max_idle_timeout, which s18.2 makes the "
                     + "state in which idle timeout is disabled."
                 : "That period is s10.1's minimum of the two advertised max_idle_timeout "
-                    + "values, so the close is silent and carries no CONNECTION_CLOSE frame."));
+                    + $"values ({advertised}), raised where s10.1's third paragraph requires it "
+                    + "to be at least three times the current Probe Timeout, so the close is "
+                    + "silent and carries no CONNECTION_CLOSE frame."));
 
     // RFC 9000 s17.2.5.3: "The value of the Token field is copied to all subsequent Initial
     // packets." Before a Retry the spec's knob is what a client carries - s8.1's NEW_TOKEN

@@ -645,6 +645,73 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(TlsQuicEncryptionLevel.Application, close.Level);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 9's SECOND ARM, AND THE ONLY WITNESS FOR THE CODE TRAVELLING AT ALL. The
+    /// three arms above and below it can all be satisfied by a close that carries
+    /// PROTOCOL_VIOLATION, because that is what the arms themselves raise; this one cannot. RFC
+    /// 9000 s19.4: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST
+    /// terminate the connection with error STREAM_STATE_ERROR", and s20.1 numbers that 0x05 -
+    /// three away from PROTOCOL_VIOLATION's 0x0a.
+    /// <para>WHY THAT MATTERS: <c>TlsQuicStreamSet</c> chooses the code, deep inside the stream
+    /// layer, and the refusal that reaches <c>PumpOnceAsync</c> used to be a string with the
+    /// code's NAME interpolated into it. A name inside a message cannot be put on the wire, so
+    /// the close fell back to PROTOCOL_VIOLATION and told the peer the wrong thing about its own
+    /// mistake. <c>StreamFailureCode</c> is the field that carries it out, and reverting the
+    /// three <c>StreamFailureCode ??= error;</c> lines that set it turns the two assertions at
+    /// the end of this test red while every other test stays green.</para>
+    /// <para>STREAM 2 IS A CLIENT-INITIATED UNIDIRECTIONAL STREAM - RFC 9000 s2.1 Table 1 - so
+    /// it is send-only from this endpoint's side whether or not it was ever opened, which is why
+    /// the frame needs no setup.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARefusedStreamFrameClosesWithTheCodeTheStreamLayerChoseNotAFallback()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // Drained for the reason AfterConfirmationTheCloseGoesOutInAOneRttPacketAsSection1023
+        // Requires gives: the pump above answered HANDSHAKE_DONE with a 1-RTT ACK, and
+        // LoopbackQuicPeer.PumpOnceAsync reads ONE datagram per call.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Null(serverPeer.LastConnectionClose);
+
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.ResetStream,
+                    StreamId = 2,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("StreamStateError", error.Message, StringComparison.Ordinal);
+
+        // s20.1 STREAM_STATE_ERROR (0x05): "An endpoint received a frame for a stream that was
+        // not in a state that permitted that frame." NOT 0x0a - a fallback would say the peer
+        // committed a generic compliance error rather than the specific one s19.4 names.
+        Assert.Equal(TlsQuicTransportError.StreamStateError, connection.ClosedWith);
+
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        var close = Assert.NotNull(serverPeer.LastConnectionClose);
+        Assert.Equal((ulong)TlsQuicTransportError.StreamStateError, close.ErrorCode);
+    }
+
     [Fact]
     public async Task APeerConnectionCloseEntersDrainingAndStopsSendingAndDelivering()
     {
@@ -1159,14 +1226,34 @@ public sealed partial class TlsQuicConnectionTests
     /// this defends against is in. The peer then opens both, which is what turns "two packets"
     /// into "two closes".</para>
     /// </summary>
-    [Fact]
-    public async Task AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets()
+    /// <remarks>BOTH ROWS OF TlsQuicConnectionSpec.CoalesceAscendingByLevel, for the reason
+    /// AHandshakePacketCoalescedWithAOneRttOneIsAnsweredAtBothLevels is a theory over the same
+    /// knob: coalescing a close turned its level list into a per-datagram flight plan, and this
+    /// connection has exactly one owner for that order. A close that hardcoded either sequence
+    /// would emit one coalescing habit on the answer datagrams and a different one on the
+    /// teardown datagram of the same connection. TRUE is the knob's default and RFC 9000
+    /// s12.2's suggestion - ascending "makes it more likely that the receiver will be able to
+    /// process all the packets in a single pass" - and FALSE is the highest-protection-first
+    /// reading that used to be written here as a literal.</remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets(
+        bool ascending)
     {
         using var cancellation = new CancellationTokenSource(TestTimeout);
         using var pki = TestPki.Create();
         using var credential = Credential(pki);
         var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
-        await using var connection = Connection(clientTransport, serverTransport, pki);
+        var spec = new TlsQuicConnectionSpec
+        {
+            PaddingTarget = Spec().PaddingTarget,
+            SourceConnectionIdLength = Spec().SourceConnectionIdLength,
+            LocalFlowControl = Spec().LocalFlowControl,
+            TransportParameters = Spec().TransportParameters,
+            CoalesceAscendingByLevel = ascending,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
 
         // The s7.3 refusal is used only as a way of reaching an UNCONFIRMED close with both
         // handshake levels keyed - which is the one window s10.2.3's SHOULD is about. What the
@@ -1177,7 +1264,7 @@ public sealed partial class TlsQuicConnectionTests
             connection.OriginalDestinationConnectionId,
             overrideOriginalDestination: Convert.FromHexString("F0F1F2F3F4F5F6F7"));
         await using var serverPeer = LoopbackQuicPeer.ForServer(
-            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
 
         await connection.StartAsync(cancellation.Token);
         Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
@@ -1188,21 +1275,24 @@ public sealed partial class TlsQuicConnectionTests
         Assert.False(connection.IsHandshakeConfirmed);
         Assert.True(connection.IsDraining);
 
-        // TWO PACKETS IN ONE DATAGRAM, highest protection first. The order is s10.2.3's
-        // "Generally ... the highest level of packet protection" rather than s12.2's ascending
-        // suggestion, because on the teardown path the copy most likely to be openable is the
-        // one to lead with.
+        // TWO PACKETS IN ONE DATAGRAM, in the order the knob asked for. RFC 9000 s14.1's
+        // 1,200-byte floor holds either way: it binds the DATAGRAM, not the position of the
+        // Initial packet inside it, and TlsQuicDatagramBuilder expands the datagram whichever
+        // end the Initial packet sits at.
         var closeDatagram = clientTransport.Sent[^1];
         var coalesced = TlsQuicDatagramReader.Read(closeDatagram).ToList();
         Assert.Equal(2, coalesced.Count);
 
         Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
-            coalesced[0].Packet, out var handshakeHeader, out _));
-        Assert.Equal(TlsQuicLongPacketType.Handshake, handshakeHeader.Type);
-
+            coalesced[0].Packet, out var first, out _));
         Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
-            coalesced[1].Packet, out var initialHeader, out _));
-        Assert.Equal(TlsQuicLongPacketType.Initial, initialHeader.Type);
+            coalesced[1].Packet, out var second, out _));
+        Assert.Equal(
+            ascending ? TlsQuicLongPacketType.Initial : TlsQuicLongPacketType.Handshake,
+            first.Type);
+        Assert.Equal(
+            ascending ? TlsQuicLongPacketType.Handshake : TlsQuicLongPacketType.Initial,
+            second.Type);
 
         // AND BOTH CARRY THE FRAME, which the header bits alone cannot say. The peer holds read
         // keys at both levels, so this is the AEAD's answer rather than a parser's.
@@ -1638,12 +1728,21 @@ public sealed partial class TlsQuicConnectionTests
 
         // s10.2.3: "Generally, this means sending the frame in a packet with the highest level
         // of packet protection to avoid the packet being discarded." Handshake keys exist by
-        // now, so the close goes out at Handshake and not at Initial - READ OFF THE PROTECTED
-        // PACKET, because RFC 9000 s17.2's Long Packet Type bits sit above the four bits RFC
-        // 9001 s5.4.1's header protection masks, so they are legible without any key at all.
+        // now, so a Handshake copy of the close is PRESENT - READ OFF THE PROTECTED PACKET,
+        // because RFC 9000 s17.2's Long Packet Type bits sit above the four bits RFC 9001
+        // s5.4.1's header protection masks, so they are legible without any key at all.
+        //
+        // PRESENCE AND NOT POSITION, WHICH IS WHAT THIS TEST ALWAYS MEANT. It used to read the
+        // FIRST packet of the datagram, which was the same question only while the close went
+        // out at one level; once it is coalesced into every applicable level the leading type
+        // is decided by TlsQuicConnectionSpec.CoalesceAscendingByLevel, and asserting it here
+        // would pin that knob's default from a test about transport parameters. The order has
+        // its own witness in AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets.
         var closeDatagram = clientTransport.Sent[^1];
-        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(closeDatagram, out var closeHeader, out _));
-        Assert.Equal(TlsQuicLongPacketType.Handshake, closeHeader.Type);
+        Assert.Contains(
+            TlsQuicDatagramReader.Read(closeDatagram),
+            packet => TlsQuicPacketHeader.TryReadLongHeader(packet.Packet, out var header, out _)
+                && header.Type == TlsQuicLongPacketType.Handshake);
     }
 
     [Fact]
