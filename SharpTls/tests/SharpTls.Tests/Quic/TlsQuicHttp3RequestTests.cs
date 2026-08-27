@@ -2366,7 +2366,71 @@ public sealed class TlsQuicHttp3RequestTests
         else
         {
             Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad, error);
+
+            // THE REFUSAL IS STICKY, WHICH IS WHAT MAKES "refused, not truncated" TRUE FOR A
+            // CALLER RATHER THAN ONLY FOR THIS CALL. A reader that answered false once and
+            // then resumed would let a caller that pumped again read a Body it had already
+            // been told not to trust. _errorCode is the same sticky slot every other s8.1
+            // failure here uses, so the second answer carries the first code.
+            Assert.False(response.TryRead([], endOfStream: true, out var again));
+            Assert.Equal(error, again);
+            Assert.False(response.IsComplete);
         }
+    }
+
+    // THE SHIPPED DEFAULT, WHICH THE THEORY ABOVE DELIBERATELY DOES NOT EXERCISE: it narrows
+    // the ceiling to 128 so that the MECHANISM can be witnessed without allocating anything.
+    // That leaves the number a caller actually gets unpinned, and the number is a behaviour
+    // change - a response past it is refused. Pinned here rather than by a 64 MiB test, which
+    // would be a test about allocation speed.
+    //
+    // TlsQuicHttp3ConnectionTests' AResponsePastTheSpecsCeilingIsExcessiveLoad is the other
+    // half: it narrows MaximumBufferedResponseBytes on a SPEC and reads the refusal off a real
+    // connection, so together the two say that TryOpenRequest hands the spec's value through
+    // and that the spec's value defaults to this constant.
+    [Fact]
+    public void TheDefaultResponseCeilingIsTheSpecsShippedNumber()
+    {
+        Assert.Equal(
+            TlsQuicHttp3Spec.DefaultMaximumBufferedResponseBytes,
+            new TlsQuicHttp3Spec().MaximumBufferedResponseBytes);
+        Assert.Equal(64 * 1024 * 1024, TlsQuicHttp3Spec.DefaultMaximumBufferedResponseBytes);
+    }
+
+    // The reader's own reset invariant, with no connection above it. RFC 9114 s4.1 makes a
+    // response whose stream was reset a FAILED one rather than a short one, and this type is
+    // driven directly by the fuzz targets and by this file - so the guarantee has to be the
+    // reader's rather than TlsQuicHttp3Connection's sequencing.
+    //
+    // endOfStream IS PASSED TRUE ON PURPOSE, which is the pairing a connection no longer
+    // produces: TlsQuicStream.ReceiveComplete stopped folding a reset in, so the two can only
+    // meet here. A direct caller that has both facts must still not get a complete response.
+    [Fact]
+    public void AResetResponseIsNeverCompleteEvenAtEndOfStream()
+    {
+        var script = Script(
+            (Headers, EncodeSection((":status", "200"))),
+            (Data, Encoding.UTF8.GetBytes("half")))
+            .ToArray();
+
+        var response = new TlsQuicHttp3Response();
+        Assert.True(response.OnPeerReset(0x010c));
+        Assert.True(response.TryRead(script, endOfStream: true, out var error));
+
+        Assert.Equal(0ul, error);
+        Assert.False(response.IsComplete);
+        Assert.True(response.IsReset);
+        Assert.Equal(0x010cUL, response.ResetErrorCode);
+
+        // s4.1's "begin processing partial HTTP messages once enough of the message has been
+        // received to make progress" - what arrived is still read.
+        Assert.Equal(200, response.Status);
+        Assert.Equal("half", Encoding.UTF8.GetString(response.Body));
+
+        // s19.4 admits one RESET_STREAM per stream, so the first code stands and the
+        // once-per-stream gate one layer up answers false the second time.
+        Assert.False(response.OnPeerReset(0x0100));
+        Assert.Equal(0x010cUL, response.ResetErrorCode);
     }
 
     // THE FOURTH BUFFER, WHICH THE AUDIT DID NOT NAME AND THE FIRST FIX ASSERTED AWAY. That

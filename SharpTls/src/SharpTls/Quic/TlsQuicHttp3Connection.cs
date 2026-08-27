@@ -827,37 +827,14 @@ internal sealed class TlsQuicHttp3Connection
 
         foreach (var exchange in _exchanges)
         {
-            // RFC 9000 s19.4's RESET_STREAM, which s4.1.1 makes an ordinary thing for a server
-            // to send: "servers cancel requests if they are unable to or choose not to
-            // respond". THIS EXCHANGE IS OVER AND THE CONNECTION IS NOT - s8 separates "This is
-            // referred to as a 'stream error'" from "This is referred to as a 'connection
-            // error'", and closing the connection here would take every sibling request down
-            // for one server's decision about this one. So the reset is recorded on the reader
-            // and the loop moves on; nothing calls Fail.
-            //
-            // BEFORE THE READ AND NOT AFTER IT, WHICH IS THE WHOLE FIX. TlsQuicStream reports a
-            // reset stream as having finished receiving - it must, because RFC 9000 s4.5 leaves
-            // the bytes below the reset's final size undelivered forever and a completion test
-            // that waited for them would hang, which is audit finding #3. That flag is this
-            // loop's `endOfStream`, and TlsQuicHttp3Response.TryRead's completion rule is
-            // end-of-stream with an empty buffer - so a reset landing on an HTTP/3 frame
-            // boundary would otherwise hand the caller a TRUNCATED body as a complete, 200 OK
-            // response. Skipping the read is what stops the partial tail being appended at all;
-            // the reader's own `!IsReset` conjunct stops the flag for callers that have no
-            // connection above them.
-            //
-            // s4.1 IS WHY THE ARRIVED BYTES ARE KEPT RATHER THAN DISCARDED: "endpoints SHOULD
-            // begin processing partial HTTP messages once enough of the message has been
-            // received to make progress". A caller may read Status and HeaderFields off a reset
-            // exchange; what it may not do is mistake the body for whole, and IsComplete
-            // answers that.
-            if (exchange.Stream.ResetReceived)
+            // A STREAM ALREADY RECORDED AS RESET IS DONE BEING READ. RFC 9000 s4.5 leaves the
+            // bytes below the reset's final size undelivered forever, so nothing further can
+            // arrive; the pump that carried the reset has already read everything that did.
+            // Without this a response parked on RFC 9204 s2.2.1's block would be re-presented
+            // on every later pump for the life of the connection, on a stream nothing will ever
+            // unblock.
+            if (exchange.Response.IsReset)
             {
-                if (exchange.Response.OnPeerReset(exchange.Stream.ResetErrorCode!.Value))
-                {
-                    OnRequestStreamAbandoned(exchange);
-                }
-
                 continue;
             }
 
@@ -887,7 +864,20 @@ internal sealed class TlsQuicHttp3Connection
             // none. A flag whose removal no test can see is a flag to delete rather than to
             // document, so it was deleted; AFinThatArrivesWithNoNewBytesEndsTheResponseOnce
             // pumps three further times and pins that the repeat stays benign.
-            var endOfStream = exchange.Stream.ReceiveComplete;
+            //
+            // `&& !ResetReceived` IS LOAD-BEARING AND THE OBVIOUS READING IS WRONG. RFC 9000
+            // s4.5 says "A RESET_STREAM ... also establishes the final size", so a reset sets
+            // the same field a FIN does: TlsQuicStream.ReceiveComplete is
+            // `_finalSize == _delivered.Count` and FinReceived is `_finalSize is not null`, so
+            // NEITHER distinguishes a stream that ended from one that was cancelled. A peer
+            // that resets naming a final size equal to what it already sent - the ordinary
+            // shape when a server abandons a response between two frames - therefore satisfies
+            // ReceiveComplete exactly, with no FIN anywhere, and would set IsComplete on a
+            // response s4.1 calls incomplete. The stream layer's own revert cured only the
+            // TRUNCATING reset; this conjunct is what covers the exact-size one, and it is here
+            // because ResetReceived is the only observable that separates the two.
+            var endOfStream =
+                exchange.Stream.ReceiveComplete && !exchange.Stream.ResetReceived;
 
             // `&& !IsBlocked` IS C16'S, AND WITHOUT IT NOTHING EVER UNBLOCKS. What a parked
             // field section is waiting for arrives on the peer's ENCODER stream, so the
@@ -903,7 +893,14 @@ internal sealed class TlsQuicHttp3Connection
             // ONCE PER PUMP AND NEVER IN A LOOP. A section that never unblocks is re-presented
             // once per PumpOnceAsync and PumpOnceAsync is bounded by TlsQuicConnection's
             // deadline - see the note on TryHoldBlocked below.
-            if (fresh == 0 && !endOfStream && !exchange.Response.IsBlocked)
+            // `&& !ResetReceived` KEEPS A RESET-ONLY PUMP FROM BEING SKIPPED. A peer that
+            // resets without sending anything alongside it leaves `fresh` at zero, and
+            // ReceiveComplete is false because a truncating reset is not completion - so
+            // without this conjunct the arm below would never run and the reset would go
+            // unrecorded. It costs one empty TryRead on that pump, which is the same no-op
+            // this loop already makes for a blocked section.
+            if (fresh == 0 && !endOfStream && !exchange.Response.IsBlocked
+                && !exchange.Stream.ResetReceived)
             {
                 continue;
             }
@@ -918,6 +915,58 @@ internal sealed class TlsQuicHttp3Connection
             if (!exchange.Response.TryRead(chunk, endOfStream, out var responseError))
             {
                 return Fail(responseError, out errorCode);
+            }
+
+            // RFC 9000 s19.4's RESET_STREAM, which s4.1.1 makes an ordinary thing for a server
+            // to send: "servers cancel requests if they are unable to or choose not to
+            // respond". THIS EXCHANGE IS OVER AND THE CONNECTION IS NOT - s8 separates "This is
+            // referred to as a 'stream error'" from "This is referred to as a 'connection
+            // error'", and closing the connection here would take every sibling request down
+            // for one server's decision about this one. Nothing calls Fail.
+            //
+            // AFTER THE READ, AND THE FIRST CUT OF THIS FIX HAD IT BEFORE. Recording the reset
+            // first meant `continue`-ing past TryRead, so a pump carrying both the response's
+            // HEADERS frame and the RESET_STREAM - the ordinary shape, since a server cancelling
+            // mid-response has already sent some of it - parsed none of it: Status stayed -1 and
+            // HeaderFields stayed empty, while the comment here promised the opposite. Reading
+            // first is what makes s4.1's "endpoints SHOULD begin processing partial HTTP
+            // messages once enough of the message has been received to make progress" true of
+            // this loop rather than merely asserted by it.
+            //
+            // AND IT IS SAFE, WHICH IS WHY THE ORDER IS A FREE CHOICE RATHER THAN A TRADE.
+            // TlsQuicHttp3Response.IsComplete is assigned only inside TryRead's `endOfStream`
+            // block, and `endOfStream` is false for every reset - see its own note above for
+            // why that needs an explicit conjunct rather than trusting ReceiveComplete. A frame
+            // the reset cut in half simply stays in the reader's pending buffer, unparsed, as
+            // any partial frame does.
+            //
+            // s4.1 AND RFC 9000 s3.2 TOGETHER ARE WHY A RESET AFTER A WHOLE RESPONSE IS
+            // IGNORED. s3.2 lets a receiver in "Data Recvd" or "Data Read" discard a
+            // RESET_STREAM, and s4.1 turns the permission into an instruction: "Clients MUST NOT
+            // discard complete responses as a result of having their request terminated
+            // abruptly." So a reset arriving after IsComplete is neither recorded nor answered
+            // with s4.4.2's Stream Cancellation - the section it would cancel has already been
+            // acknowledged.
+            //
+            // THE SAME-PUMP FIN-AND-RESET RACE RESOLVES TO "RESET", WHICH IS THE OTHER
+            // DIRECTION FROM THE PARAGRAPH ABOVE AND IS THE SAFE ONE. When a FIN and a
+            // RESET_STREAM arrive in the SAME pump there is no observable order between them -
+            // both wrote the same `_finalSize` - so IsComplete has not been set yet when this
+            // arm runs and the exchange is reported reset. A caller then retries a request that
+            // had in fact completed, which costs a round trip; the opposite mistake hands over
+            // a body the peer disowned. Once a FIN has completed a response on any EARLIER
+            // pump, IsComplete is already true and s4.1's MUST NOT is honoured exactly.
+            if (exchange.Stream.ResetReceived && !exchange.Response.IsComplete)
+            {
+                if (exchange.Response.OnPeerReset(exchange.Stream.ResetErrorCode!.Value))
+                {
+                    OnRequestStreamAbandoned(exchange);
+                }
+
+                // s2.1.2's slot has just been released by OnRequestStreamAbandoned and
+                // TrySynchroniseQpackState would re-hold it for a section that will never
+                // decode.
+                continue;
             }
 
             if (!TrySynchroniseQpackState(exchange, out errorCode))

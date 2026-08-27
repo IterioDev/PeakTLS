@@ -709,19 +709,86 @@ public sealed class TlsQuicHttp3StreamsTests
     // ONE TRUNCATED INSTRUCTION, TWO CAPACITIES, AND NOTHING ELSE DIFFERENT. The bytes are
     // identical in both rows; only SETTINGS_QPACK_MAX_TABLE_CAPACITY moves. A constant ceiling
     // would give both rows the same answer whichever constant it was.
+    //
+    // THE PROBE MUST DECLARE AN ENTRY THE NARROW ROW COULD NOT STORE, AND THAT IS FORCED
+    // RATHER THAN CARELESS. The ceiling is deliberately ABOVE the advertised capacity - that
+    // is what the headroom is - so no instruction s3.2.2 would let the narrow endpoint keep
+    // can ever reach the narrow endpoint's ceiling. A row that breaches it is necessarily one
+    // the narrow endpoint would refuse on size IF IT EVER COMPLETED, and it never does: the
+    // instruction is delivered one byte short, so RFC 9204 s4.1.2's string literal is still
+    // truncated, TryReadEncoderInstructions consumes nothing and answers NeedMoreData, and
+    // s3.2.2's size test is never reached. THIS IS NOT A LEGALITY TEST - the only thing
+    // asserted is which ceiling the residue met. The entry IS legal at the wide capacity, so
+    // no row here is refused for a reason the ceiling did not cause.
     [Fact]
     public void TheEncoderStreamCeilingFollowsTheAdvertisedTableCapacity()
     {
-        // Just past the 4 KiB of headroom the derivation adds, so a capacity of 1 cannot cover
-        // it and a capacity of 64 KiB covers it with room to spare.
-        var instruction = Insert(new string('a', 5000), "value");
+        // Past 1024 + EncoderStreamCeilingHeadroomBytes and far short of 1 MiB + the same, so
+        // the two rows can only differ by the capacity each advertised. And under Set()'s
+        // initial_max_stream_data_uni of 100_000, because a delivery the harness refuses on
+        // flow control never reaches the ceiling under test at all.
+        var instruction = Insert(new string('a', 80_000), "value");
         byte[] stream = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. instruction[..^1]];
 
-        Assert.False(ProcessedAtCapacity(stream, capacity: 1, out var narrowError));
+        Assert.False(ProcessedAtCapacity(stream, capacity: 1024, out var narrowError));
         Assert.Equal(TlsQuicQpackDynamicTable.QpackEncoderStreamError, narrowError);
 
-        Assert.True(ProcessedAtCapacity(stream, capacity: 65536, out var wideError));
+        Assert.True(ProcessedAtCapacity(stream, capacity: 1024 * 1024, out var wideError));
         Assert.Equal(0ul, wideError);
+    }
+
+    // THE DEFERRAL WINDOW IS THE ONE PLACE RESIDUE STILL EQUALS ARRIVAL, and it is what the
+    // ceiling's headroom is actually bought for. TryReadEncoderStream parses NOTHING while this
+    // endpoint has no decoder stream to answer RFC 9204 s2.2.2.3's Insert Count Increment on, so
+    // every octet that lands in that window is held - not as one partial instruction, but as a
+    // whole multi-instruction backlog.
+    //
+    // A LEGAL ENCODER CAN SEND FAR MORE THAN THE CAPACITY. s3.2.2 bounds a dynamic table ENTRY
+    // by the capacity, not the STREAM: inserting and evicting against an 8 KiB table for a while
+    // costs tens of kibibytes of s4.3 instructions while never holding more than 8 KiB of
+    // entries. A ceiling of capacity-plus-one-instruction - the 4 KiB this headroom briefly held
+    // - closes the connection on exactly that conforming peer, which is round one's bug in a
+    // narrower window.
+    //
+    // NOTHING HERE IS NARROWED. The ceiling is the DERIVED one, so the row is about the shipped
+    // number rather than about the mechanism its siblings above pin.
+    [Fact]
+    public void ALegalEncoderBacklogDeferredBeforeOurStreamsAreOpenIsNotRefused()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = [new(TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier, 8192)],
+            },
+            set);
+        Assert.Null(http3.LocalDecoderStream);
+
+        // Around 40 KiB of instructions against an 8 KiB table: five times the capacity, well
+        // past capacity + 4 KiB, and inside both this endpoint's derived ceiling and Set()'s
+        // initial_max_stream_data_uni.
+        var backlog = new List<byte> { (byte)TlsQuicHttp3StreamType.QpackEncoder };
+        backlog.AddRange(SetCapacity(8192));
+        for (var i = 0; i < 400; i++)
+        {
+            backlog.AddRange(Insert($"header-name-{i}", "a value of some believable length"));
+        }
+
+        Assert.InRange(backlog.Count, 8192 + 4096 + 1, 100_000);
+        Deliver(set, PeerUni0, backlog.ToArray());
+
+        // Deferred: held whole, unparsed, and NOT refused.
+        Assert.True(http3.TryProcessPeerStreams(out var deferred));
+        Assert.Equal(0ul, deferred);
+        Assert.Equal(0ul, http3.Table!.InsertCount);
+
+        // And the backlog really is parseable - the ceiling was refusing legal work, not
+        // tolerating a stall. Evictions mean the table holds far fewer entries than were
+        // inserted, which is precisely why the STREAM outran the capacity.
+        http3.OpenLocalStreams();
+        Assert.True(http3.TryProcessPeerStreams(out var later));
+        Assert.Equal(0ul, later);
+        Assert.Equal(400ul, http3.Table.InsertCount);
     }
 
     // s3.2.3's zero-capacity arm, which TryReadEncoderStream answers by DISCARDING the buffer -

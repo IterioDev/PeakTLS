@@ -837,6 +837,16 @@ public sealed partial class TlsQuicConnectionTests
         // H3_REQUEST_CANCELLED (0x010c), s8.1's code for s4.1.1's "When a server abandons a
         // response after partial processing". A REAL CODE AND NOT ZERO: 0 is H3_NO_ERROR and a
         // legal thing to reset with, so a nullable that defaulted would read the same.
+        //
+        // THE FINAL SIZE EQUALS WHAT WAS SENT, AND THAT IS THE SHARPEST SHAPE OF THIS BUG
+        // RATHER THAN A CONVENIENCE. RFC 9000 s4.5: "A RESET_STREAM ... also establishes the
+        // final size" - the same field a FIN sets - so this reset leaves
+        // TlsQuicStream.ReceiveComplete TRUE with no FIN anywhere on the stream, and both
+        // FinReceived and ReceiveComplete answer identically to a clean close. Nothing below
+        // the final size is missing; what is missing is the rest of the RESPONSE, which the
+        // server has just said it will not send. An endOfStream computed from ReceiveComplete
+        // alone reports this as a whole 200, which is what it did until the conjunct naming
+        // ResetReceived was added.
         await harness.PeerSendsAsync(
             cancellation.Token,
             expectAccepted: true,
@@ -852,6 +862,16 @@ public sealed partial class TlsQuicConnectionTests
         Assert.False(response.IsComplete);
         Assert.True(response.IsReset);
         Assert.Equal(0x010cUL, response.ResetErrorCode);
+
+        // WHAT ARRIVED IS PARSED, WHICH IS THE HALF THE FIRST CUT ONLY CLAIMED. s4.1 asks
+        // endpoints to "begin processing partial HTTP messages once enough of the message has
+        // been received to make progress", and the reset arrived in the SAME pump as the
+        // response's HEADERS frame - so an implementation that recorded the reset before
+        // reading would leave Status at -1 and HeaderFields empty while its comment promised
+        // otherwise. Both assertions are here because either alone can pass on the wrong code:
+        // the status pins that the field section decoded, the body that the DATA frame did.
+        Assert.Equal(200, response.Status);
+        Assert.Equal("first half", Encoding.UTF8.GetString(response.Body));
 
         // REPEATED PUMPS DO NOT CHANGE THE ANSWER, and cannot re-raise s4.4.2's Stream
         // Cancellation either: the reset arm runs once per stream, not once per pump.
