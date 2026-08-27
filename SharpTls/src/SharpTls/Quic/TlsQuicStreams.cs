@@ -266,6 +266,25 @@ namespace SharpTls.Quic;
 // nothing. ROW 33 IS THE OFF-BY-ONE THAT STOPS EVERY STREAM AT ITS FIRST FRAME, and its
 // thirteen are what a boundary that is wrong in the common direction looks like.
 //
+// ROWS 30 TO 35 WERE WRITTEN AGAINST A REPRESENTATION THAT NO LONGER EXISTS, and the rows are
+// left at their numbers because the three greps above are about the LIST and renumbering would
+// make "must return 42" false. What changed is under them: _undelivered was a
+// Dictionary<ulong, byte[]> keyed by arrival offset and is now a sorted list of non-overlapping
+// ranges - see the field's own comment for the quadratic memory that forced it. The rows
+// translate rather than lapse:
+//
+//   * ROW 31's "already-delivered short circuit" and ROW 35's front-trim are now the SAME
+//     branch, both in Buffer, and row 35's witness still kills it.
+//   * ROW 32's "keeps the SHORTER piece at a known offset" is now "the held bytes win and only
+//     the tail is stored"; ARetransmissionBehindAGapThatCarriesMoreBytesReplacesTheShorterOne
+//     still separates the two, because the longer retransmission's extra bytes have to reach
+//     the application either way.
+//   * ROW 34, "Drain runs once instead of to a fixed point", IS NOW EQUIVALENT BY CONSTRUCTION
+//     and its five kills are historical: sorted, gap-free pieces make the drainable set a
+//     prefix of the list, so one pass IS the fixed point. The mutation that replaced it is
+//     Buffer's insertion order, and BUFFERED BYTES STAY WITHIN THE ADVERTISED WINDOW UNDER A
+//     DESCENDING OVERLAP FLOOD is the row that measures what row 34 used to stand for.
+//
 // ---- RFC 9000 s19.8's two STREAM_STATE_ERROR cases, and accepting the peer's streams ----
 //   36. the locally-initiated-not-created check never fires  4 tests
 //   38. the send-only check never fires           2 tests
@@ -588,7 +607,31 @@ internal sealed class TlsQuicStream
     // put a throw back on the peer-input path this file's header rules out, and would report a
     // stream overrun with the code s20.1 assigns to the CRYPTO buffer. The Try-shaped version
     // below is about thirty lines and says the true thing.
-    private readonly Dictionary<ulong, byte[]> _undelivered = [];
+    //
+    // SORTED BY OFFSET AND NON-OVERLAPPING, AND BOTH HALVES OF THAT ARE LOAD-BEARING RATHER
+    // THAN TIDINESS. This used to be a Dictionary<ulong, byte[]> keyed by the offset the frame
+    // arrived at, which stored every DISTINCT offset verbatim and deduplicated nothing else.
+    // RFC 9000 s19.9 charges the connection window for "the largest received offset" only - see
+    // the `advance` in TryReceive - so a peer that sends (offset=1, len=W-1), (offset=2,
+    // len=W-2), (offset=3, len=W-3) ... and puts (offset=0, len=W) LAST pays flow control once,
+    // for W bytes, while nothing drains until the final frame arrives: every earlier one starts
+    // past the delivered prefix. The dictionary held all of them, so W bytes of advertised
+    // credit bought roughly W^2/2 bytes of our memory - about 32 GB at a 256 KiB window and
+    // half a terabyte at 1 MiB.
+    //
+    // COALESCING ON INSERT IS WHAT MAKES THE BOUND HOLD, AND IT IS THE WINDOW'S OWN BOUND
+    // rather than a second cap that would need a number nobody can derive. Every byte held here
+    // lies in [_delivered.Count, _largestReceivedOffset), each byte is stored exactly once
+    // because the ranges do not overlap, and s19.10's per-stream limit already refuses a frame
+    // whose end passes _receiveLimit - so the total retained is at most _receiveWindow, by
+    // construction and not by inspection. UndeliveredBytes is the observable of that.
+    //
+    // AND IT IS WHY Drain IS ONE FORWARD PASS. The old fixed-point loop -
+    // `do { foreach (var offset in _undelivered.Keys.ToList()) ... } while (moved)` - allocated
+    // a fresh key list per pass and needed one pass per buffered piece in the worst order, so k
+    // out-of-order chunks cost O(k^2) time and k allocations. Sorted and gap-free, the pieces
+    // that are now contiguous are exactly a prefix of this list.
+    private readonly List<(ulong Offset, byte[] Data)> _undelivered = [];
     private readonly List<byte> _delivered = [];
 
     // THE BYTES THIS ENDPOINT HAS ACCEPTED FOR SENDING AND THE PEER HAS NOT YET GRANTED CREDIT
@@ -958,78 +1001,152 @@ internal sealed class TlsQuicStream
         return owed;
     }
 
+    // Stores only the bytes of [offset, offset + data.Length) that no held piece and no
+    // delivered byte already covers, as one or more pieces that keep _undelivered sorted and
+    // gap-free of each other. NEVER stores a byte twice, which is the whole of the memory bound
+    // the field comment states.
+    //
+    // ponytail: the scan for the insertion point is linear, not a binary search, and the insert
+    // is a List memmove - so a stream holding k pieces costs O(k) per frame. k is bounded by
+    // the per-stream window in BYTES, so the ceiling is a peer that sends a window's worth of
+    // one-byte frames in descending order. Make it a binary search over a gap list if a stream
+    // ever legitimately holds thousands of pieces; the memory bound, which is what the
+    // amplification defect was about, does not depend on it.
     private void Buffer(ulong offset, ReadOnlySpan<byte> data)
     {
+        var delivered = (ulong)_delivered.Count;
+
         // ALREADY DELIVERED IN FULL: a retransmission of bytes the application has. RFC 9000
         // s2.2 makes a comparison OPTIONAL here - "An endpoint MAY treat receipt of different
         // data at the same offset within a stream as a connection error of type
         // PROTOCOL_VIOLATION" - and this endpoint takes the other branch of the MAY and
         // ignores the duplicate. Stated rather than silent, because a reader looking for the
         // comparison should find out that its absence is a choice s2.2 grants.
-        if (offset + (ulong)data.Length <= (ulong)_delivered.Count)
+        if (offset + (ulong)data.Length <= delivered)
         {
             return;
         }
 
-        // A LONGER PIECE AT AN OFFSET WE ALREADY HOLD REPLACES THE SHORTER ONE, and a shorter
-        // one at the same offset is dropped. Both are retransmissions under s2.2's MAY; keeping
-        // the longer is what makes the drain below terminate on the same input either way.
-        if (_undelivered.TryGetValue(offset, out var held) && held.Length >= data.Length)
+        // PARTIALLY DELIVERED: the front is trimmed rather than the piece being rejected. A
+        // retransmission that starts before the delivered end and runs past it carries bytes we
+        // do not have, and dropping it would strand them. Trimming HERE rather than in Drain is
+        // what lets Drain assume every held piece begins at or after the delivered prefix.
+        if (offset < delivered)
         {
-            return;
+            data = data[(int)(delivered - offset)..];
+            offset = delivered;
         }
 
-        _undelivered[offset] = data.ToArray();
+        // The first held piece that could overlap: everything before it ends at or before this
+        // frame's start, so no comparison against it can subtract anything.
+        var index = 0;
+        while (index < _undelivered.Count && EndOf(_undelivered[index]) <= offset)
+        {
+            index++;
+        }
+
+        while (!data.IsEmpty)
+        {
+            // Past the last held piece, or entirely inside the gap in front of the next one:
+            // what is left is new in full and goes in as one piece.
+            if (index == _undelivered.Count
+                || _undelivered[index].Offset >= offset + (ulong)data.Length)
+            {
+                _undelivered.Insert(index, (offset, data.ToArray()));
+                return;
+            }
+
+            var held = _undelivered[index];
+
+            // A gap in front of the next held piece takes the bytes that fall in it, and the
+            // walk then resumes at that piece with what is left.
+            if (held.Offset > offset)
+            {
+                var gap = (int)(held.Offset - offset);
+                _undelivered.Insert(index, (offset, data[..gap].ToArray()));
+                index++;
+                data = data[gap..];
+                offset = held.Offset;
+            }
+
+            // The held piece now starts at or before this offset and ends past it, so it
+            // already covers the next `overlap` bytes. THE HELD COPY WINS, which is the same
+            // branch of s2.2's MAY the delivered-prefix check above takes: differing data at
+            // one offset is ignored rather than made a PROTOCOL_VIOLATION.
+            var overlap = EndOf(held) - offset;
+            if (overlap >= (ulong)data.Length)
+            {
+                return;
+            }
+
+            data = data[(int)overlap..];
+            offset = EndOf(held);
+            index++;
+        }
     }
+
+    private static ulong EndOf((ulong Offset, byte[] Data) piece) =>
+        piece.Offset + (ulong)piece.Data.Length;
 
     // Moves every piece that is now contiguous with the delivered prefix into it.
     //
-    // O(pieces^2) IN THE WORST CASE and deliberately so: the pieces are bounded by
-    // MaximumReceivedBytesPerStream above, A4-minimal's streams carry an HTTP/3 SETTINGS frame
-    // and a QPACK stream prologue, and a sorted structure here would be more code than the
-    // whole method. The upgrade path, if a stream ever carries a response body, is to key
-    // _undelivered by a SortedList and walk it once.
+    // ONE FORWARD PASS, NOT A FIXED POINT, and that is Buffer's invariant being spent rather
+    // than an optimisation. The pieces are sorted and none overlaps another, so the ones that
+    // are contiguous with _delivered are exactly a PREFIX of the list: the first piece that
+    // starts past the delivered end is a gap, and every piece after it starts later still.
     private void Drain()
     {
-        bool moved;
-        do
+        var taken = 0;
+        while (taken < _undelivered.Count
+            // STRICTLY GREATER ENDS THE PASS, so a piece that starts exactly where the
+            // delivered prefix ends is taken. `<` here - `>=` in the old form - would stall
+            // every stream on its first frame.
+            && _undelivered[taken].Offset <= (ulong)_delivered.Count)
         {
-            moved = false;
-            foreach (var offset in _undelivered.Keys.ToList())
+            var (offset, piece) = _undelivered[taken];
+
+            // Buffer trims against the delivered prefix on the way in and the pieces do not
+            // overlap, so this skip is 0 for every input this class can produce. It is kept so
+            // that the two are independent: a piece that did start behind the prefix would be
+            // appended at the wrong place rather than caught, and that is silent corruption.
+            var skip = (int)((ulong)_delivered.Count - offset);
+            if (skip < piece.Length)
             {
-                // STRICTLY GREATER, so a piece that starts exactly where the delivered prefix
-                // ends is taken. `>=` would stall every stream on its first frame.
-                if (offset > (ulong)_delivered.Count)
-                {
-                    continue;
-                }
-
-                var piece = _undelivered[offset];
-                _undelivered.Remove(offset);
-
-                // The overlap is trimmed off the FRONT rather than the piece being rejected:
-                // a retransmission that starts before the delivered end and runs past it
-                // carries bytes we do not have, and dropping it would strand them.
-                var skip = (int)((ulong)_delivered.Count - offset);
-                if (skip < piece.Length)
-                {
-                    _delivered.AddRange(piece.AsSpan(skip));
-                    moved = true;
-                }
+                _delivered.AddRange(piece.AsSpan(skip));
             }
+
+            taken++;
         }
-        while (moved);
+
+        if (taken > 0)
+        {
+            _undelivered.RemoveRange(0, taken);
+        }
     }
 
-    private ulong HighestUndeliveredEnd()
-    {
-        var highest = 0UL;
-        foreach (var (offset, piece) in _undelivered)
-        {
-            highest = Math.Max(highest, offset + (ulong)piece.Length);
-        }
+    private ulong HighestUndeliveredEnd() =>
+        _undelivered.Count == 0 ? 0 : EndOf(_undelivered[^1]);
 
-        return highest;
+    /// <summary>Gets how many bytes this stream is holding out of order, waiting for the gap in
+    /// front of them to be filled.</summary>
+    /// <remarks>BOUNDED BY THIS STREAM'S RECEIVE WINDOW, which is the property the reassembly
+    /// exists to have and the one a test can assert. Every byte here lies below
+    /// <see cref="ReceiveLimit"/> and is stored exactly once, so a peer cannot buy more of this
+    /// endpoint's memory than it holds RFC 9000 s19.10 credit for. Computed rather than
+    /// counted, on <see cref="BlockedBytes"/>'s reasoning: the piece list is short and nothing
+    /// on the receive path reads this.</remarks>
+    internal ulong UndeliveredBytes
+    {
+        get
+        {
+            var total = 0UL;
+            foreach (var piece in _undelivered)
+            {
+                total += (ulong)piece.Data.Length;
+            }
+
+            return total;
+        }
     }
 
     /// <summary>Gets the offset this endpoint currently permits the peer to reach on this

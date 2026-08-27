@@ -1368,6 +1368,84 @@ public sealed class TlsQuicStreamsTests
 
     // ---- Scaffolding ----------------------------------------------------------------------
 
+    // ---- the audit's finding 2: what a window's worth of credit may cost this endpoint ------
+
+    // THE ONE INPUT WHERE FLOW CONTROL AND MEMORY CAME APART, and it is legal traffic rather
+    // than a malformed frame - every frame below is inside the advertised limits and none of
+    // them can be refused.
+    //
+    // RFC 9000 s19.10 fixes the unit the window is spent in: "an endpoint accounts for the
+    // largest received offset of data that is sent or received on the stream. Loss or
+    // reordering can mean that the largest received offset on a stream can be greater than the
+    // total size of data received on that stream." So a peer that sends (offset=1, len=W-1)
+    // first pays for the WHOLE window in one frame, and every frame after it that ends at W
+    // costs nothing at all. Sending them in ASCENDING offset order and holding (offset=0) back
+    // to last means nothing can drain in between: each frame starts past the delivered prefix,
+    // which is still empty.
+    //
+    // A reassembler keyed by arrival offset stored all W-1 of them verbatim - sum(W-i) is
+    // W^2/2 bytes of ours against W bytes of the peer's credit. At the 262144-byte window a
+    // shipped preset advertises that is about 32 GB from one stream; at 1 MiB it is half a
+    // terabyte. THE ASSERTION IS THE RATIO AND NOT A BYTE COUNT, because the defect is that the
+    // two are not proportional: 1024 is picked small enough to run in a test and the amplified
+    // figure is 523,776, so the two are 512x apart and no threshold has to be guessed.
+    //
+    // AND THE CONTENT IS ASSERTED TOO. Coalescing that dropped or double-stored a byte would
+    // hold the right TOTAL and deliver the wrong stream, which is the failure this bound could
+    // otherwise be bought with.
+    [Fact]
+    public void BufferedBytesStayWithinTheAdvertisedWindowUnderADescendingOverlapFlood()
+    {
+        const int window = 1024;
+        var local = new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxStreamDataUni = window,
+            // The connection limit is not the subject: s19.9 charges it the same `advance`,
+            // so one window's worth crosses it however many frames carry that window.
+            InitialMaxData = 1_000_000,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+        };
+        var streams = Set(local: local);
+
+        // Content, not zeroes: a reassembler that stitched the pieces at the wrong offsets
+        // would rebuild the right LENGTH out of zeroes and the comparison would not notice.
+        var body = new byte[window];
+        for (var index = 0; index < body.Length; index++)
+        {
+            body[index] = (byte)((index * 31) + 7);
+        }
+
+        for (var offset = 1; offset < window; offset++)
+        {
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)offset, body[offset..]), out var error),
+                $"Refused at offset {offset} with {error} - every frame here is inside the "
+                    + "advertised limits and the defect is what accepting them costs.");
+        }
+
+        var stream = streams.PeerInitiated[0];
+
+        // Nothing has been delivered - offset 0 has not arrived - so everything the peer sent
+        // is still held, and this is the number the whole finding is about.
+        Assert.Empty(stream.Received);
+        Assert.True(
+            stream.UndeliveredBytes <= window,
+            $"Held {stream.UndeliveredBytes} bytes against a {window}-byte window; "
+                + "W-1 frames each ending at W are one window of DISTINCT bytes, so anything "
+                + "above the window is the same byte stored more than once.");
+
+        // The frame that fills the gap, sent last for exactly that reason.
+        Assert.True(streams.TryReceive(Frame(3, 0, body), out _));
+        Assert.Equal(body, stream.Received.ToArray());
+        Assert.Equal(0UL, stream.UndeliveredBytes);
+    }
+
     private static ulong Id(
         TlsQuicStreamInitiator initiator, TlsQuicStreamDirection direction, ulong ordinal) =>
         TlsQuicStreamId.From(initiator, direction, ordinal);
