@@ -1446,6 +1446,121 @@ public sealed class TlsQuicStreamsTests
         Assert.Equal(0UL, stream.UndeliveredBytes);
     }
 
+    // ---- the audit's finding 3: the two frames that were parsed, policed and discarded ------
+
+    // FOUR ASSERTIONS BECAUSE THE DROP COST FOUR SEPARATE THINGS, and a test that checked only
+    // the end-of-stream flag would pass against an implementation that lost the error code.
+    //
+    // RFC 9000 s19.4 gives RESET_STREAM a Final Size and an Application Protocol Error Code,
+    // s4.5 says "A receiver MUST use the final size of the stream to account for all bytes sent
+    // on the stream in its connection level flow controller", and s3.2 puts the receiving part
+    // in "Reset Recvd". Before this the direction rule ran and the two fields were dropped: the
+    // final size was never established, so ReceiveComplete could not become true and an
+    // awaiting HTTP/3 caller waited out the idle timeout on a stream the server had already
+    // given up on.
+    //
+    // THE STREAM IS RESET WITH DATA STILL MISSING, which is the shape that separates a reset
+    // from a FIN: two bytes arrived, the peer claims a final size of nine, and seven of them
+    // will never come. `_finalSize == _delivered.Count` is false forever on this input, so a
+    // completion test written only as that comparison cannot pass however the reset is stored.
+    [Fact]
+    public void AResetStreamEndsTheStreamAndReportsThePeersApplicationErrorCode()
+    {
+        var streams = Set();
+
+        Assert.True(streams.TryReceive(Frame(3, 0, [1, 2]), out _));
+        var stream = streams.PeerInitiated[0];
+        Assert.False(stream.ReceiveComplete);
+
+        // H3_REQUEST_CANCELLED, RFC 9114 s8.1. A real code rather than 0, because 0 is a legal
+        // application error code too and a nullable that defaulted would look the same.
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Reset(3, finalSize: 9, errorCode: 0x010c),
+            out var error),
+            $"Refused a conforming RESET_STREAM with {error}.");
+
+        Assert.True(stream.ResetReceived);
+        Assert.Equal(0x010cUL, stream.ResetErrorCode);
+        Assert.Equal(9UL, stream.FinalSize);
+
+        // THE ONE THE HTTP/3 LAYER HANGS ON. Seven bytes below the final size never arrived
+        // and never will, so this can only be true if the reset ends the stream in its own
+        // right rather than through the length comparison a FIN completes.
+        Assert.True(stream.ReceiveComplete);
+    }
+
+    // s20.1's FINAL_SIZE_ERROR names RESET_STREAM in two of its three cases and neither could
+    // fire while the frame's Final Size went unread: "(2) an endpoint received a STREAM frame
+    // or a RESET_STREAM frame containing a final size that was lower than the size of stream
+    // data that was already received, or (3) an endpoint received a STREAM frame or a
+    // RESET_STREAM frame containing a different final size to the one already established."
+    //
+    // BOTH ROWS, BECAUSE THEY ARE REACHED BY DIFFERENT INPUTS. The first is a reset BELOW what
+    // already arrived and no final size is established at all; the second is ABOVE a FIN that
+    // already fixed the size, which is the only direction case (3) can be reached from on its
+    // own - a reset below an established size is case (2) first. A single row would leave
+    // whichever check it did not reach unwitnessed, which is the lesson this file's rows 24, 25
+    // and 26 record for the STREAM-frame side of the same three cases.
+    [Theory]
+    [InlineData(4, 0, false, 2)]
+    [InlineData(4, 5, true, 3)]
+    public void AResetStreamWhoseFinalSizeContradictsWhatArrivedIsFinalSizeError(
+        int received, ulong resetFinalSize, bool fin, int expectedCase)
+    {
+        var streams = Set();
+
+        Assert.True(streams.TryReceive(Frame(3, 0, new byte[received], fin: fin), out _));
+        Assert.False(
+            streams.TryReceiveStreamStateSignal(
+                Reset(3, resetFinalSize, errorCode: 0x010c), out var error),
+            $"s20.1's case ({expectedCase}) accepted a contradictory final size.");
+        Assert.Equal(TlsQuicTransportError.FinalSizeError, error);
+    }
+
+    // RFC 9000 s3.5: "An endpoint that receives a STOP_SENDING frame MUST send a RESET_STREAM
+    // frame if the stream is in the 'Ready' or 'Send' state", and "An endpoint SHOULD copy the
+    // error code from the STOP_SENDING frame to the RESET_STREAM frame it sends."
+    //
+    // THE SECOND HALF IS WHAT THE DROP COST AND IT IS THE HALF WITHOUT A FRAME TO COUNT: this
+    // endpoint kept queueing STREAM frames on a stream the peer had asked it to stop writing.
+    // So the assertion is on the SECOND write producing nothing, which is invisible to any test
+    // that only looks at what the STOP_SENDING itself queued.
+    [Fact]
+    public void AStopSendingStopsTheSendSideAndAnswersWithAResetStream()
+    {
+        var streams = Set();
+        var stream = streams.OpenBidirectional();
+        streams.Send(stream, new byte[4]);
+        Assert.Single(streams.TakePendingFrames());
+
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(
+                Signal((ulong)TlsQuicFrameType.StopSending, stream.Id) with
+                {
+                    ApplicationProtocolErrorCode = 0x010c,
+                },
+                out var error),
+            $"Refused a conforming STOP_SENDING with {error}.");
+
+        Assert.True(stream.SendStopped);
+        Assert.Equal(0x010cUL, stream.StopSendingErrorCode);
+
+        // s3.5's mandatory answer, carrying s19.4's two fields: the copied error code and the
+        // final size, which for our sending half is the four bytes already on the wire.
+        var answer = Assert.Single(streams.TakePendingFrames());
+        Assert.Equal((ulong)TlsQuicFrameType.ResetStream, answer.RawType);
+        Assert.Equal(stream.Id, answer.StreamId);
+        Assert.Equal(0x010cUL, answer.ApplicationProtocolErrorCode);
+        Assert.Equal(4UL, answer.FinalSize);
+
+        // THE ASSERTION THE FRAME COUNT CANNOT MAKE. A write after the stop must put nothing on
+        // the wire; before this fix it queued a STREAM frame at offset 4 of a stream this
+        // endpoint had just told the peer was finished at offset 4.
+        streams.Send(stream, new byte[4]);
+        Assert.Empty(streams.TakePendingFrames());
+        Assert.Equal(4UL, stream.SendOffset);
+    }
+
     private static ulong Id(
         TlsQuicStreamInitiator initiator, TlsQuicStreamDirection direction, ulong ordinal) =>
         TlsQuicStreamId.From(initiator, direction, ordinal);
@@ -1526,6 +1641,18 @@ public sealed class TlsQuicStreamsTests
     {
         RawType = frameType,
         StreamId = streamId,
+    };
+
+    // s19.4's frame WITH the two fields Signal deliberately leaves out. Separate from Signal
+    // rather than an overload of it, so that the tests about direction keep saying "the
+    // application error code and final size are omitted because no rule under test looks at
+    // them" and the tests about the reset itself have to name both.
+    private static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
+    {
+        RawType = (ulong)TlsQuicFrameType.ResetStream,
+        StreamId = streamId,
+        ApplicationProtocolErrorCode = errorCode,
+        FinalSize = finalSize,
     };
 
     // s19.10's and s19.9's frames as the PEER would send them. Hand-built for the reason every
