@@ -2424,13 +2424,23 @@ public sealed class TlsQuicHttp3RequestTests
 
         // s4.1's "begin processing partial HTTP messages once enough of the message has been
         // received to make progress" - what arrived is still read.
+        //
+        // THE RESET IS RECORDED FIRST HERE, WHICH IS THE ORDER A CONNECTION NEVER PRODUCES and
+        // is deliberately the harder one: OnPeerReset releases the reader's buffers, so a body
+        // read AFTER it accumulates in lists that were just trimmed. That is fine and is worth
+        // pinning - the release is a one-shot reclaim of what a dead exchange was holding, not a
+        // latch that makes the reader refuse to parse - and the ceiling still governs whatever
+        // arrives next, because the check that enforces it runs per TryRead.
+
         Assert.Equal(200, response.Status);
         Assert.Equal("half", Encoding.UTF8.GetString(response.Body));
 
         // s19.4 admits one RESET_STREAM per stream, so the first code stands and the
-        // once-per-stream gate one layer up answers false the second time.
+        // once-per-stream gate one layer up answers false the second time - which also means
+        // the buffer release cannot run twice and cannot discard a body read since.
         Assert.False(response.OnPeerReset(0x0100));
         Assert.Equal(0x010cUL, response.ResetErrorCode);
+        Assert.Equal("half", Encoding.UTF8.GetString(response.Body));
     }
 
     // THE FOURTH BUFFER, WHICH THE AUDIT DID NOT NAME AND THE FIRST FIX ASSERTED AWAY. That

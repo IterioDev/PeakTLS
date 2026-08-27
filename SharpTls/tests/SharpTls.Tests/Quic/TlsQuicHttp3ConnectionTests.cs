@@ -868,10 +868,18 @@ public sealed partial class TlsQuicConnectionTests
         // otherwise. Both assertions are here because either alone can pass on the wrong code:
         // the status pins that the field section decoded, the body that the DATA frame did.
         Assert.Equal(200, response.Status);
-        Assert.Equal("first half", Encoding.UTF8.GetString(response.Body));
+
+        // AND THE BULK IS GONE, WHICH IS THE OTHER HALF OF THE SAME BOUNDARY. The ceiling
+        // MaximumBufferedResponseBytes names is PER READER, so an exchange that keeps its
+        // buffers after being abandoned lets a peer hold that ceiling once per request it is
+        // asked for - the exhaustion the ceiling exists to refuse, one layer up. What a caller
+        // may act on is the decoded verdict above; what it may not act on is a body belonging to
+        // a message RFC 9114 s4.1 says never finished arriving, and IsComplete already says so.
+        Assert.Empty(response.Body.ToArray());
 
         // REPEATED PUMPS DO NOT CHANGE THE ANSWER, and cannot re-raise s4.4.2's Stream
-        // Cancellation either: the reset arm runs once per stream, not once per pump.
+        // Cancellation either - nor re-release buffers already released: the reset arm runs
+        // once per stream, not once per pump.
         for (var i = 0; i < 3; i++)
         {
             Assert.True(harness.Http3.TryProcess(out var repeated));
@@ -880,6 +888,8 @@ public sealed partial class TlsQuicConnectionTests
 
         Assert.False(response.IsComplete);
         Assert.Equal(0x010cUL, response.ResetErrorCode);
+        Assert.Equal(200, response.Status);
+        Assert.Empty(response.Body.ToArray());
     }
 
     // s19.4's frame as the PEER sends it, built here for the reason Stream's own note in

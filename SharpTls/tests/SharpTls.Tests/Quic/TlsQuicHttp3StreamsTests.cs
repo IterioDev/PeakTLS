@@ -460,16 +460,29 @@ public sealed class TlsQuicHttp3StreamsTests
         Assert.True(http3.TryProcessPeerStreams(out var first));
         Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, first);
 
-        // The FIN says the ordinary case is ordinary: s6.2.1's H3_CLOSED_CRITICAL_STREAM is
-        // about the CONTROL stream, and s6.2's general rule is that "A sender can close or
-        // reset a unidirectional stream unless otherwise specified", so a QPACK stream that
-        // ends is not an error. It is NOT a witness for the control-stream test inside that
-        // close check - the sweep showed deleting that test changes nothing here, because an
-        // ignored stream returns before the check is reached. See the check's own comment.
-        Deliver(set, PeerUni0, [0x00, 0x01, 0xff], offset: 4, fin: true);
-        Deliver(set, PeerUni1, [0x00, 0x01, 0xff], offset: 4, fin: true);
+        // A SECOND DELIVERY ON EACH, still dropped, still not parsed as frames.
+        Deliver(set, PeerUni0, [0x00, 0x01, 0xff], offset: 4);
+        Deliver(set, PeerUni1, [0x00, 0x01, 0xff], offset: 4);
         Assert.True(http3.TryProcessPeerStreams(out var second));
         Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, second);
+
+        // ONLY THE GREASE STREAM IS CLOSED HERE, AND THIS USED TO CLOSE BOTH. The old version
+        // FIN'd the DECODER stream too and asserted no error, on the reasoning that
+        // H3_CLOSED_CRITICAL_STREAM is RFC 9114 s6.2.1's rule and s6.2.1 names only the control
+        // stream. That reading missed RFC 9204 s4.2, which attaches the same code to BOTH QPACK
+        // streams - "Closure of either unidirectional stream type MUST be treated as a
+        // connection error of type H3_CLOSED_CRITICAL_STREAM" - so the assertion was pinning a
+        // gap rather than a rule. Closing the decoder stream is now
+        // .AQpackStreamThatThePeerClosesIsAClosedCriticalStream's row, and what remains here is
+        // the half that was always right: s6.2's "A sender can close or reset a unidirectional
+        // stream unless otherwise specified" makes an s6.2.3 reserved stream's close ordinary.
+        // .AReservedStreamThatThePeerClosesIsNotAnError pins that on its own.
+        //
+        // THE DECODER STREAM IS LEFT OPEN, because this row is about its BYTES being discarded
+        // and a connection error would end the pass before the second delivery could say so.
+        Deliver(set, PeerUni0, [0x00], offset: 7, fin: true);
+        Assert.True(http3.TryProcessPeerStreams(out var closed));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, closed);
 
         Assert.Null(http3.PeerControlStreamId);
     }
@@ -811,9 +824,119 @@ public sealed class TlsQuicHttp3StreamsTests
             set);
         http3.OpenLocalStreams();
         Assert.Null(http3.Table);
+        set.TakePendingFrames();
 
-        byte[] stream = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. new byte[512]];
-        Deliver(set, PeerUni0, stream);
+        // TWO BURSTS, AND "no error" IS NOT WHAT EITHER OF THEM WITNESSES. This row used to
+        // assert only that nothing failed, which a stream layer that silently ACCUMULATED the
+        // bytes would satisfy just as well - right up to the ceiling, on a later pump, in a
+        // different test. Each burst is sixteen times the narrowed ceiling, so a buffer that
+        // kept them would breach on the first; and the second says the first was not merely
+        // tolerated but DROPPED, because the two together are thirty-two times it.
+        //
+        // AND NOTHING GOES OUT ON THE DECODER STREAM, which is the positive half. RFC 9204
+        // s2.2.2.3's Insert Count Increment is what a decoder emits when a read moves its
+        // Insert Count; a discard moves nothing, so an implementation that parsed these bytes
+        // into a table would be visible here as a frame this endpoint sent.
+        byte[] first = [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. new byte[512]];
+        Deliver(set, PeerUni0, first);
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0ul, error);
+        Assert.Empty(set.TakePendingFrames());
+
+        Deliver(set, PeerUni0, new byte[512], offset: (ulong)first.Length);
+        Assert.True(http3.TryProcessPeerStreams(out var second));
+        Assert.Equal(0ul, second);
+        Assert.Empty(set.TakePendingFrames());
+    }
+
+    // ------------------------------------------------------------------------
+    // RFC 9204 s4.2's OTHER two critical streams.
+    // ------------------------------------------------------------------------
+
+    // s4.2: "The sender MUST NOT close either of these streams ... Closure of either
+    // unidirectional stream type MUST be treated as a connection error of type
+    // H3_CLOSED_CRITICAL_STREAM." RFC 9114 s6.2.1 says the same of the control stream and only
+    // the control stream was checked, because the encoder stream returned from its own parsing
+    // arm before reaching the check and the peer's decoder stream returned earlier still, at the
+    // guard that discards the types this endpoint does not read.
+    //
+    // THE DECODER ROW IS THE ONE THAT LOOKS WRONG AND IS NOT. Nothing here reads the peer's
+    // decoder stream - our encoder is static-only, so its instructions refer to state that does
+    // not exist - but s4.2 attaches the rule to the stream TYPE, not to whether the recipient
+    // has a use for the bytes. Discarding a critical stream's contents and tolerating its
+    // closure are different decisions.
+    [Theory]
+    [InlineData((byte)TlsQuicHttp3StreamType.QpackEncoder)]
+    [InlineData((byte)TlsQuicHttp3StreamType.QpackDecoder)]
+    public void AQpackStreamThatThePeerClosesIsAClosedCriticalStream(byte streamType)
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
+        http3.OpenLocalStreams();
+
+        Deliver(set, PeerUni0, [streamType], fin: true);
+
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ClosedCriticalStream, error);
+    }
+
+    // THE RESET ROUTE, WHICH IS THE ONE THAT STALLED RATHER THAN FAILING. A peer that resets its
+    // encoder stream mid-instruction leaves the partial instruction unparsable forever - RFC
+    // 9000 s4.5 means no further byte can complete it - so it sits below the ceiling, the table
+    // never advances, and every later field section referencing an entry past our Insert Count
+    // blocks on RFC 9204 s2.2.1 until the connection's deadline. s4.2 asks for a connection
+    // error; a timeout minutes later is the same outcome with no code to name.
+    //
+    // FinalSizeKnown IS WHAT MAKES ONE CHECK COVER BOTH ROUTES. RFC 9000 s4.5 gives a final size
+    // two causes - a FIN and a RESET_STREAM - and s6.2.1's "closed" and s4.2's "close" are about
+    // the stream ending, not about which frame ended it.
+    [Fact]
+    public void AResetEncoderStreamIsAClosedCriticalStreamRatherThanAStall()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
+        http3.OpenLocalStreams();
+
+        // A whole Set Dynamic Table Capacity and then an instruction cut off mid-literal, so
+        // there really is unparsable residue when the reset lands.
+        var instruction = Insert("a-header-name", "a value");
+        Deliver(
+            set,
+            PeerUni0,
+            [(byte)TlsQuicHttp3StreamType.QpackEncoder, .. SetCapacity(4096), .. instruction[..^1]]);
+        Assert.True(http3.TryProcessPeerStreams(out var beforeReset));
+        Assert.Equal(0ul, beforeReset);
+
+        Assert.True(
+            set.TryReceiveStreamStateSignal(
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.ResetStream,
+                    StreamId = PeerUni0,
+                    ApplicationProtocolErrorCode = 0x0100,
+                    FinalSize = (ulong)(1 + SetCapacity(4096).Length + instruction.Length - 1),
+                },
+                out var transportError),
+            $"Refused a conforming RESET_STREAM with {transportError}.");
+
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ClosedCriticalStream, error);
+    }
+
+    // THE NEGATIVE ROW, because s6.2's general rule runs the other way: "A sender can close or
+    // reset a unidirectional stream unless otherwise specified", and s6.2.3's reserved (GREASE)
+    // stream types are not otherwise specified. A predicate that answered "critical" for every
+    // stream this endpoint discards would close the connection on a peer doing something the
+    // RFC explicitly invites.
+    [Fact]
+    public void AReservedStreamThatThePeerClosesIsNotAnError()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
+        http3.OpenLocalStreams();
+
+        // s6.2.3's first reserved type, 0x1f * 0 + 0x21.
+        Deliver(set, PeerUni0, [(byte)TlsQuicHttp3Frames.ReservedIdentifier(0), 0xaa], fin: true);
 
         Assert.True(http3.TryProcessPeerStreams(out var error));
         Assert.Equal(0ul, error);

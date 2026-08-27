@@ -1429,20 +1429,21 @@ internal sealed class TlsQuicHttp3Response
     /// <see langword="null"/> - the default - for the static-only arm. A null table cannot
     /// block: <see cref="TlsQuicQpackDecoder"/> refuses a non-zero Required Insert Count
     /// outright on that arm, which is what keeps every zero-capacity caller unchanged.</param>
-    /// <param name="maximumBufferedBytes">How many bytes of this response - the unparsed tail
-    /// and the accumulated content together - to hold before answering RFC 9114 s8.1's
-    /// H3_EXCESSIVE_LOAD. <see cref="int.MaxValue"/>, the default, is effectively no ceiling and
-    /// is the SAME SHAPE AND THE SAME ARGUMENT AS <paramref name="maximumFieldSectionSize"/>'s
-    /// default: a limit this type is told, never one it reaches out for. A connection passes
-    /// <see cref="TlsQuicHttp3Spec.MaximumBufferedResponseBytes"/>; a caller constructing this
-    /// type directly owes the argument, which is why the default is permissive rather than the
-    /// spec's number copied here - a second copy of a default is a second thing to keep in
-    /// step.</param>
+    /// <param name="maximumBufferedBytes">How many bytes of this response - the unparsed tail,
+    /// the accumulated content and the interim sections together - to hold before answering RFC
+    /// 9114 s8.1's H3_EXCESSIVE_LOAD.
+    /// <see cref="TlsQuicHttp3Spec.DefaultMaximumBufferedResponseBytes"/> is the default, and it
+    /// is that CONSTANT rather than a number spelled again here: this parameter used to default
+    /// to <see cref="int.MaxValue"/> on the argument that a limit should be told rather than
+    /// reached for, which left two defaults doing one job and a directly-constructed reader with
+    /// no ceiling at all. A connection still passes
+    /// <see cref="TlsQuicHttp3Spec.MaximumBufferedResponseBytes"/>, so a caller that configures
+    /// the spec is still obeyed; what changed is only what an unconfigured caller gets.</param>
     internal TlsQuicHttp3Response(
         long maximumFieldSectionSize = long.MaxValue,
         string? requestMethod = null,
         TlsQuicQpackDynamicTable? table = null,
-        int maximumBufferedBytes = int.MaxValue)
+        int maximumBufferedBytes = TlsQuicHttp3Spec.DefaultMaximumBufferedResponseBytes)
     {
         _maximumFieldSectionSize = maximumFieldSectionSize;
         _requestMethod = requestMethod;
@@ -1586,6 +1587,41 @@ internal sealed class TlsQuicHttp3Response
         }
 
         ResetErrorCode = applicationErrorCode;
+
+        // THE THREE LISTS GO THE INSTANT THE VERDICT IS IN, AND THE VERDICT STAYS. Every one of
+        // them is bulk this exchange can no longer use, and every one of them is what a peer
+        // spends to reach MaximumBufferedResponseBytes: the ceiling is PER READER, so a
+        // connection holding N abandoned exchanges holds N times it. That is the resource
+        // exhaustion the ceiling exists to refuse, reintroduced one layer up by the reset
+        // handling that landed on top of it.
+        //
+        // WHAT SURVIVES IS THE PART RFC 9114 s4.1 ASKED FOR. "Endpoints SHOULD begin processing
+        // partial HTTP messages once enough of the message has been received to make progress"
+        // is a statement about PROCESSING, and the processing is already done and recorded:
+        // Status, HeaderFields, TrailerFields, InterimHeaderSections' count, SectionAcknowledg
+        // ments and ResetErrorCode are all decoded values that outlive this call. The caller can
+        // still see what the response was and why it died - which is what s4.1.1's retry rules
+        // need - and TlsQuicConnectionTests.AResetResponseIsNotCompleteAndCarriesThePeersError
+        // Code reads Status back after the reset to pin exactly that.
+        //
+        // WHAT GOES IS Body AND THE INTERIM SECTIONS' CONTENTS, and no caller may depend on
+        // them: IsComplete is false and stays false, so s4.1 makes this a FAILED response whose
+        // body is a prefix of a message that will never arrive. A caller cannot tell a
+        // trustworthy prefix from a truncated one without knowing where the reset landed, which
+        // is why handing one back is a courtesy rather than a contract - and it is a courtesy
+        // priced at the whole ceiling per abandoned request.
+        //
+        // Clear() ALONE WOULD FIX NOTHING. List<T>.Clear sets the count to zero and KEEPS the
+        // backing array, so a body that grew to the ceiling would still hold the ceiling.
+        // TrimExcess is what returns it, and it is the only reason these two calls are a pair.
+        _pending.Clear();
+        _pending.TrimExcess();
+        _body.Clear();
+        _body.TrimExcess();
+        _interim.Clear();
+        _interim.TrimExcess();
+        _interimBytes = 0;
+
         return true;
     }
 

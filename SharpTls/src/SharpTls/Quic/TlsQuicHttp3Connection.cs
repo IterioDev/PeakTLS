@@ -1011,6 +1011,17 @@ internal sealed class TlsQuicHttp3Connection
     // QpackDecoder as well, so a table existing here implies OpenLocalStreams opened that
     // stream - and OpenLocalStreams has necessarily run, TryOpenRequest throwing without it and
     // there being no exchange to reset otherwise.
+    // THE READER'S OWN BUFFERS ARE RELEASED BY OnPeerReset AND NOT HERE, which is why this
+    // method does not touch them. They are its private lists, the release has to happen after
+    // the read that populated Status and HeaderFields, and OnPeerReset is already the one place
+    // that runs exactly once per abandoned stream. Adding a second call here would be a second
+    // schedule for one rule.
+    //
+    // THE EXCHANGE ITSELF STAYS IN _exchanges, AND THAT IS THE BOUNDARY BEING CHOSEN. Once its
+    // three lists are gone the reader is a decoded verdict - a status, two field sections and an
+    // error code - and dropping it would take ResponseFor and RequestStreamIds with it, leaving
+    // a caller no way to ask what happened to a request it had opened. RFC 9114 s4.1.1's retry
+    // rules are decided on that verdict, and nothing bounds when a caller looks.
     private void OnRequestStreamAbandoned(Exchange exchange)
     {
         _streams.BlockedStreams.Release(exchange.Stream.Id);
