@@ -45,6 +45,48 @@ internal static class TlsQuicPacketNumber
         {
             numBytes++;
         }
+
+        // RFC 9000 s17.1: "Packet Number: This field is 1 to 4 bytes long." Four is
+        // therefore the widest truncation the wire format has, and the arithmetic above
+        // asks for five as soon as num_unacked passes 2^31, which is the last num_unacked
+        // that still fits. NOT the last min_bits: min_bits is 32 at 2^31 AND at 2^31 + 1,
+        // and it is the boundary bump above - num_unacked not a power of two, min_bits on
+        // an 8-bit boundary - that carries the second one to five. Past that point A.2 has
+        // no answer, because
+        // A.3's DecodePacketNumber resolves a 32-bit truncation only to within pn_hwin =
+        // 2^31 of expected_pn: a wider gap decodes to a DIFFERENT packet number at the
+        // peer, and nothing on either side notices.
+        //
+        // DO NOT CLAMP TO 4 HERE, which is the tempting one-line alternative. Clamping
+        // returns a floor the caller can satisfy while destroying the only property the
+        // floor exists to guarantee - it would hand back "4 is enough" for a gap where no
+        // length is enough, and the silent misdecode above is precisely what the caller
+        // consults this method to avoid. There is also no honest floor to report: the
+        // pre-existing behaviour of returning 5 fed TlsQuicPacketBuilder.ValidatePacket
+        // NumberEncoding, whose own s17.1 guard rejects anything above 4 first, so the
+        // caller was told it needed a width that same caller forbids - a demand no plan
+        // can ever meet, phrased as if the plan were at fault.
+        //
+        // Throw instead, naming the condition that actually happened: an acknowledgement
+        // gap too wide for any legal packet number encoding. Reaching it needs 2^31
+        // packets outstanding in one space, so this is an unreachable-in-practice contract
+        // statement on a shared helper rather than a live failure mode - but it is now a
+        // stated one. ArgumentOutOfRangeException on fullPn matches the largestAcked guard
+        // at the top: both say "the pair of numbers you passed cannot be encoded".
+        // Witnessed by TlsQuicPacketNumberTests.EncodedLengthRejectsAnAckGapWiderThanFour
+        // BytesCanDisambiguate and TlsQuicPacketNumberTests.EncodedLengthStillAcceptsThe
+        // WidestEncodableAckGap.
+        if (numBytes > 4)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(fullPn),
+                fullPn,
+                $"RFC 9000 A.2 needs {numBytes} bytes to encode packet number {fullPn} against a "
+                + $"largest acknowledged of {largestAcked?.ToString() ?? "none"}, but RFC 9000 s17.1 "
+                + "gives the Packet Number field 1 to 4 bytes. The acknowledgement gap is "
+                + $"{numUnacked} packets, wider than the 2^31 a 4-byte truncation can be decoded "
+                + "back across by RFC 9000 A.3.");
+        }
         return numBytes;
     }
 

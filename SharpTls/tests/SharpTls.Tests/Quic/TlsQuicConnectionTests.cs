@@ -972,8 +972,18 @@ public sealed partial class TlsQuicConnectionTests
         PathMtuDiscovery = false,
     };
 
-    private static TlsQuicConnectionSpec Spec() => new()
+    private static TlsQuicConnectionSpec Spec() =>
+        Spec(new TlsQuicConnectionSpec().AesGcmConfidentialityLimit);
+
+    // THE OVERLOAD EXISTS FOR ONE TEST AND TAKES THE DEFAULT FROM THE SPEC ITSELF, so that the
+    // no-argument form above cannot drift from RFC 9001 s6.6's 2^23 by transcribing it a second
+    // time here. Only
+    // TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration
+    // passes anything else; every other caller gets the shipped limit.
+    private static TlsQuicConnectionSpec Spec(long aesGcmConfidentialityLimit) => new()
     {
+        AesGcmConfidentialityLimit = aesGcmConfidentialityLimit,
+
         // 1200 is RFC 9000 s14.1's floor rather than a fingerprint choice, and nothing here
         // asserts the number.
         PaddingTarget = 1200,

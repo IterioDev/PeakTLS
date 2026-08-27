@@ -766,9 +766,24 @@ subsequent packet silently discarded rather than an error.
 
 **RFC 9001 §6.6's limits** are pinned as FIGURES rather than as branches:
 `TheAeadLimitsAreTheFiguresSection66States` asserts 2^23 / 2^62 confidentiality and 2^52 / 2^36
-integrity, with the two ciphers deliberately opposite ways round. Reaching a limit in a test is
-not feasible, and a limit made injectable to fake it would be a knob no shipped path uses; the
-real risk in those four numbers is transcription, which is what is tested.
+integrity, with the two ciphers deliberately opposite ways round — the real risk in those four
+numbers is transcription, which is what that test covers.
+
+The CONFIDENTIALITY limit is additionally a knob:
+`TlsQuicConnectionSpec.AesGcmConfidentialityLimit` and its
+`ChaCha20Poly1305ConfidentialityLimit` sibling each default to §6.6's own figure, and
+`TlsQuicConnection` reads them rather than keeping a second copy. This paragraph used to say
+that reaching a limit in a test was not feasible and that making one injectable "would be a knob
+no shipped path uses"; both halves are now false. Everything past the crossing ships — the
+update itself, WHICH GENERATION the crossing packet is sealed with, §6.1's gate on an
+acknowledgment from the current key phase, and §6.6's "the endpoint MUST stop using the
+connection" when no update is possible — and 2^23 packets of traffic is what put all of it out
+of reach. `TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration`
+lowers the limit to 2 and lets the loopback peer be the oracle: it reads the phase bit, reaches
+for the generation that bit names, and either opens the packet or does not.
+
+The INTEGRITY limit is deliberately left as a constant. Nothing needs to cross 2^52 invalid
+packets, so a knob there would be the thing the paragraph above argues against.
 
 **RFC 9000 §12.3 duplicate suppression** uses a 128-packet sliding window per space. The ceiling
 is stated rather than hidden: a packet further back is discarded without certainty, which is the

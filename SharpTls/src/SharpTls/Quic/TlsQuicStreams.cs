@@ -266,6 +266,25 @@ namespace SharpTls.Quic;
 // nothing. ROW 33 IS THE OFF-BY-ONE THAT STOPS EVERY STREAM AT ITS FIRST FRAME, and its
 // thirteen are what a boundary that is wrong in the common direction looks like.
 //
+// ROWS 30 TO 35 WERE WRITTEN AGAINST A REPRESENTATION THAT NO LONGER EXISTS, and the rows are
+// left at their numbers because the three greps above are about the LIST and renumbering would
+// make "must return 42" false. What changed is under them: _undelivered was a
+// Dictionary<ulong, byte[]> keyed by arrival offset and is now a sorted list of non-overlapping
+// ranges - see the field's own comment for the quadratic memory that forced it. The rows
+// translate rather than lapse:
+//
+//   * ROW 31's "already-delivered short circuit" and ROW 35's front-trim are now the SAME
+//     branch, both in Buffer, and row 35's witness still kills it.
+//   * ROW 32's "keeps the SHORTER piece at a known offset" is now "the held bytes win and only
+//     the tail is stored"; ARetransmissionBehindAGapThatCarriesMoreBytesReplacesTheShorterOne
+//     still separates the two, because the longer retransmission's extra bytes have to reach
+//     the application either way.
+//   * ROW 34, "Drain runs once instead of to a fixed point", IS NOW EQUIVALENT BY CONSTRUCTION
+//     and its five kills are historical: sorted, gap-free pieces make the drainable set a
+//     prefix of the list, so one pass IS the fixed point. The mutation that replaced it is
+//     Buffer's insertion order, and BUFFERED BYTES STAY WITHIN THE ADVERTISED WINDOW UNDER A
+//     DESCENDING OVERLAP FLOOD is the row that measures what row 34 used to stand for.
+//
 // ---- RFC 9000 s19.8's two STREAM_STATE_ERROR cases, and accepting the peer's streams ----
 //   36. the locally-initiated-not-created check never fires  4 tests
 //   38. the send-only check never fires           2 tests
@@ -588,7 +607,31 @@ internal sealed class TlsQuicStream
     // put a throw back on the peer-input path this file's header rules out, and would report a
     // stream overrun with the code s20.1 assigns to the CRYPTO buffer. The Try-shaped version
     // below is about thirty lines and says the true thing.
-    private readonly Dictionary<ulong, byte[]> _undelivered = [];
+    //
+    // SORTED BY OFFSET AND NON-OVERLAPPING, AND BOTH HALVES OF THAT ARE LOAD-BEARING RATHER
+    // THAN TIDINESS. This used to be a Dictionary<ulong, byte[]> keyed by the offset the frame
+    // arrived at, which stored every DISTINCT offset verbatim and deduplicated nothing else.
+    // RFC 9000 s19.9 charges the connection window for "the largest received offset" only - see
+    // the `advance` in TryReceive - so a peer that sends (offset=1, len=W-1), (offset=2,
+    // len=W-2), (offset=3, len=W-3) ... and puts (offset=0, len=W) LAST pays flow control once,
+    // for W bytes, while nothing drains until the final frame arrives: every earlier one starts
+    // past the delivered prefix. The dictionary held all of them, so W bytes of advertised
+    // credit bought roughly W^2/2 bytes of our memory - about 32 GB at a 256 KiB window and
+    // half a terabyte at 1 MiB.
+    //
+    // COALESCING ON INSERT IS WHAT MAKES THE BOUND HOLD, AND IT IS THE WINDOW'S OWN BOUND
+    // rather than a second cap that would need a number nobody can derive. Every byte held here
+    // lies in [_delivered.Count, _largestReceivedOffset), each byte is stored exactly once
+    // because the ranges do not overlap, and s19.10's per-stream limit already refuses a frame
+    // whose end passes _receiveLimit - so the total retained is at most _receiveWindow, by
+    // construction and not by inspection. UndeliveredBytes is the observable of that.
+    //
+    // AND IT IS WHY Drain IS ONE FORWARD PASS. The old fixed-point loop -
+    // `do { foreach (var offset in _undelivered.Keys.ToList()) ... } while (moved)` - allocated
+    // a fresh key list per pass and needed one pass per buffered piece in the worst order, so k
+    // out-of-order chunks cost O(k^2) time and k allocations. Sorted and gap-free, the pieces
+    // that are now contiguous are exactly a prefix of this list.
+    private readonly List<(ulong Offset, byte[] Data)> _undelivered = [];
     private readonly List<byte> _delivered = [];
 
     // THE BYTES THIS ENDPOINT HAS ACCEPTED FOR SENDING AND THE PEER HAS NOT YET GRANTED CREDIT
@@ -619,6 +662,15 @@ internal sealed class TlsQuicStream
 
     private bool _receiveCompleteReported;
     private bool _maximumStreamDataOwed;
+
+    // RFC 9000 s19.4's and s19.5's Application Protocol Error Code, held as a nullable rather
+    // than beside a bool because ZERO IS A LEGAL CODE - s20.2 makes the application error space
+    // "defined by the application protocol", and RFC 9114 s8.1 assigns H3_NO_ERROR = 0x0100 but
+    // leaves 0 to whatever the peer means by it. `is not null` is therefore the arrival test and
+    // the value is the peer's, unmapped, for the reason TlsQuicConnection.PeerCloseErrorCode
+    // gives for s19.19's.
+    private ulong? _resetErrorCode;
+    private ulong? _stopSendingErrorCode;
 
     internal TlsQuicStream(
         ulong id, TlsQuicPeerFlowControlBudget.TlsQuicStreamBudget? budget, TlsQuicStreamSet set)
@@ -681,12 +733,45 @@ internal sealed class TlsQuicStream
     /// order are not here until the gap before them is filled.</summary>
     internal IReadOnlyList<byte> Received => _delivered;
 
-    /// <summary>Gets whether the peer's FIN has arrived AND every byte before it has been
-    /// delivered.</summary>
-    /// <remarks>FIN ARRIVING IS NOT THE SAME AS THE STREAM BEING DONE, because s19.8's FIN
+    /// <summary>Gets the RFC 9000 s19.4 Application Protocol Error Code the peer abandoned its
+    /// sending half with, or <see langword="null"/> if no RESET_STREAM has arrived.</summary>
+    /// <remarks>THE OBSERVABLE THE HTTP/3 LAYER NEEDS, and it is the error code rather than a
+    /// bare flag because RFC 9114 s8.1 gives the codes meaning a request has to act on -
+    /// H3_REQUEST_CANCELLED (0x010c) is retryable on a new connection and H3_MESSAGE_ERROR
+    /// (0x010e) is not. Reported as the number the peer sent, not mapped onto
+    /// <see cref="TlsQuicTransportError"/>: s19.4's code is the APPLICATION's space and
+    /// TlsQuicTransportError lists only what this library raises.</remarks>
+    internal ulong? ResetErrorCode => _resetErrorCode;
+
+    /// <summary>Gets whether the peer has reset this stream's receive half with an RFC 9000
+    /// s19.4 RESET_STREAM.</summary>
+    internal bool ResetReceived => _resetErrorCode is not null;
+
+    /// <summary>Gets the RFC 9000 s19.5 Application Protocol Error Code the peer asked this
+    /// endpoint to stop sending with, or <see langword="null"/> if no STOP_SENDING has
+    /// arrived.</summary>
+    internal ulong? StopSendingErrorCode => _stopSendingErrorCode;
+
+    /// <summary>Gets whether the peer has asked this endpoint to stop sending on this stream,
+    /// after which <see cref="TlsQuicStreamSet.Send"/> queues nothing more on it.</summary>
+    internal bool SendStopped => _stopSendingErrorCode is not null;
+
+    /// <summary>Gets whether this stream will deliver nothing further: the peer's FIN has
+    /// arrived AND every byte before it has been delivered, or the peer reset the stream.
+    /// </summary>
+    /// <remarks>
+    /// <para>FIN ARRIVING IS NOT THE SAME AS THE STREAM BEING DONE, because s19.8's FIN
     /// rides on a frame that may overtake an earlier one. The two are separate properties for
-    /// that reason.</remarks>
-    internal bool ReceiveComplete => _finalSize == (ulong)_delivered.Count;
+    /// that reason.</para>
+    /// <para>A RESET IS COMPLETE AT WHATEVER IT DELIVERED, which is why it is a separate
+    /// disjunct rather than something the length comparison could express. RFC 9000 s3.2 puts
+    /// the receiving part in "Reset Recvd" on a RESET_STREAM and s4.5 says the final size is
+    /// still established there - but the bytes below it never arrive, so
+    /// <c>_finalSize == _delivered.Count</c> stays false forever and a caller waiting on this
+    /// would wait until the idle timeout. That hang is the audit's finding 3.</para>
+    /// </remarks>
+    internal bool ReceiveComplete =>
+        _resetErrorCode is not null || _finalSize == (ulong)_delivered.Count;
 
     // Advances the send offset and records the FIN. Separate from the frame building so that
     // TlsQuicStreamSet.Send charges the budget FIRST and moves nothing when the charge is
@@ -898,6 +983,99 @@ internal sealed class TlsQuicStream
         return true;
     }
 
+    // Takes one s19.4 RESET_STREAM frame's two fields. Try-shaped like TryReceive and for the
+    // same reason: this is peer input.
+    //
+    // THE THREE CHECKS ARE s20.1's FINAL_SIZE_ERROR CASES, WHICH NAME RESET_STREAM EXPLICITLY -
+    // "(2) an endpoint received a STREAM frame OR A RESET_STREAM FRAME containing a final size
+    // that was lower than the size of stream data that was already received, or (3) an endpoint
+    // received a STREAM frame OR A RESET_STREAM FRAME containing a different final size to the
+    // one already established." Case (1) is about a STREAM frame's data and has no analogue
+    // here: a RESET_STREAM carries no bytes to exceed anything with.
+    //
+    // AND THE FINAL SIZE IS CHARGED FOR, WHICH IS THE HALF A DIRECTION CHECK CANNOT DO. s4.5:
+    // "A receiver MUST use the final size of the stream to account for all bytes sent on the
+    // stream in its connection level flow controller." So a reset at offset N spends the same
+    // credit N bytes of STREAM frames would have, and a reset claiming a final size past the
+    // limit we advertised is s20.1's FLOW_CONTROL_ERROR exactly as those bytes would have been.
+    // Without this a peer could reset a stream at 2^62-1 and pay nothing.
+    //
+    // ORDER IS LOAD-BEARING, as it is in TryReceive: the final-size checks come before the
+    // flow-control ones so that a contradictory reset is FINAL_SIZE_ERROR rather than whichever
+    // limit happened to notice, and nothing is mutated until every check has passed.
+    internal bool TryReceiveReset(
+        ulong finalSize, ulong applicationProtocolErrorCode, out TlsQuicTransportError error)
+    {
+        error = TlsQuicTransportError.NoError;
+
+        // Case (3), the different-final-size one. A second RESET_STREAM agreeing with the first
+        // is a legal retransmission and must not be refused - s13.3 gives RESET_STREAM the
+        // "resend" treatment on loss, so a duplicate is ordinary rather than hostile.
+        if (_finalSize is { } established && established != finalSize)
+        {
+            error = TlsQuicTransportError.FinalSizeError;
+            return false;
+        }
+
+        // Case (2). Both comparisons, for the reason TryReceive's pair of them exists: the
+        // delivered prefix and the pieces held behind a gap are two different quantities and a
+        // final size can be below either one alone.
+        if (finalSize < (ulong)_delivered.Count || finalSize < HighestUndeliveredEnd())
+        {
+            error = TlsQuicTransportError.FinalSizeError;
+            return false;
+        }
+
+        if (finalSize > _receiveLimit)
+        {
+            error = TlsQuicTransportError.FlowControlError;
+            return false;
+        }
+
+        var advance = finalSize > _largestReceivedOffset
+            ? finalSize - _largestReceivedOffset
+            : 0;
+        if (!_set.TryAdmitConnectionData(advance))
+        {
+            error = TlsQuicTransportError.FlowControlError;
+            return false;
+        }
+
+        _largestReceivedOffset = Math.Max(_largestReceivedOffset, finalSize);
+        _finalSize = finalSize;
+        _resetErrorCode = applicationProtocolErrorCode;
+
+        // s4.5's SHOULD, taken: "A receiver SHOULD discard any data it already received on that
+        // stream." The delivered prefix is NOT discarded - it is already the application's and
+        // Received is a read-only view a caller may be holding - but the pieces stranded behind
+        // a gap can never be completed now that the sender has stopped, so holding them is the
+        // finding-2 amplification with a different name.
+        _undelivered.Clear();
+
+        // The credit for everything below the final size falls due at once - see CreditedPrefix
+        // - and this is also what reports the stream finished for s4.6's MAX_STREAMS purposes.
+        CreditReceiveWindow();
+        return true;
+    }
+
+    // RFC 9000 s19.5's frame, applied. Returns the final size the answering RESET_STREAM has to
+    // carry, which s3.5 makes the bytes this endpoint has already put on the wire.
+    //
+    // LATCHED, NOT COUNTED. A second STOP_SENDING for the same stream is refused by the caller
+    // rather than answered twice, so this is only ever reached once per stream.
+    internal ulong StopSending(ulong applicationProtocolErrorCode)
+    {
+        _stopSendingErrorCode = applicationProtocolErrorCode;
+
+        // s3.5: "the sender ... [can] discard any data that is still pending". The queue holds
+        // slices of the CALLER's buffer rather than copies - see QueueForSend - so this frees a
+        // reference rather than memory; what it really does is make HasBlockedData false, so
+        // Drain's s19.13 STREAM_DATA_BLOCKED arm cannot ask the peer for credit to send bytes
+        // the peer has just said it does not want.
+        _blocked.Clear();
+        return SendOffset;
+    }
+
     // Raises this stream's limit, and the connection's, to cover what has been delivered.
     //
     // DELIVERED IS THE UNIT, NOT RECEIVED. s19.10 counts the largest received offset against
@@ -911,7 +1089,7 @@ internal sealed class TlsQuicStream
     // would stall at the old value with nothing to say why.
     private void CreditReceiveWindow()
     {
-        var delivered = (ulong)_delivered.Count;
+        var delivered = CreditedPrefix;
         _set.CreditConnectionWindow(delivered - _creditedToConnection);
         _creditedToConnection = delivered;
 
@@ -947,6 +1125,20 @@ internal sealed class TlsQuicStream
         _maximumStreamDataOwed = true;
     }
 
+    // How much of this stream's window CreditReceiveWindow may hand back, and it is the
+    // delivered prefix everywhere except after a reset.
+    //
+    // RFC 9000 s4.5 IS WHY THE RESET CASE IS THE FINAL SIZE AND NOT ZERO: "A receiver MUST use
+    // the final size of the stream to account for all bytes sent on the stream in its
+    // connection level flow controller." Those bytes were charged when the reset arrived and no
+    // byte below the final size will ever be delivered, so a credit that stayed at
+    // _delivered.Count would leak the difference out of the connection window for the lifetime
+    // of the connection - one reset stream at a time, until a transfer that had credit stalled
+    // with nothing to say why.
+    private ulong CreditedPrefix => _resetErrorCode is not null && _finalSize is { } size
+        ? size
+        : (ulong)_delivered.Count;
+
     // Takes the pending MAX_STREAM_DATA grant, if the last receive earned one. Try-shaped and
     // one-shot: the set queues at most one frame per grant, and s19.10's "frames that do not
     // increase the stream limit MUST be ignored" makes a repeat harmless but pointless.
@@ -958,78 +1150,152 @@ internal sealed class TlsQuicStream
         return owed;
     }
 
+    // Stores only the bytes of [offset, offset + data.Length) that no held piece and no
+    // delivered byte already covers, as one or more pieces that keep _undelivered sorted and
+    // gap-free of each other. NEVER stores a byte twice, which is the whole of the memory bound
+    // the field comment states.
+    //
+    // ponytail: the scan for the insertion point is linear, not a binary search, and the insert
+    // is a List memmove - so a stream holding k pieces costs O(k) per frame. k is bounded by
+    // the per-stream window in BYTES, so the ceiling is a peer that sends a window's worth of
+    // one-byte frames in descending order. Make it a binary search over a gap list if a stream
+    // ever legitimately holds thousands of pieces; the memory bound, which is what the
+    // amplification defect was about, does not depend on it.
     private void Buffer(ulong offset, ReadOnlySpan<byte> data)
     {
+        var delivered = (ulong)_delivered.Count;
+
         // ALREADY DELIVERED IN FULL: a retransmission of bytes the application has. RFC 9000
         // s2.2 makes a comparison OPTIONAL here - "An endpoint MAY treat receipt of different
         // data at the same offset within a stream as a connection error of type
         // PROTOCOL_VIOLATION" - and this endpoint takes the other branch of the MAY and
         // ignores the duplicate. Stated rather than silent, because a reader looking for the
         // comparison should find out that its absence is a choice s2.2 grants.
-        if (offset + (ulong)data.Length <= (ulong)_delivered.Count)
+        if (offset + (ulong)data.Length <= delivered)
         {
             return;
         }
 
-        // A LONGER PIECE AT AN OFFSET WE ALREADY HOLD REPLACES THE SHORTER ONE, and a shorter
-        // one at the same offset is dropped. Both are retransmissions under s2.2's MAY; keeping
-        // the longer is what makes the drain below terminate on the same input either way.
-        if (_undelivered.TryGetValue(offset, out var held) && held.Length >= data.Length)
+        // PARTIALLY DELIVERED: the front is trimmed rather than the piece being rejected. A
+        // retransmission that starts before the delivered end and runs past it carries bytes we
+        // do not have, and dropping it would strand them. Trimming HERE rather than in Drain is
+        // what lets Drain assume every held piece begins at or after the delivered prefix.
+        if (offset < delivered)
         {
-            return;
+            data = data[(int)(delivered - offset)..];
+            offset = delivered;
         }
 
-        _undelivered[offset] = data.ToArray();
+        // The first held piece that could overlap: everything before it ends at or before this
+        // frame's start, so no comparison against it can subtract anything.
+        var index = 0;
+        while (index < _undelivered.Count && EndOf(_undelivered[index]) <= offset)
+        {
+            index++;
+        }
+
+        while (!data.IsEmpty)
+        {
+            // Past the last held piece, or entirely inside the gap in front of the next one:
+            // what is left is new in full and goes in as one piece.
+            if (index == _undelivered.Count
+                || _undelivered[index].Offset >= offset + (ulong)data.Length)
+            {
+                _undelivered.Insert(index, (offset, data.ToArray()));
+                return;
+            }
+
+            var held = _undelivered[index];
+
+            // A gap in front of the next held piece takes the bytes that fall in it, and the
+            // walk then resumes at that piece with what is left.
+            if (held.Offset > offset)
+            {
+                var gap = (int)(held.Offset - offset);
+                _undelivered.Insert(index, (offset, data[..gap].ToArray()));
+                index++;
+                data = data[gap..];
+                offset = held.Offset;
+            }
+
+            // The held piece now starts at or before this offset and ends past it, so it
+            // already covers the next `overlap` bytes. THE HELD COPY WINS, which is the same
+            // branch of s2.2's MAY the delivered-prefix check above takes: differing data at
+            // one offset is ignored rather than made a PROTOCOL_VIOLATION.
+            var overlap = EndOf(held) - offset;
+            if (overlap >= (ulong)data.Length)
+            {
+                return;
+            }
+
+            data = data[(int)overlap..];
+            offset = EndOf(held);
+            index++;
+        }
     }
+
+    private static ulong EndOf((ulong Offset, byte[] Data) piece) =>
+        piece.Offset + (ulong)piece.Data.Length;
 
     // Moves every piece that is now contiguous with the delivered prefix into it.
     //
-    // O(pieces^2) IN THE WORST CASE and deliberately so: the pieces are bounded by
-    // MaximumReceivedBytesPerStream above, A4-minimal's streams carry an HTTP/3 SETTINGS frame
-    // and a QPACK stream prologue, and a sorted structure here would be more code than the
-    // whole method. The upgrade path, if a stream ever carries a response body, is to key
-    // _undelivered by a SortedList and walk it once.
+    // ONE FORWARD PASS, NOT A FIXED POINT, and that is Buffer's invariant being spent rather
+    // than an optimisation. The pieces are sorted and none overlaps another, so the ones that
+    // are contiguous with _delivered are exactly a PREFIX of the list: the first piece that
+    // starts past the delivered end is a gap, and every piece after it starts later still.
     private void Drain()
     {
-        bool moved;
-        do
+        var taken = 0;
+        while (taken < _undelivered.Count
+            // STRICTLY GREATER ENDS THE PASS, so a piece that starts exactly where the
+            // delivered prefix ends is taken. `<` here - `>=` in the old form - would stall
+            // every stream on its first frame.
+            && _undelivered[taken].Offset <= (ulong)_delivered.Count)
         {
-            moved = false;
-            foreach (var offset in _undelivered.Keys.ToList())
+            var (offset, piece) = _undelivered[taken];
+
+            // Buffer trims against the delivered prefix on the way in and the pieces do not
+            // overlap, so this skip is 0 for every input this class can produce. It is kept so
+            // that the two are independent: a piece that did start behind the prefix would be
+            // appended at the wrong place rather than caught, and that is silent corruption.
+            var skip = (int)((ulong)_delivered.Count - offset);
+            if (skip < piece.Length)
             {
-                // STRICTLY GREATER, so a piece that starts exactly where the delivered prefix
-                // ends is taken. `>=` would stall every stream on its first frame.
-                if (offset > (ulong)_delivered.Count)
-                {
-                    continue;
-                }
-
-                var piece = _undelivered[offset];
-                _undelivered.Remove(offset);
-
-                // The overlap is trimmed off the FRONT rather than the piece being rejected:
-                // a retransmission that starts before the delivered end and runs past it
-                // carries bytes we do not have, and dropping it would strand them.
-                var skip = (int)((ulong)_delivered.Count - offset);
-                if (skip < piece.Length)
-                {
-                    _delivered.AddRange(piece.AsSpan(skip));
-                    moved = true;
-                }
+                _delivered.AddRange(piece.AsSpan(skip));
             }
+
+            taken++;
         }
-        while (moved);
+
+        if (taken > 0)
+        {
+            _undelivered.RemoveRange(0, taken);
+        }
     }
 
-    private ulong HighestUndeliveredEnd()
-    {
-        var highest = 0UL;
-        foreach (var (offset, piece) in _undelivered)
-        {
-            highest = Math.Max(highest, offset + (ulong)piece.Length);
-        }
+    private ulong HighestUndeliveredEnd() =>
+        _undelivered.Count == 0 ? 0 : EndOf(_undelivered[^1]);
 
-        return highest;
+    /// <summary>Gets how many bytes this stream is holding out of order, waiting for the gap in
+    /// front of them to be filled.</summary>
+    /// <remarks>BOUNDED BY THIS STREAM'S RECEIVE WINDOW, which is the property the reassembly
+    /// exists to have and the one a test can assert. Every byte here lies below
+    /// <see cref="ReceiveLimit"/> and is stored exactly once, so a peer cannot buy more of this
+    /// endpoint's memory than it holds RFC 9000 s19.10 credit for. Computed rather than
+    /// counted, on <see cref="BlockedBytes"/>'s reasoning: the piece list is short and nothing
+    /// on the receive path reads this.</remarks>
+    internal ulong UndeliveredBytes
+    {
+        get
+        {
+            var total = 0UL;
+            foreach (var piece in _undelivered)
+            {
+                total += (ulong)piece.Data.Length;
+            }
+
+            return total;
+        }
     }
 
     /// <summary>Gets the offset this endpoint currently permits the peer to reach on this
@@ -1246,6 +1512,18 @@ internal sealed class TlsQuicStreamSet
                     + "size is fixed and no further byte can be sent on it.");
         }
 
+        // RFC 9000 s3.5's whole point, and it is a DROP rather than a throw. The peer asked us
+        // to stop writing and s19.5's answer has already gone out with a final size; accepting
+        // the bytes would put them past the end of a stream we told the peer was finished. It
+        // is not the caller's mistake either - a STOP_SENDING can arrive between two of its
+        // writes - so the send side's usual "caller-chosen input, so it throws" rule does not
+        // apply. SendStopped and StopSendingErrorCode are how a caller finds out; nothing in
+        // this assembly can make the write and the frame race differently.
+        if (stream.SendStopped)
+        {
+            return;
+        }
+
         stream.QueueForSend(data, fin);
         Drain(stream);
     }
@@ -1259,6 +1537,14 @@ internal sealed class TlsQuicStreamSet
     private void Drain(TlsQuicStream stream)
     {
         if (stream.Budget is not { } budget)
+        {
+            return;
+        }
+
+        // The second half of the s3.5 stop, and it is the one a GRANT reaches: ReceiveMaxData
+        // and TryReceiveMaxStreamData both drain every blocked stream, so a limit rising after
+        // a STOP_SENDING would otherwise flush exactly the bytes the peer refused.
+        if (stream.SendStopped)
         {
             return;
         }
@@ -1401,7 +1687,7 @@ internal sealed class TlsQuicStreamSet
         }
 
         _peerStreamsFinished[index]++;
-        var granted = _peerStreamGranted[index] == 0 ? initial : _peerStreamGranted[index];
+        var granted = PeerStreamLimitNow(direction);
         var wanted = initial + _peerStreamsFinished[index];
 
         // s19.11's Maximum Streams "MUST NOT exceed 2^60", and a grant above that is a
@@ -1424,6 +1710,28 @@ internal sealed class TlsQuicStreamSet
                 : TlsQuicFrameType.MaxStreams),
             MaximumStreams = wanted,
         });
+    }
+
+    /// <summary>The stream count of <paramref name="direction"/> this endpoint has actually
+    /// told the peer it may open: the s19.11 MAX_STREAMS grant if one has been sent, and the
+    /// s18.2 initial parameter otherwise.</summary>
+    /// <remarks>
+    /// <para>THE ONE SOURCE FOR BOTH SIDES OF THE NUMBER, and that is the point rather than a
+    /// tidying. Advertisement and enforcement drifting apart is exactly the shape of C9's
+    /// finding 2, recorded in this file's header - "enforcing a number other than the
+    /// advertised one is not a placeholder, it is a divergence" - and it came back at the
+    /// stream COUNT once MAX_STREAMS started moving: CreditPeerStream raised the advertised
+    /// limit and TryReceive kept refusing at the initial one.</para>
+    /// <para>ZERO MEANS NO GRANT HAS BEEN SENT, not a grant of zero. s19.11's Maximum Streams
+    /// is cumulative and CreditPeerStream never queues a frame below <c>initial</c>, so the
+    /// two readings cannot collide: a grant that had genuinely lowered the limit to zero is a
+    /// frame this endpoint does not build.</para>
+    /// </remarks>
+    private ulong PeerStreamLimitNow(TlsQuicStreamDirection direction)
+    {
+        var granted = _peerStreamGranted[
+            direction == TlsQuicStreamDirection.Unidirectional ? 1 : 0];
+        return granted == 0 ? LocalFlowControl.PeerStreamLimitFor(direction) : granted;
     }
 
     /// <summary>RFC 9000 s19.11: "This value cannot exceed 2^60, as it is not possible to
@@ -1460,10 +1768,13 @@ internal sealed class TlsQuicStreamSet
     /// <para>AND THE ONE SHOULD THAT SAYS NOT TO. s13.3: "An endpoint SHOULD stop sending
     /// MAX_STREAM_DATA frames when the receiving part of the stream enters a "Size Known" or
     /// "Reset Recvd" state." Size Known is s3.2's state on the peer's FIN, which is exactly
-    /// <see cref="TlsQuicStream.FinReceived"/>; there is no Reset Recvd here because nothing in
-    /// this tree receives a RESET_STREAM yet, and a stream in that state would also have a final
-    /// size. So the FIN test is the SHOULD, and a false return is a refusal to repair rather
-    /// than a failure to.</para>
+    /// <see cref="TlsQuicStream.FinReceived"/>. RESET RECVD IS COVERED BY THE SAME TEST RATHER
+    /// THAN BY A SECOND ONE, and this paragraph used to say it did not arise at all because
+    /// "nothing in this tree receives a RESET_STREAM yet". It does now:
+    /// <c>TryReceiveReset</c> establishes the final size, so a stream in s3.2's "Reset Recvd"
+    /// has FinReceived true as well and this refuses to repair its grant on the same line. So
+    /// the FIN test is both halves of the SHOULD, and a false return is a refusal to repair
+    /// rather than a failure to.</para>
     /// <para>NEVER THROWS, FOR ANY FRAME. The argument is a frame this endpoint built, but it
     /// reaches here after a loss declaration whose timing the peer controls, and a stream it
     /// names may have been forgotten in between.</para>
@@ -1532,11 +1843,29 @@ internal sealed class TlsQuicStreamSet
     /// STREAM frame to one datagram's worth; this bounds the NUMBER of them that go into one
     /// datagram. A body chopped into ten conforming frames still makes one oversized datagram
     /// if all ten are handed to the same packet.</para>
-    /// <para>AT LEAST ONE FRAME ALWAYS GOES, even if it does not fit. A budget smaller than a
-    /// single frame would otherwise return nothing forever while the queue stayed non-empty -
-    /// a stall, and a silent one. Taking it means the datagram is over budget, which the
-    /// transport will refuse loudly; that is the better failure and it cannot arise from the
-    /// segmentation above, which sizes frames against this same budget.</para>
+    /// <para>NO FRAME IS ADMITTED UNMEASURED, AND THE FIRST ONE USED TO BE. The test read
+    /// <c>taken.Count > 0 &amp;&amp; spent + size > payloadBudget</c>, so the head of the queue
+    /// went into every datagram whatever its size. The claim justifying that - "it cannot arise
+    /// from the segmentation above, which sizes frames against this same budget" - was false in
+    /// two ways at once: <see cref="Drain"/> chunks at QUEUE time against
+    /// <see cref="DatagramPayloadBudget"/> as it stood then, and the caller passes
+    /// <c>budget - spent</c>, already reduced by an ACK and by RFC 9000 s12.2's coalesced
+    /// Initial or Handshake prefix. A frame queued under a larger PMTU, or one queued before a
+    /// prefix appeared in front of it, therefore overran the budget it was measured against and
+    /// surfaced downstream as TlsQuicPacketBuilder.Build's "Packet needs N bytes, destination
+    /// has M" or as a datagram a DF-set socket refuses with WSAEMSGSIZE.</para>
+    /// <para>AN OVERSIZED STREAM HEAD IS SPLIT RATHER THAN REFUSED OR STALLED, on exactly the
+    /// argument TlsQuicLossDetection.TakeRepairsInto now makes for a CRYPTO repair: RFC 9000
+    /// s19.8 gives STREAM an explicit Offset, so a frame carrying the tail of a stream is
+    /// complete in itself and advancing a known offset by the bytes already taken invents
+    /// nothing. That is what keeps progress guaranteed - the queue cannot stall behind a frame
+    /// that is too big for today's datagram and small enough for yesterday's.</para>
+    /// <para>AND THE STARVATION ESCAPE STAYS FOR FRAMES THAT GENUINELY CANNOT BE SPLIT. A
+    /// MAX_DATA is one value, not a byte range. If nothing has been taken and the head is one
+    /// of those, it goes out oversized and the send path reports a legible refusal naming the
+    /// frame and the budget - which beats a queue that never drains and a connection that hangs
+    /// with nothing to say why. Every such frame this set queues is a few tens of bytes, so the
+    /// escape needs a budget smaller than a single varint triple to fire at all.</para>
     /// <para>ORDER IS PRESERVED ACROSS THE SPLIT: repairs before new data, s13.3's
     /// "prioritize retransmission of data over sending new data", and the remainder keeps its
     /// place at the head of its own queue.</para>
@@ -1554,8 +1883,36 @@ internal sealed class TlsQuicStreamSet
             while (queue.Count > 0)
             {
                 var size = TlsQuicFrames.MeasureFrame(_measureScratch, queue[0]);
-                if (taken.Count > 0 && spent + size > payloadBudget)
+                if (spent + size > payloadBudget)
                 {
+                    // s19.8's explicit Offset makes the tail of a stream a frame in its own
+                    // right, so the head is cut to what the budget covers and the remainder
+                    // keeps its place at the front of the queue. The datagram is full by
+                    // construction afterwards - the split took every byte that fitted - so
+                    // there is nothing left to measure.
+                    if (TrySplitStreamHead(queue, size, payloadBudget - spent, out var head))
+                    {
+                        taken.Add(head);
+                        if (source == 0)
+                        {
+                            RepairsSent++;
+                        }
+                    }
+                    else if (taken.Count == 0)
+                    {
+                        // The escape, and it is now the LAST resort rather than the first: a
+                        // frame that cannot be split and cannot fit goes out oversized so the
+                        // queue drains, and the send path names it. Reached only when nothing
+                        // else has been taken, so a datagram that is already carrying frames
+                        // never grows past its budget.
+                        taken.Add(queue[0]);
+                        queue.RemoveAt(0);
+                        if (source == 0)
+                        {
+                            RepairsSent++;
+                        }
+                    }
+
                     return taken;
                 }
 
@@ -1570,6 +1927,55 @@ internal sealed class TlsQuicStreamSet
         }
 
         return taken;
+    }
+
+    // Cuts the head of `queue` down to `room` bytes if it is an s19.8 STREAM frame with data,
+    // leaving the remainder at the front of the queue. Reports whether it did.
+    //
+    // THE FIN GOES WITH THE REMAINDER AND NEVER WITH THE HEAD, which is TryTakeSendable's rule
+    // stated a second time because this is a second place a write gets split: s19.8's FIN
+    // "indicates that the frame marks the end of the stream", and the tail has not left yet.
+    //
+    // THE REMAINDER ALWAYS CARRIES THE OFF BIT. Its offset is the head's plus what was taken,
+    // so it is non-zero even when the head's was zero - and s19.8's implicit form, "When the
+    // Offset field is absent, the offset is 0", would put the tail back at the start of the
+    // stream. That is silent corruption rather than a size error, because a peer reassembles
+    // by offset, which is why it is stated rather than left to the caller to notice.
+    private bool TrySplitStreamHead(
+        List<TlsQuicFrame> queue, int size, int room, out TlsQuicFrame head)
+    {
+        head = default;
+
+        var frame = queue[0];
+        if (frame.Type != TlsQuicFrameType.Stream || frame.Data.Length == 0)
+        {
+            return false;
+        }
+
+        // What the frame costs beyond its payload, MEASURED rather than recomputed - the same
+        // reason MeasureFrame exists at all. Conservative in the safe direction too: s16 lets
+        // the Length varint get shorter as the payload shrinks and never longer, so the head
+        // built below is never larger than the room it was cut to.
+        var take = room - (size - frame.Data.Length);
+        if (take <= 0)
+        {
+            return false;
+        }
+
+        head = frame with
+        {
+            RawType = frame.RawType & ~TlsQuicStreamFrames.FinBit,
+            Data = frame.Data[..take],
+        };
+
+        queue[0] = frame with
+        {
+            RawType = frame.RawType | TlsQuicStreamFrames.OffsetBit,
+            Offset = frame.Offset + (ulong)take,
+            Data = frame.Data[take..],
+        };
+
+        return true;
     }
 
     internal IReadOnlyList<TlsQuicFrame> TakePendingFrames()
@@ -1636,8 +2042,18 @@ internal sealed class TlsQuicStreamSet
             // breath: "The limit includes streams that have been closed as well as those that
             // are open." The two directions are counted separately because s18.2 gives them
             // separate parameters.
+            // AND IT IS THE LIMIT WE HAVE ADVERTISED, NOT THE ONE WE STARTED FROM, which is the
+            // audit's finding 8. CreditPeerStream sends s19.11 MAX_STREAMS frames raising the
+            // peer's allowance to initial + finished, and this test read
+            // PeerStreamLimitFor - initial_max_streams_uni / _bidi, verbatim and immovable - so
+            // a peer that spent credit WE GAVE IT was killed with STREAM_LIMIT_ERROR. s19.11
+            // makes MAX_STREAMS the definition of the limit the moment one is sent: "the
+            // maximum number of streams of a given type that the receiver permits", cumulative
+            // over the connection. Refusing inside it is a protocol violation on OUR side, and
+            // it is the failure mode that only appears after a connection has been up long
+            // enough to close a stream - which is why nothing before this reached it.
             if (TlsQuicStreamId.OrdinalOf(id)
-                >= LocalFlowControl.PeerStreamLimitFor(TlsQuicStreamId.DirectionOf(id)))
+                >= PeerStreamLimitNow(TlsQuicStreamId.DirectionOf(id)))
             {
                 error = TlsQuicTransportError.StreamLimitError;
                 return false;
@@ -1773,10 +2189,21 @@ internal sealed class TlsQuicStreamSet
     /// purpose for the frame, and a RESET_STREAM on a stream we can only receive on is the peer
     /// resetting its own sending. Swapping the two tests would reject exactly the legal
     /// traffic.</para>
-    /// <para>ACCEPTING THE FRAME IS NOT ACTING ON IT. Nothing here tears the stream down or
-    /// abandons a send; s3.2's state transitions for RESET_STREAM and STOP_SENDING are a
-    /// separate piece of work and the pre-existing behaviour - drop the frame - is what a true
-    /// return still means. This method closes the four MUSTs and claims nothing else.</para>
+    /// <para>AND THE FRAME IS NOW ACTED ON, WHICH IS THE AUDIT'S FINDING 3. This paragraph used
+    /// to read "ACCEPTING THE FRAME IS NOT ACTING ON IT ... the pre-existing behaviour - drop
+    /// the frame - is what a true return still means", and dropping it cost four separate
+    /// things: <see cref="TlsQuicStream.FinalSize"/> was never set, so
+    /// <see cref="TlsQuicStream.ReceiveComplete"/> could not become true and an awaiting HTTP/3
+    /// caller waited out the idle timeout on a stream the server had already abandoned; the
+    /// application error code the peer sent was decoded by
+    /// <c>TlsQuicConnectionFrames.TryReadResetStream</c> and discarded; s4.5's final-size
+    /// accounting never ran, so a RESET_STREAM contradicting data already received was not the
+    /// FINAL_SIZE_ERROR s20.1 makes it; and STOP_SENDING left this endpoint queueing STREAM
+    /// frames on a stream the peer had asked it to stop writing.</para>
+    /// <para>WHAT IS STILL NOT DONE IS s3.2's FULL STATE MACHINE. There is no "Reset Sent"
+    /// versus "Reset Recvd" enumeration here and no send-side reset this endpoint originates on
+    /// its own; what exists is the receive half terminating, the send half stopping, and the one
+    /// frame s3.5 makes mandatory in answer.</para>
     /// <para>NEVER THROWS, for any input, like every other peer-input path in this file.</para>
     /// </remarks>
     internal bool TryReceiveStreamStateSignal(
@@ -1805,13 +2232,97 @@ internal sealed class TlsQuicStreamSet
             _ => false,
         };
 
-        if (!forbidden)
+        if (forbidden)
+        {
+            error = TlsQuicTransportError.StreamStateError;
+            return false;
+        }
+
+        // THE DIRECTION RULES ARE THE GATE AND THIS IS THE EFFECT, in that order: a frame s19.4
+        // or s19.5 forbids outright must close the connection rather than change any state on
+        // the way out.
+        return frame.Type switch
+        {
+            TlsQuicFrameType.ResetStream => TryApplyReset(frame, out error),
+            TlsQuicFrameType.StopSending => ApplyStopSending(frame),
+
+            // s19.13's STREAM_DATA_BLOCKED, and there is nothing to do with it beyond the
+            // direction rule above. It says the peer wants more of OUR window, which
+            // CreditReceiveWindow already grants on its own threshold as the application
+            // consumes - and s19.13's "does not open the connection to a denial of service"
+            // note is about the receiver being free to ignore one. Sending a MAX_STREAM_DATA
+            // just because the peer asked would hand out credit on the peer's schedule.
+            _ => true,
+        };
+    }
+
+    // s19.4's frame, applied to the stream it names.
+    //
+    // A RESET FOR A STREAM THIS SET DOES NOT HOLD IS ACCEPTED AND DROPPED, on the reasoning
+    // TryReceiveMaxStreamData's third paragraph gives for its own no-op: the direction rules
+    // above have already closed every case s19.4 makes a MUST, and implicitly creating a stream
+    // here would spend the s19.11 peer-stream limit that s19.8 spends only for a STREAM frame -
+    // on a stream that by definition will never carry one. Nothing is lost: with no stream
+    // there is no consumer awaiting a final size and no buffered byte to discard.
+    private bool TryApplyReset(in TlsQuicFrame frame, out TlsQuicTransportError error)
+    {
+        error = TlsQuicTransportError.NoError;
+
+        if (Find(frame.StreamId) is not { } stream)
         {
             return true;
         }
 
-        error = TlsQuicTransportError.StreamStateError;
-        return false;
+        if (!stream.TryReceiveReset(
+            frame.FinalSize, frame.ApplicationProtocolErrorCode, out error))
+        {
+            return false;
+        }
+
+        // AFTER THE FRAME IS ACCEPTED, NEVER AFTER A REFUSAL - TryReceive's rule, and the same
+        // reason: queueing a grant on the way to closing the connection would put it in the
+        // same packet as the close.
+        QueueFlowControlUpdates(stream);
+        return true;
+    }
+
+    // s19.5's frame, applied. Always returns true: every STOP_SENDING this reaches has passed
+    // the two direction MUSTs above, and s19.5 states no other error case.
+    //
+    // RFC 9000 s3.5 IS WHY A FRAME GOES BACK: "An endpoint that receives a STOP_SENDING frame
+    // MUST send a RESET_STREAM frame if the stream is in the 'Ready' or 'Send' state." The
+    // error code is copied because the same section says to - "An endpoint SHOULD copy the
+    // error code from the STOP_SENDING frame to the RESET_STREAM frame it sends" - and the
+    // final size is s19.4's "final size of the stream", which for our sending half is exactly
+    // the offset the next byte would have carried.
+    //
+    // ONE ANSWER PER STREAM, WHICH IS THE SendStopped GUARD. s13.3 gives STOP_SENDING the
+    // resend treatment on loss, so a duplicate is ordinary; answering each copy would put a
+    // second RESET_STREAM on the wire with a final size that had not moved, and s3.2's "Reset
+    // Sent" is a state entered once.
+    //
+    // A STREAM WE DO NOT HOLD IS DROPPED, and unlike the reset case that is not a judgement
+    // call: the only STOP_SENDING that can reach here for an unknown stream is one for a
+    // PEER-initiated stream, because the locally-initiated-not-created case is s19.5's own MUST
+    // and was refused above. We have sent nothing on a stream we never created, so there is no
+    // send half to stop and no non-zero final size to report.
+    private bool ApplyStopSending(in TlsQuicFrame frame)
+    {
+        if (Find(frame.StreamId) is not { } stream || stream.SendStopped)
+        {
+            return true;
+        }
+
+        var finalSize = stream.StopSending(frame.ApplicationProtocolErrorCode);
+        _pending.Add(new TlsQuicFrame
+        {
+            RawType = (ulong)TlsQuicFrameType.ResetStream,
+            StreamId = stream.Id,
+            ApplicationProtocolErrorCode = frame.ApplicationProtocolErrorCode,
+            FinalSize = finalSize,
+        });
+
+        return true;
     }
 
     /// <summary>Takes one received RFC 9000 s19.9 MAX_DATA frame, raising the connection-level
@@ -1994,14 +2505,22 @@ internal sealed partial class TlsQuicConnection
     // frame switch's default. The audit recorded one of them - s19.13's - in that arm's own
     // comment and left the other three unnamed, which is how a subsystem-level "streams are
     // compliant" verdict can be true of this file and false of the dispatch that reaches it.
+    //
+    // AND THE REFUSALS ARE NO LONGER ONLY ABOUT DIRECTION, which is why the message names the
+    // frame's fields. TryReceiveStreamStateSignal now applies a RESET_STREAM as well as
+    // policing it, so this can also close with s20.1's FINAL_SIZE_ERROR - a final size below
+    // what already arrived, or different from one already established - or FLOW_CONTROL_ERROR
+    // for a final size past the limit we advertised. A message that said only "whose direction
+    // forbids it" would name the wrong rule for two of the three codes it can now carry.
     private void ReceiveStreamStateSignal(in TlsQuicFrame frame, ref string? failure)
     {
         if (!Streams.TryReceiveStreamStateSignal(frame, out var error))
         {
             // FIRST FAILURE WINS, sharing the slot its neighbours use for the reason they give.
-            failure ??= $"The peer sent a {frame.Type} frame for a stream whose direction "
-                + "forbids it (RFC 9000 s19.4, s19.5 and s19.13), so it is closing with "
-                + $"{error}: stream {frame.StreamId}.";
+            failure ??= $"The peer sent a {frame.Type} frame this connection cannot accept "
+                + "(RFC 9000 s19.4, s19.5 and s19.13), so it is closing with "
+                + $"{error}: stream {frame.StreamId}, final size {frame.FinalSize}, "
+                + $"application error code {frame.ApplicationProtocolErrorCode}.";
         }
     }
 

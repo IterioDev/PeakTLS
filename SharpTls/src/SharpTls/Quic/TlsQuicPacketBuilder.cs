@@ -258,12 +258,18 @@ internal static class TlsQuicPacketBuilder
     //      -> ONLY TlsQuicPacketBuilderTests.TheAeadNonceUsesTheFullPacketNumberNotTheTr
     //      uncatedWireForm. A.2 writes packet number 2 in four bytes and A.3 writes 1 in
     //      two, so in both the truncated and the full value are the same number.
-    //   2. IsInFlight also excluding PADDING -> ONLY
+    //   2. IsInFlight also excluding PADDING - now, since RFC 9002 s2's disjunction went
+    //      in, the same thing as writing it as a bare alias for IsAckEliciting -> ONLY
     //      TlsQuicPacketBuilderTests.PaddingOnlyPacketsAreNotAckElicitingButAreStillInFl
-    //      ight.
+    //      ight and TlsQuicPacketBuilderTests.AnAckPaddedOutIsInFlightBecauseOfThePaddin
+    //      gAlone. The second is the pair that pins the disjunction rather than either
+    //      half: it is the only packet in the suite that is in flight while carrying no
+    //      ack-eliciting frame AND no frame outside Table 3's N rows.
     //   3. IsAckEliciting no longer excluding CONNECTION_CLOSE -> ONLY
-    //      TlsQuicPacketBuilderTests.ConnectionCloseOnlyPacketsAreNotAckElicitingButAreI
-    //      nFlight.
+    //      TlsQuicPacketBuilderTests.ConnectionCloseOnlyPacketsAreNeitherAckElicitingNor
+    //      InFlight, which since RFC 9002 s2 went into IsInFlight witnesses BOTH flags on
+    //      that frame - a close-only packet is out of flight precisely because it is not
+    //      ack-eliciting, so this row now fails on either method's mutation.
     //   4. IsAckEliciting also excluding PING -> ONLY
     //      TlsQuicPacketBuilderTests.PingOnlyPacketsAreAckElicitingAndInFlight. A live
     //      survivor found by spec review, not by the first sweep, which covered the three
@@ -693,9 +699,14 @@ internal static class TlsQuicPacketBuilder
         // A.2 encodes packet number 2 in four bytes). Going narrower produces a packet
         // the peer decodes as a different number, silently.
         //
-        // EncodedLength also throws when the packet number is below the largest
-        // acknowledged, which is a caller error this method deliberately does not
-        // restate - one transcription of that rule, in the type that owns it.
+        // EncodedLength also throws for the two inputs that have no floor at all - a
+        // packet number at or below the largest acknowledged, and an acknowledgement gap
+        // past 2^31, where A.2 wants more than the 4 bytes s17.1 offers. Both are caller
+        // errors this method deliberately does not restate - one transcription of each
+        // rule, in the type that owns it. The second used to arrive here as a floor of 5,
+        // which the guard above then rejected as a width no plan may request: a demand and
+        // a refusal for the same number, neither of them naming the ack gap that caused
+        // it.
         // Witnessed by TlsQuicPacketBuilderTests.APacketNumberEncodedLengthBelowTheAppe
         // ndixATwoFloorIsRejected and TlsQuicPacketBuilderTests.APacketNumberBelowTheLa
         // rgestAcknowledgedIsRejected.
@@ -838,17 +849,42 @@ internal static class TlsQuicPacketBuilder
         return false;
     }
 
-    // RFC 9000 s12.4's legend again: "C: Packets containing only frames with this
-    // marking do not count toward bytes in flight for congestion control purposes".
-    // Table 3 prints C against ACK alone - not against PADDING, which carries N and P
-    // but not C. s13.2.7 states the consequence in words rather than table markings:
-    // "Packets containing PADDING frames are considered to be in flight for congestion
-    // control purposes", which is the independent reading that confirms the row.
+    // RFC 9002 s2's glossary entry, verbatim: "In-flight: Packets are considered in
+    // flight when they are ack-eliciting or contain a PADDING frame, and they have been
+    // sent but are not acknowledged, declared lost, or discarded along with old keys."
+    // The trailing clause is the recovery state machine's, not this method's - Build only
+    // knows what a packet CONTAINS - so the two conditions transcribed here are the two
+    // that come before it: ack-eliciting, OR carrying PADDING.
+    //
+    // A DISJUNCTION, NOT A SUBSET TEST, and the disjunction is why this cannot simply
+    // return IsAckEliciting. PADDING is on that method's exclusion list, so a packet of
+    // ACK plus PADDING is not ack-eliciting and is still in flight; RFC 9000 s13.2.7 says
+    // the same thing without the table: "Packets containing PADDING frames are considered
+    // to be in flight for congestion control purposes". Both halves are pinned -
+    // TlsQuicPacketBuilderTests.PaddingOnlyPacketsAreNotAckElicitingButAreStillInFlight
+    // and TlsQuicPacketBuilderTests.AnAckPaddedOutIsInFlightBecauseOfThePaddingAlone.
+    //
+    // THIS USED TO READ "anything that is not ACK", derived from RFC 9000 s12.4's legend
+    // - "C: Packets containing only frames with this marking do not count toward bytes in
+    // flight for congestion control purposes" - and the observation that Table 3 prints C
+    // against ACK alone. That inverts the marking. C says which frames CANNOT put a packet
+    // in flight; it never promises that every frame lacking C CAN. The one row where the
+    // difference is observable is CONNECTION_CLOSE, which carries N and no C, and which is
+    // neither ack-eliciting nor PADDING - so a close-only packet was inflating _bytesIn
+    // Flight and eating congestion window on the way out. Harmless, since the connection
+    // is ending, but it is a divergence from the recovery model that IsAckEliciting one
+    // method above did not share: that method already excludes CONNECTION_CLOSE, so the
+    // two disagreed about the same frame. Witnessed by TlsQuicPacketBuilderTests.Connecti
+    // onCloseOnlyPacketsAreNeitherAckElicitingNorInFlight.
     private static bool IsInFlight(IReadOnlyList<TlsQuicFrame> frames)
     {
+        if (IsAckEliciting(frames))
+        {
+            return true;
+        }
         foreach (var frame in frames)
         {
-            if (frame.Type != TlsQuicFrameType.Ack)
+            if (frame.Type == TlsQuicFrameType.Padding)
             {
                 return true;
             }

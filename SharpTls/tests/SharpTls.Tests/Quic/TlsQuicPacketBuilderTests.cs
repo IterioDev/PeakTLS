@@ -366,16 +366,53 @@ public sealed class TlsQuicPacketBuilderTests
     }
 
     [Fact]
-    public void ConnectionCloseOnlyPacketsAreNotAckElicitingButAreInFlight()
+    public void ConnectionCloseOnlyPacketsAreNeitherAckElicitingNorInFlight()
     {
-        // CONNECTION_CLOSE is marked N and not C, so it separates the two markings in
-        // the opposite direction from PADDING: a packet of only ACK frames is out of
-        // flight, a packet of only CONNECTION_CLOSE is not. Type 0x1c is the one s12.4
-        // permits in an Initial packet.
+        // RFC 9002 s2, "In-flight", verbatim: "Packets are considered in flight when they
+        // are ack-eliciting or contain a PADDING frame, and they have been sent but are
+        // not acknowledged, declared lost, or discarded along with old keys." A packet of
+        // nothing but CONNECTION_CLOSE is neither of those two things, so it is NOT in
+        // flight. Type 0x1c is the one s12.4 permits in an Initial packet.
+        //
+        // THIS ASSERTION USED TO READ True, AND IT ENCODED A BUG. The reasoning it carried
+        // was that RFC 9000 s12.4 Table 3 prints C - "do not count toward bytes in flight"
+        // - against ACK alone, so anything without C must be in flight. That inverts the
+        // table: C marks frames that CANNOT put a packet in flight, it does not promise
+        // that every unmarked frame CAN. RFC 9002 s2 is the positive definition, and it
+        // names exactly two ways in - ack-eliciting, or PADDING. CONNECTION_CLOSE is
+        // neither; Table 3's own N against it is what rules out the first.
         var frames = new[]
         {
             new TlsQuicFrame { RawType = 0x1c, ErrorCode = 0, TriggerFrameType = 0, ReasonPhrase = ReadOnlyMemory<byte>.Empty },
         };
+        using var keys = VectorKeys();
+
+        Build(keys, VectorPlan(), frames, out var sent);
+
+        Assert.False(sent.IsAckEliciting);
+        Assert.False(sent.IsInFlight);
+    }
+
+    [Fact]
+    public void AnAckPaddedOutIsInFlightBecauseOfThePaddingAlone()
+    {
+        // The trap in RFC 9002 s2's "ack-eliciting OR contains PADDING": neither frame in
+        // this packet is ack-eliciting - ACK and PADDING are both on IsAckEliciting's
+        // exclusion list - yet the packet IS in flight, because s13.2.7 says so in words:
+        // "Packets containing PADDING frames are considered to be in flight for congestion
+        // control purposes".
+        //
+        // Without this case, writing IsInFlight as a bare alias for IsAckEliciting leaves
+        // the whole suite green: PaddingOnlyPacketsAreNotAckElicitingButAreStillInFlight
+        // is the only other test that separates the two, and it would fail on the PADDING
+        // half while this one is the pair that pins the disjunction itself.
+        //
+        // THE PADDING IS THE ARRAY'S DEFAULT AND IS LOAD-BEARING: indices 1 to 3 are never
+        // assigned, so they keep default(TlsQuicFrame), whose RawType is 0x00 - PADDING,
+        // per RFC 9000 s19.1. Only index 0 is written. Assigning all four would remove the
+        // frames the assertion below is about.
+        var frames = new TlsQuicFrame[4];
+        frames[0] = new TlsQuicFrame { RawType = 0x02, LargestAcknowledged = 7, AckDelay = 0, AckRangeCount = 0, FirstAckRange = 0 };
         using var keys = VectorKeys();
 
         Build(keys, VectorPlan(), frames, out var sent);
