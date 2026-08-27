@@ -428,13 +428,78 @@ internal sealed class TlsQuicHttp3Streams
 
     private bool TryProcessPeerStream(TlsQuicStream stream, out ulong error)
     {
-        error = (ulong)TlsQuicHttp3ErrorCode.None;
-
         if (!_peerStreams.TryGetValue(stream.Id, out var state))
         {
             state = new PeerStreamState();
             _peerStreams.Add(stream.Id, state);
         }
+
+        if (!TryReadPeerStream(stream, state, out error))
+        {
+            return false;
+        }
+
+        // ALL THREE CRITICAL STREAMS, ONE CHECK, AND IT USED TO BE THE CONTROL STREAM'S ALONE.
+        // Two RFCs say the same thing about three streams:
+        //
+        //   * RFC 9114 s6.2.1: "If either control stream is closed at any point, this MUST be
+        //     treated as a connection error of type H3_CLOSED_CRITICAL_STREAM."
+        //   * RFC 9204 s4.2: "The sender MUST NOT close either of these streams ... Closure of
+        //     either unidirectional stream type MUST be treated as a connection error of type
+        //     H3_CLOSED_CRITICAL_STREAM." Its "these streams" are the QPACK encoder and decoder
+        //     streams.
+        //
+        // THE TWO THAT WERE MISSING WERE MISSING FOR TWO DIFFERENT REASONS, which is why one
+        // check in one place is the fix rather than two more guards. The encoder stream returned
+        // from its own arm before ever reaching the old check; the peer's DECODER stream returns
+        // even earlier, at the Ignoring guard, because nothing here reads its instructions. An
+        // ignored stream is still a stream whose TYPE we know, and s4.2 attaches the rule to the
+        // type rather than to whether we happen to parse it.
+        //
+        // WHAT AN UNCHECKED ENCODER STREAM COSTS is a stall rather than a wrong answer, which is
+        // why it survived review twice. A reset leaves the partial instruction that was in
+        // flight sitting below the ceiling forever - the stream layer drops the undelivered
+        // pieces, so no further byte can ever complete it - and every later field section that
+        // references an entry past our Insert Count then blocks on RFC 9204 s2.2.1 until the
+        // connection's deadline. s4.2 says to end the connection; stalling until a timeout is
+        // the same outcome, minutes later and with no code to name.
+        //
+        // FinalSizeKnown AND NOT ReceiveComplete, because s6.2.1's "closed" and RFC 9000 s19.4's
+        // reset are the same fault here: both end a stream that MUST NOT end. That property is
+        // RFC 9000 s4.5's union - a final size established by either route - which is exactly
+        // the question this asks and the reason the stream layer kept the two causes together.
+        //
+        // AFTER TryReadPeerStream AND NOT BEFORE, so a control stream that delivered a legal
+        // SETTINGS and then closed still reports the close rather than being rejected before its
+        // settings were read - and, on the same reasoning, an encoder stream's last whole
+        // instructions still reach the table. A frame-level or ceiling-level fault found in
+        // there wins, because it is the more specific answer.
+        //
+        // A STREAM WITH NO TYPE YET IS NOT CRITICAL AND MUST NOT BE, s6.2: "A receiver MUST
+        // tolerate unidirectional streams being closed or reset prior to the reception of the
+        // unidirectional stream header." A null StreamType is none of the three below.
+        if (IsCriticalStreamType(state.StreamType) && stream.FinalSizeKnown)
+        {
+            error = (ulong)TlsQuicHttp3ErrorCode.H3ClosedCriticalStream;
+            return false;
+        }
+
+        return true;
+    }
+
+    // The three streams neither end may close. s6.2's general rule is the opposite - "A sender
+    // can close or reset a unidirectional stream unless otherwise specified" - so a push stream,
+    // an s6.2.3 reserved (GREASE) stream and an unknown type are all ordinary when they end, and
+    // none of them is here.
+    private static bool IsCriticalStreamType(ulong? streamType) =>
+        streamType is (ulong)TlsQuicHttp3StreamType.Control
+            or (ulong)TlsQuicHttp3StreamType.QpackEncoder
+            or (ulong)TlsQuicHttp3StreamType.QpackDecoder;
+
+    // Everything that reads bytes, with the critical-stream rule lifted out to its one caller.
+    private bool TryReadPeerStream(TlsQuicStream stream, PeerStreamState state, out ulong error)
+    {
+        error = (ulong)TlsQuicHttp3ErrorCode.None;
 
         if (state.Ignoring)
         {
@@ -512,37 +577,12 @@ internal sealed class TlsQuicHttp3Streams
         // H3_FRAME_ERROR for the one Length that IS invalid - above int.MaxValue, which no
         // ReadOnlySpan could ever carry.
         //
-        // BEFORE s6.2.1's FIN RULE BELOW AND NOT AFTER, because a peer that flooded us and then
-        // closed flooded first; both answers end the connection, and this one names the cause.
+        // BEFORE s6.2.1's CLOSED-CRITICAL-STREAM RULE, which now lives in this method's caller:
+        // a peer that flooded us and then closed flooded first, and both answers end the
+        // connection, so the one that names the cause is the one worth reporting.
         if (state.Unparsed.Count > _spec.MaximumBufferedControlStreamBytes)
         {
             error = (ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad;
-            return false;
-        }
-
-        // s6.2.1: "If either control stream is closed at any point, this MUST be treated as a
-        // connection error of type H3_CLOSED_CRITICAL_STREAM." Checked AFTER the frames, so a
-        // control stream that delivered a legal SETTINGS and then closed still reports the
-        // close rather than being rejected before its settings were read - the peer's settings
-        // are worth keeping even when the connection is about to end.
-        //
-        // THE CONTROL-STREAM TEST IS UNREACHABLE-BY-CONSTRUCTION TODAY, and this comment says
-        // so because an earlier version of it claimed the opposite and the sweep proved the
-        // claim false: deleting the test changed no test's result. The invariant that makes it
-        // redundant is thirty lines up - a stream with a known non-control type has Ignoring
-        // set and returns before here, and a stream whose type has not arrived returns at the
-        // TryTakeStreamType call - so StreamType is necessarily Control by this point.
-        //
-        // It is kept rather than deleted because the invariant lives at a distance and the
-        // rule it enforces is narrow: s6.2.1's sentence is about the control stream, while
-        // s6.2's general rule is that "A sender can close or reset a unidirectional stream
-        // unless otherwise specified", so a QPACK or GREASE stream that ends is ordinary. If
-        // the early return ever moves, this line is what stops a peer's ordinary GREASE-stream
-        // close from becoming a connection error. Recorded as a surviving mutation, classified
-        // unreachable-by-construction, with no test written for it.
-        if (state.StreamType == (ulong)TlsQuicHttp3StreamType.Control && stream.FinalSizeKnown)
-        {
-            error = (ulong)TlsQuicHttp3ErrorCode.H3ClosedCriticalStream;
             return false;
         }
 
