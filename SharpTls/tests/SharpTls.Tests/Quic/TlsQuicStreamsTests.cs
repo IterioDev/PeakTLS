@@ -732,13 +732,13 @@ public sealed class TlsQuicStreamsTests
         var open = Set();
         Assert.True(open.TryReceive(Frame(3, 0, [1, 2]), out _));
         Assert.True(open.TryReceive(Frame(3, 2, []), out _));
-        Assert.False(open.PeerInitiated[0].FinReceived);
+        Assert.False(open.PeerInitiated[0].FinalSizeKnown);
         Assert.Null(open.PeerInitiated[0].FinalSize);
 
         var closed = Set();
         Assert.True(closed.TryReceive(Frame(3, 0, [1, 2]), out _));
         Assert.True(closed.TryReceive(Frame(3, 2, [], fin: true), out _));
-        Assert.True(closed.PeerInitiated[0].FinReceived);
+        Assert.True(closed.PeerInitiated[0].FinalSizeKnown);
         Assert.Equal(2UL, closed.PeerInitiated[0].FinalSize);
         Assert.True(closed.PeerInitiated[0].ReceiveComplete);
         Assert.Equal(new byte[] { 1, 2 }, closed.PeerInitiated[0].Received);
@@ -747,14 +747,14 @@ public sealed class TlsQuicStreamsTests
     [Fact]
     public void AFinThatOvertakesItsOwnStreamDataIsNotCompleteUntilTheGapIsFilled()
     {
-        // s19.8's FIN rides on a frame like any other and may arrive first. FinReceived and
+        // s19.8's FIN rides on a frame like any other and may arrive first. FinalSizeKnown and
         // ReceiveComplete are separate properties for exactly this: knowing where the stream
         // ends is not the same as having everything before that point.
         var streams = Set();
         Assert.True(streams.TryReceive(Frame(3, 2, [3, 4], fin: true), out _));
         var stream = streams.PeerInitiated[0];
 
-        Assert.True(stream.FinReceived);
+        Assert.True(stream.FinalSizeKnown);
         Assert.Equal(4UL, stream.FinalSize);
         Assert.False(stream.ReceiveComplete);
 
@@ -935,7 +935,7 @@ public sealed class TlsQuicStreamsTests
 
         Assert.False(streams.TryReceive(Frame(3, 0, [1, 2], fin: true), out var error));
         Assert.Equal(TlsQuicTransportError.FinalSizeError, error);
-        Assert.False(streams.PeerInitiated[0].FinReceived);
+        Assert.False(streams.PeerInitiated[0].FinalSizeKnown);
     }
 
     [Fact]
