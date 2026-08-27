@@ -444,12 +444,16 @@ internal sealed class TlsQuicHttp3Streams
             return true;
         }
 
-        var delivered = stream.Received;
-        for (var i = state.Copied; i < delivered.Count; i++)
-        {
-            state.Unparsed.Add(delivered[i]);
-        }
-        state.Copied = delivered.Count;
+        // ONE COPY RATHER THAN ONE PER BYTE, over the same list the indexer walked. The
+        // run is whatever the peer's control, encoder or decoder stream delivered since
+        // the last pump - QPACK encoder instructions are the volume case - and AddRange
+        // appends the identical bytes in the identical order, growing Unparsed's backing
+        // array once instead of per byte. TlsQuicHttp3StreamsTests.APeerControlStreamStar
+        // tingWithSettingsIsAcceptedInThePeersOrder reads the result back through the
+        // frame parser.
+        var delivered = stream.ReceivedSpan;
+        state.Unparsed.AddRange(delivered[state.Copied..]);
+        state.Copied = delivered.Length;
 
         if (state.StreamType is null && !TryTakeStreamType(stream, state, out var typeError))
         {

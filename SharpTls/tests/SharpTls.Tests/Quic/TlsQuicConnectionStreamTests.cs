@@ -111,6 +111,54 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(3UL, stream.FinalSize);
     }
 
+    /// <summary>
+    /// WHAT ONE DATAGRAM DELIVERED SURVIVES THE NEXT ONE ARRIVING IN THE SAME BUFFER. The
+    /// connection receives into one array for its whole life rather than a fresh 65527 bytes
+    /// per pump, and the rule that makes that safe is that everything which outlives a pump was
+    /// copied out during it - see PumpOnceAsync. This is that rule as a test rather than as an
+    /// argument.
+    /// <para>THE SECOND DATAGRAM IS SHAPED LIKE THE FIRST, deliberately: same stream, same
+    /// frame form, same length, so its STREAM frame lands on the same bytes of the buffer that
+    /// the first one's did. A delivery that kept a slice instead of a copy would not merely
+    /// risk being overwritten here - it would read back the SECOND payload for both halves,
+    /// and the assertion below names both.</para>
+    /// </summary>
+    [Fact]
+    public async Task BytesDeliveredByOnePumpAreNotDisturbedByTheNextDatagram()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+        await ConfirmedHandshake(connection, serverPeer, cancellation.Token);
+
+        var stream = connection.Streams.OpenBidirectional();
+        connection.Streams.Send(stream, new byte[] { 0xa1 });
+        Assert.True(await connection.SendPendingAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        await serverPeer.SendStreamFramesAsync(
+            [Stream(0, 0, [0xd1, 0xd2, 0xd3])], cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // Read out now, so the assertion after the second pump is against what this pump
+        // reported rather than against whatever the list holds by then.
+        var afterFirst = stream.Received.ToArray();
+        Assert.Equal(new byte[] { 0xd1, 0xd2, 0xd3 }, afterFirst);
+
+        await serverPeer.SendStreamFramesAsync(
+            [Stream(0, 3, [0xe1, 0xe2, 0xe3], fin: true)], cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.Equal(new byte[] { 0xd1, 0xd2, 0xd3, 0xe1, 0xe2, 0xe3 }, stream.Received);
+        Assert.Equal(new byte[] { 0xd1, 0xd2, 0xd3 }, afterFirst);
+        Assert.True(stream.ReceiveComplete);
+    }
+
     [Fact]
     public async Task APeerInitiatedUnidirectionalStreamIsAcceptedAndItsBytesDeliveredInOrder()
     {

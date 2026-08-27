@@ -25,6 +25,47 @@ namespace SharpTls.Tests.Quic;
 public sealed partial class TlsQuicConnectionTests
 {
     /// <summary>
+    /// The refusal message's frame clause, pinned as TEXT. The connection stops building this
+    /// string on every datagram and builds it on the refusal path instead - the frame list and
+    /// its level are what get recorded - so the sentence itself is the thing that can now rot
+    /// unobserved. A frame that is one byte on the wire and a frame carrying a payload must
+    /// both report their ENCODED size, which is what makes the clause worth reading at all:
+    /// "the datagram was too big" plus "CRYPTO 1204" is a diagnosis, and a list of type names
+    /// is not.
+    /// </summary>
+    [Fact]
+    public void TheRefusalsFrameClauseNamesEachFramesTypeAndEncodedSize()
+    {
+        var scratch = new List<byte>();
+
+        // PING is s19.2's one-byte frame; the CRYPTO frame is type, offset, length and 40
+        // bytes of payload. Their sizes are read from the encoder rather than restated here,
+        // because a second copy of the field widths is the duplicate TlsQuicFrames.MeasureFrame
+        // exists to avoid - what this pins is that the clause reports the ENCODED length of
+        // each frame in order, next to the level.
+        var ping = new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping };
+        var crypto = new TlsQuicFrame
+        {
+            RawType = (ulong)TlsQuicFrameType.Crypto,
+            Offset = 0,
+            Data = new byte[40],
+        };
+
+        var described = TlsQuicConnection.DescribeFrames(
+            TlsQuicEncryptionLevel.Handshake, [ping, crypto], scratch);
+
+        Assert.Equal(
+            $"Handshake[Ping {TlsQuicFrames.MeasureFrame(scratch, ping)}, "
+                + $"Crypto {TlsQuicFrames.MeasureFrame(scratch, crypto)}]",
+            described);
+
+        // And the empty list is still a well-formed clause rather than a ragged one, because a
+        // packet built with no frames at all is a builder fault worth seeing plainly.
+        Assert.Equal("Initial[]", TlsQuicConnection.DescribeFrames(
+            TlsQuicEncryptionLevel.Initial, [], scratch));
+    }
+
+    /// <summary>
     /// THE BUG THIS FILE EXISTS FOR. A ceiling above what the interface carries produced an
     /// unbounded stream of identical refusals rather than a search that descended: the throw
     /// came before <c>OnProbeSent</c>, so no outstanding probe was recorded, PROBE_COUNT never

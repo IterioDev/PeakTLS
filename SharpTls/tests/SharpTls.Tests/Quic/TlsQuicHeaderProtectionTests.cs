@@ -36,6 +36,90 @@ public sealed class TlsQuicHeaderProtectionTests
     private const string AppendixA5ProtectedPacketHex =
         "4cfe4189655e5cd55c41f69080575d7999c25a5bfb";
 
+    /// <summary>
+    /// The two ways in produce the same bytes, on the RFC's own vectors, in both directions and
+    /// for both ciphers. A prepared key schedule is the same key with RFC 9001 s5.4's block
+    /// cipher already derived, so the send and receive paths take it instead of re-deriving one
+    /// per packet - and the whole safety of that swap is that the mask cannot move. A schedule
+    /// built from the wrong half of the key, or one whose AES arm carried state between calls,
+    /// would produce a well-formed packet nobody could open.
+    /// </summary>
+    /// <remarks>THE SAME SCHEDULE IS USED TWICE IN EACH DIRECTION, which is the state question:
+    /// ECB has no chaining and the transform behind the AES arm is reused across every packet a
+    /// key ever protects, so the second call over the same sample must give the identical mask.
+    /// A transform that accumulated anything would pass a single-call test and fail here.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void APreparedKeyScheduleProducesTheSameMaskAsTheRawKeyForBothCiphers(bool chacha)
+    {
+        var cipher = chacha
+            ? TlsQuicHeaderProtectionCipher.ChaCha20
+            : TlsQuicHeaderProtectionCipher.Aes;
+        var hpKey = Convert.FromHexString(chacha ? ChaCha20HpKeyHex : ClientHpKeyHex);
+        var pnOffset = chacha ? 1 : 18;
+
+        byte[] Unprotected() => chacha
+            ? Convert.FromHexString(AppendixA5UnprotectedPacketHex)
+            : BuildPacket(AppendixA2UnprotectedHeaderHex, AppendixA2SampleHex);
+
+        byte[] Protected() => chacha
+            ? Convert.FromHexString(AppendixA5ProtectedPacketHex)
+            : BuildPacket(AppendixA2ProtectedHeaderHex, AppendixA2SampleHex);
+
+        using var schedule = new TlsQuicHeaderProtectionKeySchedule(cipher, hpKey);
+
+        var byKey = Unprotected();
+        Assert.True(TlsQuicHeaderProtection.TryApply(cipher, hpKey, byKey, pnOffset));
+
+        var bySchedule = Unprotected();
+        Assert.True(TlsQuicHeaderProtection.TryApply(schedule, bySchedule, pnOffset));
+        Assert.Equal(Convert.ToHexString(byKey), Convert.ToHexString(bySchedule));
+
+        // AND IT IS THE RFC'S ANSWER, not merely a consistent one: two implementations that
+        // agree on the wrong mask would satisfy the comparison above on its own.
+        var again = Unprotected();
+        Assert.True(TlsQuicHeaderProtection.TryApply(schedule, again, pnOffset));
+        Assert.Equal(Convert.ToHexString(Protected()), Convert.ToHexString(again), ignoreCase: true);
+
+        var removedByKey = Protected();
+        Assert.True(TlsQuicHeaderProtection.TryRemove(
+            cipher, hpKey, removedByKey, pnOffset, out var pnLengthByKey));
+
+        var removedBySchedule = Protected();
+        Assert.True(TlsQuicHeaderProtection.TryRemove(
+            schedule, removedBySchedule, pnOffset, out var pnLengthBySchedule));
+
+        Assert.Equal(pnLengthByKey, pnLengthBySchedule);
+        Assert.Equal(
+            Convert.ToHexString(Unprotected()),
+            Convert.ToHexString(removedBySchedule),
+            ignoreCase: true);
+        Assert.Equal(Convert.ToHexString(removedByKey), Convert.ToHexString(removedBySchedule));
+    }
+
+    /// <summary>
+    /// A schedule is key material and says so on disposal: the ChaCha20 arm keeps the key
+    /// itself, so a disposed schedule must refuse rather than mask with whatever the zeroed
+    /// bytes now derive.
+    /// </summary>
+    [Fact]
+    public void ADisposedKeyScheduleRefusesToMask()
+    {
+        var schedule = new TlsQuicHeaderProtectionKeySchedule(
+            TlsQuicHeaderProtectionCipher.Aes, Convert.FromHexString(ClientHpKeyHex));
+        schedule.Dispose();
+
+        // Disposal is idempotent - the owners that zero a key call it on every replacement path
+        // and must not have to track whether one already ran.
+        schedule.Dispose();
+
+        var packet = BuildPacket(AppendixA2UnprotectedHeaderHex, AppendixA2SampleHex);
+        Assert.Throws<ObjectDisposedException>(
+            () => TlsQuicHeaderProtection.TryApply(schedule, packet, packetNumberOffset: 18));
+    }
+
     [Fact]
     public void AppendixA2RemovesProtection()
     {

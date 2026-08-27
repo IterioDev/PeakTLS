@@ -986,11 +986,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private ulong? _highestAcknowledgedApplicationPacketNumber;
     private readonly TlsQuicAckTracker _acks;
 
-    // One send buffer for the life of the connection. Unlike the receive buffer this one is
-    // safe to reuse: nothing parses out of it and nothing aliases it past the SendAsync that
-    // consumes it. The Initial flight is the exception and allocates its own, because
-    // TlsQuicDatagramBuilder.BuildInitialFlight hands back one array per datagram.
+    // One send buffer for the life of the connection. Nothing parses out of it and nothing
+    // aliases it past the SendAsync that consumes it. The Initial flight is the exception and
+    // allocates its own, because TlsQuicDatagramBuilder.BuildInitialFlight hands back one array
+    // per datagram.
     private readonly byte[] _sendBuffer = new byte[DatagramBufferSize];
+
+    // AND ONE RECEIVE BUFFER, WHICH USED TO BE A FRESH 65527-BYTE ARRAY PER PUMP. See
+    // PumpOnceAsync for what makes reuse safe here and what would make it unsafe.
+    private readonly byte[] _receiveBuffer = new byte[DatagramBufferSize];
 
     // Reused by the 1-RTT packing loop so measuring the frames already in hand allocates once
     // per connection rather than once per datagram. See TlsQuicFrames.MeasureFrame.
@@ -1367,7 +1371,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 $"[{origin}: {DescribeCoalescedPackets(payload.Span)}; "
                 + $"budget {DatagramPayloadBudget}"
                 + (origin == nameof(SendAnswerAsync)
-                    ? $"; frames {_lastDatagramFrames}"
+                    ? $"; frames {LastDatagramFrames}"
                     : string.Empty)
                 + "] "
                 + $"The host refused a {payload.Length + overhead}-byte datagram "
@@ -1507,7 +1511,42 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// of a frame that some arm of the builder put there. Four rounds of field reports narrowed
     /// this to one Initial packet and could go no further. Recorded at build time, read only on
     /// the refusal path.</remarks>
-    private string _lastDatagramFrames = "not recorded";
+    /// <remarks>
+    /// <para>RECORDED AS THE INGREDIENTS, FORMATTED ONLY WHEN IT IS READ. What is kept is the
+    /// level and the frame list the builder already holds; the string is built by
+    /// <see cref="LastDatagramFrames"/> on the refusal path and nowhere else. Formatting it at
+    /// build time cost a string.Join and one TlsQuicFrames.MeasureFrame per frame on EVERY
+    /// datagram - a full re-encode of every frame, thrown away unread on every send that
+    /// succeeded, which is all of them until the one that does not.</para>
+    /// <para>THE LIST IS THE BUILDER'S OWN, NOT A COPY, and that is safe for the same reason the
+    /// packet it is handed to is: BuildAnswerDatagram allocates a fresh list per level per pass
+    /// and never writes to one again after handing it over. The frames' Data is
+    /// <see cref="ReadOnlyMemory{T}"/> either way, so no copy would deep-copy the bytes.</para>
+    /// </remarks>
+    private List<TlsQuicFrame>? _lastDatagramFrameList;
+
+    /// <summary>The level of the packet <see cref="_lastDatagramFrameList"/> came from.</summary>
+    private TlsQuicEncryptionLevel _lastDatagramLevel;
+
+    /// <summary>The diagnostic <see cref="_lastDatagramFrameList"/> exists for, built on
+    /// demand. Identical text to what the eager version recorded.</summary>
+    private string LastDatagramFrames =>
+        _lastDatagramFrameList is not { } frames
+            ? "not recorded"
+            : DescribeFrames(_lastDatagramLevel, frames, _frameMeasureScratch);
+
+    /// <summary>The refusal message's frame clause: the level, then every frame as its type and
+    /// its encoded size.</summary>
+    /// <remarks>A SEPARATE METHOD SO THE TEXT HAS A WITNESS. Reaching the refusal path itself
+    /// takes a handshake-level answer datagram that a transport refuses, which is a whole
+    /// scenario; the thing that can silently rot when this became lazy is the SENTENCE, and
+    /// that is what TlsQuicConnectionTests.TheRefusalsFrameClauseNamesEachFramesTypeAndEncoded
+    /// Size pins directly.</remarks>
+    internal static string DescribeFrames(
+        TlsQuicEncryptionLevel level, IReadOnlyList<TlsQuicFrame> frames, List<byte> scratch) =>
+        $"{level}[" + string.Join(
+            ", ",
+            frames.Select(f => $"{f.Type} {TlsQuicFrames.MeasureFrame(scratch, f)}")) + "]";
 
     /// <summary>CRYPTO bytes still owed to a datagram, with the offset they go out at.</summary>
     /// <remarks>A MUTABLE STAND-IN FOR <see cref="TlsQuicCryptoDataEvent"/>, which is public and
@@ -2168,12 +2207,39 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // TlsQuicApplicationSendPath.cs, which is where they moved so both entries share one.
         EnsureSendable();
 
-        // A FRESH BUFFER PER DATAGRAM, NEVER POOLED. TlsQuicPacketReceiver.Receive's contract
-        // (3) states why in full: a pooled buffer handed back and refilled turns every
-        // retained alias into a read of the NEXT datagram, with no compiler error and no
-        // exception. Pooling is an A3-era optimisation and is exactly the change that would
-        // break this silently.
-        var buffer = new byte[DatagramBufferSize];
+        // ONE BUFFER FOR THE LIFE OF THE CONNECTION, WHERE THIS USED TO ALLOCATE 65527 BYTES
+        // PER PUMP - INCLUDING EVERY PUMP THAT TIMED OUT WITH NOTHING TO SHOW FOR IT.
+        //
+        // The hazard the earlier comment here named is real and is not this buffer's. Quoting
+        // TlsQuicPacketReceiver.Receive's contract (3): a buffer handed back and refilled turns
+        // every retained alias into a read of the NEXT datagram, with no compiler error and no
+        // exception. But the frames a handler sees do not alias THIS array - the receiver
+        // decrypts into its own _scratch and every ReadOnlyMemory inside a TlsQuicFrame points
+        // there - and _scratch is a receiver FIELD, already reused across the packets coalesced
+        // into one datagram and across every later Receive. So "copy anything that must outlive
+        // the call" is already the standing rule for frame contents, it is already what the
+        // handler below does, and reusing this array cannot weaken it.
+        //
+        // WHAT THIS ARRAY ALONE BACKS is the still-protected packet: the clear-text header
+        // fields, read before the AEAD runs. Every one of them that outlives the pump is copied
+        // at the point it is taken - the Destination and Source Connection IDs in
+        // AcceptedUnderSection122 and TryReadDestinationConnectionId, the Retry packet's Source
+        // Connection ID and token in HandleRetryAsync - and a Version Negotiation packet yields
+        // decoded uints rather than a slice. firstDestinationConnectionId is a local of this
+        // method and does not survive it. TlsQuicReceiveResult carries counts, a level and a
+        // packet number, no memory.
+        //
+        // A FIELD RATHER THAN ArrayPool, deliberately: a rented array can be handed to code
+        // that outlives the rent, and this one cannot leave the connection that owns it. It is
+        // the same arrangement, and the same one-thread-of-control requirement, as _sendBuffer.
+        //
+        // CHECKED BY MUTATION RATHER THAN BY THE ARGUMENT ABOVE (performed and reverted):
+        // filling this array with 0xFF here, on every pump, before the receive - the worst case
+        // of "the next datagram landed on it" - left the whole suite green, three known
+        // failures and no others. A retained alias anywhere would have read those bytes back.
+        // TlsQuicConnectionTests.BytesDeliveredByOnePumpAreNotDisturbedByTheNextDatagram keeps
+        // a smaller version of that question asked: two same-shaped datagrams, one buffer.
+        var buffer = _receiveBuffer;
 
         var received = await ReceiveWithinDeadlineAsync(buffer, cancellationToken)
             .ConfigureAwait(false);
@@ -3779,13 +3845,41 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         SetLossDetectionTimer();
     }
 
+    // A BINARY SEARCH, AND THE ORDER IT NEEDS IS STRUCTURAL RATHER THAN ASSUMED. RFC 9000
+    // s19.3.1 encodes the ranges as Largest, then a chain of (Gap, ACK Range Length) that walks
+    // DOWNWARDS: TlsQuicAckFrames' decoder computes each next range's Largest as
+    // `smallest - gap - 2` and rejects the frame outright when that would underflow, so a
+    // decoded list is strictly descending and disjoint by construction - there is no legal ACK
+    // frame that produces any other order, and an illegal one produces no list at all.
+    //
+    // WHY IT WAS WORTH CHANGING. The caller runs this once per retained packet, up to
+    // MaxRetainedPacketsPerSpace of them, and the loop it replaces walked every range for each
+    // - the product of two bounded numbers, as the caller's own remark says, but the peer picks
+    // one of the two factors: hundreds of ranges fit in one frame, and a reordering path is
+    // exactly where an ACK carries them. Same answer, log(ranges) comparisons instead of all of
+    // them. Witnessed by
+    // TlsQuicConnectionTests.EveryPacketNamedByAMultiRangeAckIsForgottenAndNoOtherIs.
     private bool Acknowledges(ulong packetNumber)
     {
-        foreach (var range in _ackedRanges)
+        var low = 0;
+        var high = _ackedRanges.Count - 1;
+        while (low <= high)
         {
+            var middle = low + ((high - low) / 2);
+            var range = _ackedRanges[middle];
+
             // TlsQuicAckRange is inclusive at both ends - s19.3.1's ranges name the largest
             // and the smallest packet number they cover, not a half-open interval.
-            if (packetNumber >= range.Smallest && packetNumber <= range.Largest)
+            if (packetNumber > range.Largest)
+            {
+                // Descending order: the bigger numbers are BEFORE this entry, not after it.
+                high = middle - 1;
+            }
+            else if (packetNumber < range.Smallest)
+            {
+                low = middle + 1;
+            }
+            else
             {
                 return true;
             }
@@ -5474,9 +5568,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // COULD NOT: "The CRYPTO frame ... includes ... Offset", so a frame carrying the
             // second half of a message is complete in itself. The remainder stays in the list
             // and SendAnswerAsync builds another datagram for it.
+            // Indexed rather than frames.Skip(spentFrames): the same frames in the same order,
+            // without the LINQ partition object, on a list this method already owns.
             var cryptoBudget = DatagramPayloadBudget - spent;
-            foreach (var repaired in frames.Skip(spentFrames))
+            for (var r = spentFrames; r < frames.Count; r++)
             {
+                var repaired = frames[r];
                 cryptoBudget -= TlsQuicFrames.MeasureFrame(_frameMeasureScratch, repaired);
             }
 
@@ -5530,16 +5627,29 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);
 
-            _lastDatagramFrames = $"{level}[" + string.Join(
-                ", ",
-                frames.Select(f =>
-                    $"{f.Type} {TlsQuicFrames.MeasureFrame(_frameMeasureScratch, f)}")) + "]";
+            // THE INGREDIENTS, NOT THE SENTENCE. See _lastDatagramFrameList: the string this
+            // used to build here re-encoded every frame to measure it and was read only on the
+            // SocketError.MessageSize path, so on every datagram that left successfully it was
+            // work for a message nobody saw.
+            _lastDatagramLevel = level;
+            _lastDatagramFrameList = frames;
 
             // WHAT THIS PACKET COSTS THE DATAGRAM, carried to the next level of the loop so
             // that two coalesced packets cannot each spend the whole budget.
-            spentAcrossLevels += LongHeaderPacketOverheadBound;
-            foreach (var built in frames)
+            //
+            // RESUMED FROM `spent` RATHER THAN RECOMPUTED FROM ZERO, and the two are the same
+            // number by construction: `spent` was set to this same spentAcrossLevels plus the
+            // same LongHeaderPacketOverheadBound plus the encoded size of the first
+            // `spentFrames` frames, and nothing removes a frame from the list between there and
+            // here. So the only frames still to be measured are the ones appended after that
+            // point - the repairs and this level's CRYPTO - and the loop below starts at
+            // spentFrames instead of re-encoding the ACK and whatever preceded it a second time.
+            // TlsQuicFrames.MeasureFrame measures BY ENCODING, deliberately (see its remarks),
+            // so a second pass over a frame is a second full encode of it.
+            spentAcrossLevels = spent;
+            for (var b = spentFrames; b < frames.Count; b++)
             {
+                var built = frames[b];
                 spentAcrossLevels += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, built);
             }
 

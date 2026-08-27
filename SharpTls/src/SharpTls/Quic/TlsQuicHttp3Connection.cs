@@ -849,8 +849,8 @@ internal sealed class TlsQuicHttp3Connection
             // stopped stream and answers s19.5's RESET_STREAM. A caller that needs to know its
             // request body was cut short reads TlsQuicStream.SendStopped and
             // StopSendingErrorCode on the stream TryOpenRequest handed back.
-            var delivered = exchange.Stream.Received;
-            var fresh = delivered.Count - exchange.Consumed;
+            var delivered = exchange.Stream.ReceivedSpan;
+            var fresh = delivered.Length - exchange.Consumed;
 
             // s19.8's FIN and the last byte can arrive in the same STREAM frame or in two, so
             // "the stream ended" is a separate question from "there are new bytes".
@@ -903,12 +903,16 @@ internal sealed class TlsQuicHttp3Connection
                 continue;
             }
 
+            // ONE COPY RATHER THAN ONE PER BYTE. The run is every byte of this response
+            // that has not been presented yet, so the indexer walk this replaces was the
+            // per-byte loop on the download path. Same bytes, same order, same fresh
+            // array - CopyTo over a span of the stream's own list instead of `fresh`
+            // interface calls. The array stays, because TryRead below re-enters the
+            // response reader and a span over the stream's list must not outlive the
+            // statement that takes it.
             var chunk = new byte[fresh];
-            for (var i = 0; i < fresh; i++)
-            {
-                chunk[i] = delivered[exchange.Consumed + i];
-            }
-            exchange.Consumed = delivered.Count;
+            delivered.Slice(exchange.Consumed, fresh).CopyTo(chunk);
+            exchange.Consumed = delivered.Length;
 
             if (!exchange.Response.TryRead(chunk, endOfStream, out var responseError))
             {

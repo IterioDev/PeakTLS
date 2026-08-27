@@ -1620,10 +1620,14 @@ internal sealed class TlsQuicHttp3Response
             return Fail(FrameUnexpected, out errorCode);
         }
 
-        foreach (var b in bytes)
-        {
-            _pending.Add(b);
-        }
+        // AddRange RATHER THAN A PER-BYTE Add LOOP. This is the response body's
+        // arrival path - every byte of every download passes through here once - and
+        // AddRange grows the backing array once and memcpys where Add re-checks
+        // capacity per byte. The list's contents are identical either way, which is
+        // what the span taken immediately below is parsed from and what
+        // TlsQuicHttp3RequestTests.EveryPossibleSplitPointYieldsTheSameResponse
+        // reads back at every arrival boundary.
+        _pending.AddRange(bytes);
 
         var buffer = CollectionsMarshal.AsSpan(_pending);
         var offset = 0;
@@ -1774,10 +1778,12 @@ internal sealed class TlsQuicHttp3Response
                     return false;
                 }
 
-                foreach (var b in payload)
-                {
-                    _body.Add(b);
-                }
+                // AddRange RATHER THAN A PER-BYTE Add LOOP: the accumulated content
+                // of every DATA frame, appended in the same order, one bulk copy per
+                // frame instead of one capacity check per byte. Read back whole by
+                // TlsQuicHttp3RequestTests.ALargeBodyRoundTripsThroughTheFrameParser
+                // ByteForByte.
+                _body.AddRange(payload);
 
                 return true;
 

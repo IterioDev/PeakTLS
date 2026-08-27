@@ -220,6 +220,63 @@ public sealed class TlsQuicStreamsTests
         Assert.False(TlsQuicStreamFrames.IsFin(frames[0].RawType));
     }
 
+    /// <summary>
+    /// THE CURSOR AND THE SPLIT, TOGETHER. The budgeted take walks the queue with an index and
+    /// cuts the consumed prefix off once at the end rather than removing each frame as it goes -
+    /// and the head it cannot fit is not consumed at all, it is REWRITTEN in place with the
+    /// remainder of its bytes. So the cut has to stop short of that entry, and it is the one
+    /// place the two mechanisms can disagree: a cut one too far swallows the remainder and the
+    /// body goes out with a hole in it, a cut one too short re-sends frames that already left.
+    /// Neither is visible in the TAKEN frames alone, which is why the assertion that matters is
+    /// the SECOND take.
+    /// </summary>
+    [Fact]
+    public void TakePendingFramesSplitsTheHeadItCannotFitAndKeepsTheRemainderQueued()
+    {
+        var streams = Set();
+        var stream = streams.OpenUnidirectional();
+
+        // Four writes, so four queued frames at offsets 0, 300, 600 and 900. Separate Send
+        // calls rather than one large one, because the segmentation inside Drain sizes frames
+        // against the datagram and this test is about the QUEUE, not about how it was filled.
+        for (var i = 0; i < 4; i++)
+        {
+            streams.Send(stream, new byte[300]);
+        }
+
+        // A budget that admits the first two whole and leaves a little room the third cannot
+        // fill: two frames are a little over 600 bytes with their s19.8 headers, three are over
+        // 900, so 650 lands between them with room to spare either side. The exact split point
+        // is read back below rather than restated - what is pinned is where the bytes go, not
+        // how wide a varint came out.
+        var first = streams.TakePendingFrames(650);
+        Assert.Equal(3, first.Count);
+        Assert.Equal(0UL, first[0].Offset);
+        Assert.Equal(300, first[0].Data.Length);
+        Assert.Equal(300UL, first[1].Offset);
+        Assert.Equal(300, first[1].Data.Length);
+
+        // The third is the split head: it starts where the third write did and carries less
+        // than the whole write.
+        Assert.Equal(600UL, first[2].Offset);
+        var head = first[2].Data.Length;
+        Assert.InRange(head, 1, 299);
+
+        // THE REMAINDER SURVIVED THE CUT, AT THE FRONT, WITH THE RIGHT OFFSET AND THE RIGHT
+        // BYTES - and the fourth frame behind it is untouched. A generous budget now, so what
+        // comes back is everything that was left rather than another split.
+        var rest = streams.TakePendingFrames(100_000);
+        Assert.Equal(2, rest.Count);
+        Assert.Equal(600UL + (ulong)head, rest[0].Offset);
+        Assert.Equal(300 - head, rest[0].Data.Length);
+        Assert.Equal(900UL, rest[1].Offset);
+        Assert.Equal(300, rest[1].Data.Length);
+
+        // Every byte of all four writes went out exactly once.
+        Assert.Equal(1200, first.Sum(f => f.Data.Length) + rest.Sum(f => f.Data.Length));
+        Assert.Empty(streams.TakePendingFrames(100_000));
+    }
+
     [Fact]
     public void AZeroLengthStreamFrameIsQueuedRatherThanSkipped()
     {

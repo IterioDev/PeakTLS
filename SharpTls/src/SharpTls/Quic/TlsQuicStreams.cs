@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace SharpTls.Quic;
 
 // ============================================================================
@@ -767,6 +769,20 @@ internal sealed class TlsQuicStream
     /// <summary>Gets the bytes delivered so far, in stream order. Bytes that arrived out of
     /// order are not here until the gap before them is filled.</summary>
     internal IReadOnlyList<byte> Received => _delivered;
+
+    /// <summary>The same bytes as <see cref="Received"/>, as a span, for the readers that copy
+    /// a run of them out.</summary>
+    /// <remarks>
+    /// <para>WHY BOTH FORMS EXIST. <see cref="Received"/> is what the tests assert equality
+    /// against and what a caller enumerates; this is what the two readers that copy a RUN of
+    /// delivered bytes need, because an indexer walk through the interface is one virtual call
+    /// and one bounds check per byte and this run is every byte of every response body. The
+    /// list is the same list, so neither form can disagree with the other.</para>
+    /// <para>VALID UNTIL THE NEXT DELIVERY, like any span over a list: <c>TryReceive</c>
+    /// appends to <c>_delivered</c> and that can move the backing array. Copy out before
+    /// receiving again - both callers do, in the same statement they take the span.</para>
+    /// </remarks>
+    internal ReadOnlySpan<byte> ReceivedSpan => CollectionsMarshal.AsSpan(_delivered);
 
     /// <summary>Gets the RFC 9000 s19.4 Application Protocol Error Code the peer abandoned its
     /// sending half with, or <see langword="null"/> if no RESET_STREAM has arrived.</summary>
@@ -2071,12 +2087,22 @@ internal sealed class TlsQuicStreamSet
 
         // Repairs first, then new data. One loop over the two queues in that order, so a
         // repair can never be left behind while newer data goes out ahead of it.
+        //
+        // THE CONSUMED PREFIX IS DROPPED ONCE, NOT ONE FRAME AT A TIME. RemoveAt(0) shifts
+        // every frame still queued behind it, so taking n frames off a queue of m cost n*m
+        // element moves - and m is one frame per ~1200 bytes of body, so a large upload spent
+        // the flush shuffling its own backlog. A cursor plus one RemoveRange moves each
+        // surviving frame exactly once. The queue's ORDER and CONTENTS after the call are the
+        // same either way. The split arm below is the one place the cursor and the queue can
+        // disagree, and TlsQuicStreamsTests.TakePendingFramesSplitsTheHeadItCannotFitAndKeepsT
+        // heRemainderQueued reads the queue back across a split to pin it.
         for (var source = 0; source < 2; source++)
         {
             var queue = source == 0 ? _repairs : _pending;
-            while (queue.Count > 0)
+            var consumed = 0;
+            while (consumed < queue.Count)
             {
-                var size = TlsQuicFrames.MeasureFrame(_measureScratch, queue[0]);
+                var size = TlsQuicFrames.MeasureFrame(_measureScratch, queue[consumed]);
                 if (spent + size > payloadBudget)
                 {
                     // s19.8's explicit Offset makes the tail of a stream a frame in its own
@@ -2084,7 +2110,13 @@ internal sealed class TlsQuicStreamSet
                     // keeps its place at the front of the queue. The datagram is full by
                     // construction afterwards - the split took every byte that fitted - so
                     // there is nothing left to measure.
-                    if (TrySplitStreamHead(queue, size, payloadBudget - spent, out var head))
+                    //
+                    // AND THE SPLIT REWRITES THE ENTRY RATHER THAN CONSUMING IT, which is why
+                    // `consumed` does not advance here and the cut below stops short of it:
+                    // the remainder must survive at the front of the queue. The escape arm is
+                    // the opposite - it takes the frame whole - so it advances the cursor, and
+                    // the third case takes nothing and leaves the head where it is.
+                    if (TrySplitStreamHead(queue, consumed, size, payloadBudget - spent, out var head))
                     {
                         taken.Add(head);
                         if (source == 0)
@@ -2099,32 +2131,39 @@ internal sealed class TlsQuicStreamSet
                         // queue drains, and the send path names it. Reached only when nothing
                         // else has been taken, so a datagram that is already carrying frames
                         // never grows past its budget.
-                        taken.Add(queue[0]);
-                        queue.RemoveAt(0);
+                        taken.Add(queue[consumed]);
+                        consumed++;
                         if (source == 0)
                         {
                             RepairsSent++;
                         }
                     }
 
+                    queue.RemoveRange(0, consumed);
                     return taken;
                 }
 
                 spent += size;
-                taken.Add(queue[0]);
-                queue.RemoveAt(0);
+                taken.Add(queue[consumed]);
+                consumed++;
                 if (source == 0)
                 {
                     RepairsSent++;
                 }
             }
+
+            queue.RemoveRange(0, consumed);
         }
 
         return taken;
     }
 
-    // Cuts the head of `queue` down to `room` bytes if it is an s19.8 STREAM frame with data,
-    // leaving the remainder at the front of the queue. Reports whether it did.
+    // Cuts the frame at `index` down to `room` bytes if it is an s19.8 STREAM frame with data,
+    // leaving the remainder in that same slot. Reports whether it did.
+    //
+    // INDEXED RATHER THAN FIXED AT ZERO because the caller walks its queue with a cursor and
+    // drops the consumed prefix in one go; `index` is where that cursor stopped, and the entry
+    // this rewrites is the first one the cut must NOT take.
     //
     // THE FIN GOES WITH THE REMAINDER AND NEVER WITH THE HEAD, which is TryTakeSendable's rule
     // stated a second time because this is a second place a write gets split: s19.8's FIN
@@ -2136,11 +2175,11 @@ internal sealed class TlsQuicStreamSet
     // stream. That is silent corruption rather than a size error, because a peer reassembles
     // by offset, which is why it is stated rather than left to the caller to notice.
     private bool TrySplitStreamHead(
-        List<TlsQuicFrame> queue, int size, int room, out TlsQuicFrame head)
+        List<TlsQuicFrame> queue, int index, int size, int room, out TlsQuicFrame head)
     {
         head = default;
 
-        var frame = queue[0];
+        var frame = queue[index];
         if (frame.Type != TlsQuicFrameType.Stream || frame.Data.Length == 0)
         {
             return false;
@@ -2162,7 +2201,7 @@ internal sealed class TlsQuicStreamSet
             Data = frame.Data[..take],
         };
 
-        queue[0] = frame with
+        queue[index] = frame with
         {
             RawType = frame.RawType | TlsQuicStreamFrames.OffsetBit,
             Offset = frame.Offset + (ulong)take,
@@ -2559,7 +2598,34 @@ internal sealed class TlsQuicStreamSet
 
         _dataBlockedSignalled = false;
 
-        foreach (var stream in _streams.Values.OrderBy(each => each.Id).ToArray())
+        // NOTHING BLOCKED, NOTHING TO ORDER. A MAX_DATA arrives whenever the peer feels like
+        // raising the limit, and the usual case is that no stream was waiting on it - so the
+        // sort and the snapshot below are skipped rather than paid for on every frame. This is
+        // a guard on work, not on behaviour: the loop it guards does nothing when no stream
+        // answers HasBlockedData.
+        var blocked = false;
+        foreach (var stream in _streams.Values)
+        {
+            if (stream.HasBlockedData)
+            {
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked)
+        {
+            return;
+        }
+
+        // ORDERED BY STREAM ID, WHICH DECIDES FRAME ORDER ON THE WIRE and is therefore not an
+        // implementation detail to leave to the dictionary's bucket layout.
+        //
+        // NO .ToArray() AFTER THE OrderBy, and it was never doing anything: OrderBy buffers its
+        // whole source before it yields the first element, so the enumeration below already
+        // walks a private snapshot and Drain may add streams underneath it without disturbing
+        // this loop. The extra array was a second copy of that snapshot.
+        foreach (var stream in _streams.Values.OrderBy(each => each.Id))
         {
             if (stream.HasBlockedData)
             {
