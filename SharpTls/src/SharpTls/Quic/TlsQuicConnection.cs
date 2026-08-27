@@ -1367,7 +1367,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 $"[{origin}: {DescribeCoalescedPackets(payload.Span)}; "
                 + $"budget {DatagramPayloadBudget}"
                 + (origin == nameof(SendAnswerAsync)
-                    ? $"; frames {_lastDatagramFrames}"
+                    ? $"; frames {LastDatagramFrames}"
                     : string.Empty)
                 + "] "
                 + $"The host refused a {payload.Length + overhead}-byte datagram "
@@ -1507,7 +1507,42 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// of a frame that some arm of the builder put there. Four rounds of field reports narrowed
     /// this to one Initial packet and could go no further. Recorded at build time, read only on
     /// the refusal path.</remarks>
-    private string _lastDatagramFrames = "not recorded";
+    /// <remarks>
+    /// <para>RECORDED AS THE INGREDIENTS, FORMATTED ONLY WHEN IT IS READ. What is kept is the
+    /// level and the frame list the builder already holds; the string is built by
+    /// <see cref="LastDatagramFrames"/> on the refusal path and nowhere else. Formatting it at
+    /// build time cost a string.Join and one TlsQuicFrames.MeasureFrame per frame on EVERY
+    /// datagram - a full re-encode of every frame, thrown away unread on every send that
+    /// succeeded, which is all of them until the one that does not.</para>
+    /// <para>THE LIST IS THE BUILDER'S OWN, NOT A COPY, and that is safe for the same reason the
+    /// packet it is handed to is: BuildAnswerDatagram allocates a fresh list per level per pass
+    /// and never writes to one again after handing it over. The frames' Data is
+    /// <see cref="ReadOnlyMemory{T}"/> either way, so no copy would deep-copy the bytes.</para>
+    /// </remarks>
+    private List<TlsQuicFrame>? _lastDatagramFrameList;
+
+    /// <summary>The level of the packet <see cref="_lastDatagramFrameList"/> came from.</summary>
+    private TlsQuicEncryptionLevel _lastDatagramLevel;
+
+    /// <summary>The diagnostic <see cref="_lastDatagramFrameList"/> exists for, built on
+    /// demand. Identical text to what the eager version recorded.</summary>
+    private string LastDatagramFrames =>
+        _lastDatagramFrameList is not { } frames
+            ? "not recorded"
+            : DescribeFrames(_lastDatagramLevel, frames, _frameMeasureScratch);
+
+    /// <summary>The refusal message's frame clause: the level, then every frame as its type and
+    /// its encoded size.</summary>
+    /// <remarks>A SEPARATE METHOD SO THE TEXT HAS A WITNESS. Reaching the refusal path itself
+    /// takes a handshake-level answer datagram that a transport refuses, which is a whole
+    /// scenario; the thing that can silently rot when this became lazy is the SENTENCE, and
+    /// that is what TlsQuicConnectionTests.TheRefusalsFrameClauseNamesEachFramesTypeAndEncoded
+    /// Size pins directly.</remarks>
+    internal static string DescribeFrames(
+        TlsQuicEncryptionLevel level, IReadOnlyList<TlsQuicFrame> frames, List<byte> scratch) =>
+        $"{level}[" + string.Join(
+            ", ",
+            frames.Select(f => $"{f.Type} {TlsQuicFrames.MeasureFrame(scratch, f)}")) + "]";
 
     /// <summary>CRYPTO bytes still owed to a datagram, with the offset they go out at.</summary>
     /// <remarks>A MUTABLE STAND-IN FOR <see cref="TlsQuicCryptoDataEvent"/>, which is public and
@@ -5530,10 +5565,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);
 
-            _lastDatagramFrames = $"{level}[" + string.Join(
-                ", ",
-                frames.Select(f =>
-                    $"{f.Type} {TlsQuicFrames.MeasureFrame(_frameMeasureScratch, f)}")) + "]";
+            // THE INGREDIENTS, NOT THE SENTENCE. See _lastDatagramFrameList: the string this
+            // used to build here re-encoded every frame to measure it and was read only on the
+            // SocketError.MessageSize path, so on every datagram that left successfully it was
+            // work for a message nobody saw.
+            _lastDatagramLevel = level;
+            _lastDatagramFrameList = frames;
 
             // WHAT THIS PACKET COSTS THE DATAGRAM, carried to the next level of the loop so
             // that two coalesced packets cannot each spend the whole budget.
