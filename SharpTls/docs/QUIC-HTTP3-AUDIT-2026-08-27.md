@@ -43,7 +43,7 @@ Nothing has been changed. This is the pre-fix report.
 | 13 | **Low-Medium** | `EncodedLength` can return 5 for a packet-number field capped at 4 | `TlsQuicPacketNumber.cs:12-49` |
 | 14 | **Low-Medium** | CONNECTION_CLOSE-only packets counted as in-flight | `TlsQuicPacketBuilder.cs:847-857` |
 | 15 | **Low** | Idle timeout does not apply RFC 9000 s10.1's `max(3×PTO, …)` floor | `TlsQuicConnection.cs:5716` |
-| 16 | **Low** | GOAWAY recorded but never enforced | `TlsQuicHttp3Streams.cs:841-863` |
+| 16 | ~~Low~~ **WITHDRAWN** | ~~GOAWAY recorded but never enforced~~ — false positive, see below | `TlsQuicHttp3Streams.cs:841-863` |
 | 17 | **Low** | CRYPTO reassembler allocates its whole ceiling on one far-offset frame | `TlsQuicCryptoStreamReassembler.cs:100-111` |
 | P1–P7 | Perf | See the performance section | various |
 
@@ -362,12 +362,34 @@ practice (the connection is closing) but it diverges from the recovery model and
 s10.1 requires the effective period to be `max(idle_timeout, 3 × PTO)`, so a connection with a small
 advertised `max_idle_timeout` and a high RTT closes earlier than the peer expects.
 
-## 16. Low — GOAWAY recorded but never enforced
+## 16. WITHDRAWN — GOAWAY *is* enforced
+
+**This finding was wrong.** It is kept here rather than deleted, because the way it was reached is
+worth not repeating.
 
 `TryAcceptGoaway` validates the identifier and stores `PeerGoawayStreamId`
-(`TlsQuicHttp3Streams.cs:841-863`) correctly, including the monotonic-decrease rule. Nothing consults
-it: requests continue to be opened on stream IDs at or above the GOAWAY point, which the server will
-reject.
+(`TlsQuicHttp3Streams.cs:841-863`), including RFC 9114 s5.2's rule that a later GOAWAY may not name a
+larger identifier. The audit then searched for consumers of `PeerGoawayStreamId` **within the file it
+was reading**, found none, and concluded nothing enforced it.
+
+`TlsQuicHttp3Connection.TryOpenRequest` enforces it, at `:620-624`, and says so in a comment written
+against exactly this misreading:
+
+> s5.2: "Endpoints MUST NOT initiate new requests or promise new pushes on the connection after
+> receipt of a GOAWAY frame from the peer." NO COMPARISON AGAINST THE IDENTIFIER HERE — the MUST NOT
+> is unconditional, and the identifier bounds which ALREADY-SENT requests were processed (see
+> `IsRejectedByGoaway`), not which new ones may be opened.
+
+`IsRejectedByGoaway` (`:724`) separately carries the `>=` rule for requests already in flight. Two
+tests pin both halves: `AGoawayForbidsANewRequest` and `AGoawayOfZeroStillForbidsANewRequest`, the
+second of which exists specifically to kill the mutant this finding proposed.
+
+The fix this report originally recommended — refusing stream IDs at or above the identifier — would
+have been a **regression**, weakening an unconditional MUST NOT into a comparison. The implementer
+assigned to it declined to make the change and was right to.
+
+Lesson for the next sweep: a stored value with no consumer *in the file that stores it* is not an
+unenforced value. Grep the whole namespace before calling something dead.
 
 ## 17. Low — CRYPTO reassembler allocates its ceiling on one far-offset frame
 
