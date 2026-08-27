@@ -645,6 +645,73 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(TlsQuicEncryptionLevel.Application, close.Level);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 9's SECOND ARM, AND THE ONLY WITNESS FOR THE CODE TRAVELLING AT ALL. The
+    /// three arms above and below it can all be satisfied by a close that carries
+    /// PROTOCOL_VIOLATION, because that is what the arms themselves raise; this one cannot. RFC
+    /// 9000 s19.4: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST
+    /// terminate the connection with error STREAM_STATE_ERROR", and s20.1 numbers that 0x05 -
+    /// three away from PROTOCOL_VIOLATION's 0x0a.
+    /// <para>WHY THAT MATTERS: <c>TlsQuicStreamSet</c> chooses the code, deep inside the stream
+    /// layer, and the refusal that reaches <c>PumpOnceAsync</c> used to be a string with the
+    /// code's NAME interpolated into it. A name inside a message cannot be put on the wire, so
+    /// the close fell back to PROTOCOL_VIOLATION and told the peer the wrong thing about its own
+    /// mistake. <c>StreamFailureCode</c> is the field that carries it out, and reverting the
+    /// three <c>StreamFailureCode ??= error;</c> lines that set it turns the two assertions at
+    /// the end of this test red while every other test stays green.</para>
+    /// <para>STREAM 2 IS A CLIENT-INITIATED UNIDIRECTIONAL STREAM - RFC 9000 s2.1 Table 1 - so
+    /// it is send-only from this endpoint's side whether or not it was ever opened, which is why
+    /// the frame needs no setup.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARefusedStreamFrameClosesWithTheCodeTheStreamLayerChoseNotAFallback()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // Drained for the reason AfterConfirmationTheCloseGoesOutInAOneRttPacketAsSection1023
+        // Requires gives: the pump above answered HANDSHAKE_DONE with a 1-RTT ACK, and
+        // LoopbackQuicPeer.PumpOnceAsync reads ONE datagram per call.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Null(serverPeer.LastConnectionClose);
+
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.ResetStream,
+                    StreamId = 2,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("StreamStateError", error.Message, StringComparison.Ordinal);
+
+        // s20.1 STREAM_STATE_ERROR (0x05): "An endpoint received a frame for a stream that was
+        // not in a state that permitted that frame." NOT 0x0a - a fallback would say the peer
+        // committed a generic compliance error rather than the specific one s19.4 names.
+        Assert.Equal(TlsQuicTransportError.StreamStateError, connection.ClosedWith);
+
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        var close = Assert.NotNull(serverPeer.LastConnectionClose);
+        Assert.Equal((ulong)TlsQuicTransportError.StreamStateError, close.ErrorCode);
+    }
+
     [Fact]
     public async Task APeerConnectionCloseEntersDrainingAndStopsSendingAndDelivering()
     {
