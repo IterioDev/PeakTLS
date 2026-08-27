@@ -1980,6 +1980,13 @@ internal sealed partial class TlsQuicConnection
                 + $"(RFC 9000 s19.8), so it is closing with {error}: stream {frame.StreamId}, "
                 + $"offset {frame.Offset}, {frame.Data.Length} byte(s), FIN "
                 + $"{TlsQuicStreamFrames.IsFin(frame.RawType)}.";
+
+            // AND THE CODE ITSELF, NOT ONLY ITS NAME IN THE TEXT - audit finding 9. The message
+            // above already said which s20.1 code this is; PumpOnceAsync now has to SEND it in
+            // an RFC 9000 s10.2 CONNECTION_CLOSE, and a code that exists only inside an
+            // interpolated string cannot be put on the wire. Same slot discipline as the line
+            // above it: first failure wins.
+            StreamFailureCode ??= error;
         }
     }
 
@@ -2002,6 +2009,9 @@ internal sealed partial class TlsQuicConnection
             failure ??= $"The peer sent a {frame.Type} frame for a stream whose direction "
                 + "forbids it (RFC 9000 s19.4, s19.5 and s19.13), so it is closing with "
                 + $"{error}: stream {frame.StreamId}.";
+
+            // The code the close carries; see ReceiveStreamFrame's note on the same line.
+            StreamFailureCode ??= error;
         }
     }
 
@@ -2040,6 +2050,9 @@ internal sealed partial class TlsQuicConnection
             failure ??= "The peer sent a MAX_STREAM_DATA frame this connection cannot accept "
                 + $"(RFC 9000 s19.10), so it is closing with {error}: stream "
                 + $"{frame.StreamId}, maximum stream data {frame.MaximumStreamData}.";
+
+            // The code the close carries; see ReceiveStreamFrame's note on the same line.
+            StreamFailureCode ??= error;
         }
     }
 }

@@ -1716,6 +1716,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                     ? "carried no max_datagram_frame_size transport parameter"
                     : "advertised max_datagram_frame_size = 0")
                 + ", so s3 makes it a PROTOCOL_VIOLATION.";
+
+            // THE CODE, BESIDE THE MESSAGE THAT NAMES IT. RFC 9221 s3: "An endpoint that
+            // receives a DATAGRAM frame when it has not indicated support via the transport
+            // parameter MUST terminate the connection with an error of type
+            // PROTOCOL_VIOLATION." Set here so that s10.2's close carries what this arm's prose
+            // argues for rather than the fallback PumpOnceAsync would otherwise apply.
+            ProtocolFailureCode ??= TlsQuicTransportError.ProtocolViolation;
             return;
         }
 
@@ -1728,6 +1735,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             failure ??= "The peer sent a DATAGRAM frame (RFC 9221 s4) of "
                 + $"{frame.EncodedLength} byte(s) against the max_datagram_frame_size of "
                 + $"{limit} this endpoint advertised, so s3 makes it a PROTOCOL_VIOLATION.";
+
+            // s3's other sentence, same code: "An endpoint that receives a DATAGRAM frame that
+            // is larger than the value it sent in its max_datagram_frame_size transport
+            // parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION."
+            ProtocolFailureCode ??= TlsQuicTransportError.ProtocolViolation;
             return;
         }
 
@@ -2427,6 +2439,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                     + "issued: its source connection ID is "
                                     + $"{_sourceConnectionId.Length} byte(s) long and no "
                                     + "NEW_CONNECTION_ID frame is ever sent.";
+
+                                // s19.16 names ONE code for all three readings above - "MUST be
+                                // treated as a connection error of type PROTOCOL_VIOLATION" for
+                                // the zero-length case and for a sequence number never sent,
+                                // and "MAY treat this as a connection error of type
+                                // PROTOCOL_VIOLATION" for the one that names this packet's own
+                                // Destination Connection ID. Written here rather than left to
+                                // the close's fallback, so that the code the peer is told is
+                                // the code this arm's prose argues for.
+                                ProtocolFailureCode ??=
+                                    TlsQuicTransportError.ProtocolViolation;
                                 break;
 
                             default:
@@ -2453,30 +2476,82 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
                 ThrowIfIntegrityLimitReached();
 
+                // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
+                // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
+                // can be used after the handshake is complete or during the handshake ... An
+                // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
+                // connection immediately." All three used to throw locally with the right s20.1
+                // code spelled into the message text and no frame on the wire at all, which
+                // left the peer to discover the failure by idle timeout - s10.1's period rather
+                // than one datagram. ProtocolFailureCode was assigned and never read; it is now
+                // what the close carries.
+                //
+                // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
+                // paragraph is why both happen rather than one: "An immediate close ... causes
+                // all streams to become immediately closed; open streams can be assumed to be
+                // implicitly reset." The local exception is how this endpoint learns; the frame
+                // is how the peer does, and a peer told nothing waits out s10.1's idle period.
+                //
+                // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
+                // without sending when the connection is already draining or was never started,
+                // and BuildCloseDatagram returns 0 rather than throwing when no level has write
+                // keys or the code will not encode - so every "cannot tell the peer" case still
+                // ends in s10.2's closing state and still reaches the throw below. What is
+                // deliberately NOT swallowed is a transport failure out of the send: that is
+                // the IOException any other send raises, and hiding it behind the protocol
+                // error would lose the one fact that says the socket rather than the peer is
+                // the problem.
                 if (frameError is { } malformed)
                 {
-                    // A CONNECTION-LEVEL FAILURE, NOT A LOOP KILL. Task 9b turns this into an
-                    // RFC 9000 s10.2 immediate close carrying the code; until then a poisoned
-                    // one-shot attempt that throws is what a close would have achieved minus
-                    // the frame on the wire.
-                    throw new InvalidOperationException(
-                        $"The peer sent a malformed ACK frame: {malformed}.");
+                    var message = $"The peer sent a malformed ACK frame: {malformed}.";
+                    await CloseAsync(malformed, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
                 }
 
                 // The same connection-level failure, for the same reason, one frame type
-                // along. Task 14e.
+                // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
+                // the message chose it - and StreamFailureCode is how it travels here.
                 if (streamFailure is { } badStream)
                 {
+                    await CloseAsync(
+                            StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            badStream,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     throw new InvalidOperationException(badStream);
                 }
 
                 // And once more for the frames whose rule is not about a stream at all. Kept
                 // separate from streamFailure rather than folded into it because the two carry
-                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and task
-                // 9b's immediate close will need to tell them apart.
+                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
+                // immediate close above is what needed them told apart.
                 if (protocolFailure is { } violation)
                 {
+                    await CloseAsync(
+                            ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                            violation,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     throw new InvalidOperationException(violation);
+                }
+
+                // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
+                // AccountForPacket. Hoisted out of that method rather than made async there,
+                // because everything else it does is counters and s10.2's close is not one.
+                // AUTHENTICATED, which is what makes ending the attempt on it safe: per
+                // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
+                // AEAD-opened packet, so no off-path sender can reach this line. That is the
+                // whole of the distinction AccountForPacket's own remarks draw between this and
+                // a failed decrypt.
+                if (outcome.CloseError is { } closeError)
+                {
+                    var message =
+                        $"The peer's packet requires the connection to close with {closeError}: "
+                        + $"{outcome.CloseReason}";
+                    await CloseAsync(closeError, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new InvalidOperationException(message);
                 }
 
                 AccountForPacket(outcome);
@@ -3098,19 +3173,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // into DeadlineExceeded's message. A non-zero DiscardedForMissingKeys there is the
     // coalescing stall PumpOnceAsync's remarks describe, told apart from a packet that simply
     // did not open, exactly as before.
+    // NOTHING HERE THROWS ANY MORE. The CloseError arm moved to PumpOnceAsync when audit
+    // finding 9 turned it into RFC 9000 s10.2's immediate close, which is a send and therefore
+    // an await; what is left is counters, and counters have no verdict to reach.
     private void AccountForPacket(TlsQuicReceiveResult outcome)
     {
-        if (outcome.CloseError is { } closeError)
-        {
-            // THE ONE THING HERE THAT STILL THROWS, AND THE ONE THING HERE THAT IS
-            // AUTHENTICATED: per Receive, CloseError is set only by a check that ran on an
-            // AEAD-authenticated packet, so no off-path sender can reach it. Task 9b turns it
-            // into an s10.2 immediate close.
-            throw new InvalidOperationException(
-                $"The peer's packet requires the connection to close with {closeError}: "
-                    + $"{outcome.CloseReason}");
-        }
-
         DiscardedPackets += outcome.Discarded;
         DiscardedForMissingKeys += outcome.DiscardedForMissingKeys;
         if (outcome.Unprocessed != TlsQuicUnprocessedPacket.None)
@@ -3120,6 +3187,20 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             UnprocessedPackets++;
         }
     }
+
+    /// <summary>The RFC 9000 s20.1 code the last refused STREAM, MAX_STREAM_DATA or
+    /// stream-state frame chose, carried out of the refusal so that s10.2's close can name
+    /// it.</summary>
+    /// <remarks>
+    /// SET WHERE THE MESSAGE IS SET, in TlsQuicStreams.cs, and for the same reason: the frame
+    /// that ended the connection is the one worth reporting, so both halves use <c>??=</c> and
+    /// the FIRST failure of a datagram wins. Kept apart from <see cref="ProtocolFailureCode"/>
+    /// because the two answer different questions - this one carries s20.1's STREAM_STATE_ERROR,
+    /// FLOW_CONTROL_ERROR, STREAM_LIMIT_ERROR or FINAL_SIZE_ERROR, whichever the stream set
+    /// chose, and that one carries the PROTOCOL_VIOLATION family the connection-scoped frames
+    /// raise. Folding them would have made the close say one when it meant the other.
+    /// </remarks>
+    internal TlsQuicTransportError? StreamFailureCode { get; private set; }
 
     private void InstallSecrets(TlsQuicProcessResult result)
     {

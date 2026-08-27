@@ -571,6 +571,80 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(2, transport.Sent.Count);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 9. RFC 9000 s10.2: "An endpoint sends a CONNECTION_CLOSE frame (Section
+    /// 19.19) to terminate the connection immediately." <c>PumpOnceAsync</c> raised an
+    /// <see cref="InvalidOperationException"/> for four classes of peer violation - a malformed
+    /// ACK, a refused STREAM frame, a connection-scoped protocol failure, and any close the
+    /// receiver signalled - each with the right s20.1 code spelled into the message text, and
+    /// sent NOTHING. The peer then waited out s10.1's idle period to discover a connection that
+    /// had ended one datagram ago.
+    /// <para>RETIRE_CONNECTION_ID IS THE CHEAPEST OF THE FOUR TO PROVOKE and needs no forged
+    /// bytes: s19.16 makes it a PROTOCOL_VIOLATION outright against an endpoint with a
+    /// zero-length source connection ID, which is what
+    /// <c>TlsQuicConnectionSpec.SourceConnectionIdLength</c> gives the shipped profiles.</para>
+    /// </summary>
+    [Fact]
+    public async Task APeerProtocolViolationSendsConnectionCloseBeforeItThrows()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // DRAINED, FOR THE REASON AfterConfirmationTheCloseGoesOutInAOneRttPacketAsSection1023
+        // Requires gives: the pump above answered HANDSHAKE_DONE with a 1-RTT ACK, and
+        // LoopbackQuicPeer.PumpOnceAsync reads ONE datagram per call - so without this the pump
+        // after the close would open the ACK and the close assertions would read a stale null.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Null(serverPeer.LastConnectionClose);
+
+        var sentBefore = clientTransport.Sent.Count;
+
+        // s19.16: "An endpoint that provides a zero-length connection ID MUST treat receipt of a
+        // RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION."
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.RetireConnectionId,
+                    SequenceNumber = 0,
+                },
+            ],
+            cancellation.Token);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Contains("RETIRE_CONNECTION_ID", error.Message, StringComparison.Ordinal);
+
+        // THE FRAME WENT OUT BEFORE THE THROW, which is the whole finding. A datagram left, the
+        // connection recorded what it closed with, and s10.2's closing state was entered.
+        Assert.Equal(sentBefore + 1, clientTransport.Sent.Count);
+        Assert.Equal(TlsQuicTransportError.ProtocolViolation, connection.ClosedWith);
+        Assert.True(connection.IsDraining);
+
+        // AND THE PEER CAN READ IT. s19.19's type 0x1c - the transport form, because this is an
+        // s20.1 code and not an application one - carrying PROTOCOL_VIOLATION (0x0a) in a 1-RTT
+        // packet, which is where s10.2.3's confirmed arm requires it: "After the handshake is
+        // confirmed ... an endpoint MUST send any CONNECTION_CLOSE frames in a 1-RTT packet."
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        var close = Assert.NotNull(serverPeer.LastConnectionClose);
+        Assert.Equal((ulong)TlsQuicFrameType.ConnectionClose, close.RawType);
+        Assert.Equal((ulong)TlsQuicTransportError.ProtocolViolation, close.ErrorCode);
+        Assert.Equal(TlsQuicEncryptionLevel.Application, close.Level);
+    }
+
     [Fact]
     public async Task APeerConnectionCloseEntersDrainingAndStopsSendingAndDelivering()
     {
