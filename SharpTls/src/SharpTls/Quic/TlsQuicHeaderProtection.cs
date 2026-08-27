@@ -101,6 +101,16 @@ internal static class TlsQuicHeaderProtection
     // TlsQuicHeaderProtectionTests.RemovalReadsPacketNumberLengthAfterUnmaskingByte0Not
     // Before, whose RFC 9001 Appendix A.5 vector fails outright if this order
     // is reversed - and the mutation check recorded in that test's comment.
+    //
+    // NO src CALLER, AND THAT IS THE POINT - DO NOT DELETE IT. The receiver takes the
+    // schedule overload below, so a caller search finds this one unreferenced outside
+    // tests and it reads as dead code. It is not: it is the REFERENCE the schedule is
+    // checked against. TlsQuicHeaderProtectionTests.APreparedKeyScheduleProducesTheSame
+    // MaskAsTheRawKeyForBothCiphers removes the same packet both ways and compares the
+    // bytes, and that comparison is the only thing standing between a prepared cipher
+    // and a silent divergence - it is what caught an AES arm that masked with CBC and a
+    // random IV, which produces a well-formed packet no peer can open. Delete this
+    // overload and the schedule is left being compared with itself.
     internal static bool TryRemove(
         TlsQuicHeaderProtectionCipher cipher,
         ReadOnlySpan<byte> headerProtectionKey,
