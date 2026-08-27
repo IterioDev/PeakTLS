@@ -6231,15 +6231,24 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     //
     // The witness is
     // TlsQuicConnectionTests.AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts.
-    private DateTimeOffset IdleDeadline()
+    private DateTimeOffset IdleDeadline() => AddSaturating(_idleSince, EffectiveIdlePeriod());
+
+    /// <summary>The period this connection actually waits before giving up: the advertised value
+    /// raised by RFC 9000 s10.1's floor, or the local policy unraised.</summary>
+    /// <remarks>SPLIT OUT SO THE DEADLINE AND THE DIAGNOSTIC CANNOT DISAGREE. The message on the
+    /// TimeoutException used to read <see cref="EffectiveIdleTimeout"/> directly, which is the
+    /// value the two endpoints ADVERTISED and not the one the floor produced - so a connection
+    /// raised from 100 milliseconds to three seconds reported the 100. One expression, two
+    /// readers.</remarks>
+    private TimeSpan EffectiveIdlePeriod()
     {
         if (EffectiveIdleTimeout() is not { } advertised)
         {
-            return AddSaturating(_idleSince, _options.IdleTimeout);
+            return _options.IdleTimeout;
         }
 
         var floor = FromTicksSaturating((double)PtoDuration(_peerMaxAckDelay).Ticks * 3.0);
-        return AddSaturating(_idleSince, advertised >= floor ? advertised : floor);
+        return advertised >= floor ? advertised : floor;
     }
 
     private TimeSpan RemainingBeforeIdleTimeout() =>
@@ -6316,14 +6325,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     }
 
     private TimeoutException IdleTimeoutExceeded() => new(
-        $"The QUIC connection was idle for longer than {EffectiveIdleTimeout() ?? _options.IdleTimeout}"
+        $"The QUIC connection was idle for longer than {EffectiveIdlePeriod()}"
             + " and was closed under RFC 9000 s10.1. "
-            + (EffectiveIdleTimeout() is null
+            + (EffectiveIdleTimeout() is not { } advertised
                 ? "That period is TlsQuicConnectionOptions.IdleTimeout, local policy: neither "
                     + "endpoint advertised a non-zero max_idle_timeout, which s18.2 makes the "
                     + "state in which idle timeout is disabled."
                 : "That period is s10.1's minimum of the two advertised max_idle_timeout "
-                    + "values, so the close is silent and carries no CONNECTION_CLOSE frame."));
+                    + $"values ({advertised}), raised where s10.1's third paragraph requires it "
+                    + "to be at least three times the current Probe Timeout, so the close is "
+                    + "silent and carries no CONNECTION_CLOSE frame."));
 
     // RFC 9000 s17.2.5.3: "The value of the Token field is copied to all subsequent Initial
     // packets." Before a Retry the spec's knob is what a client carries - s8.1's NEW_TOKEN
