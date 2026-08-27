@@ -24,8 +24,26 @@ internal sealed class TlsQuicCryptoStreamReassembler
     // frame now costs about 136 KiB instead of 64 MiB, and a well-behaved handshake -
     // which fills from offset 0 - allocates exactly what it uses either way.
     //
+    // The three numbers above are pinned by TlsQuicPrimitiveTests.CryptoStreamDoesNotComm
+    // itItsWholeCeilingForOneFarOffsetFrame, which measures the allocation for exactly
+    // that frame at exactly that ceiling. Prose is where numbers rot first; that test is
+    // what makes these checkable.
+    //
     // 4096 balances the two waste terms: bigger chunks waste more on a sparse write,
-    // smaller ones grow the always-allocated pointer table. Nothing depends on the value.
+    // smaller ones grow the always-allocated pointer table.
+    //
+    // NOT A FREE PARAMETER BELOW ITS OWN VALUE, which is the one case the ceiling stops
+    // bounding. The constructor floor is 1024 and the ceiling is caller-configured, so a
+    // reassembler limited to 1024 bytes still rounds up to one chunk and commits 8 KiB -
+    // data plus flags - on its first write, eight times the limit it was given. That is
+    // deliberate and it stays: the overshoot is bounded by 2 * ChunkLength per instance
+    // and there are three instances per connection, so the worst case is 24 KiB, which is
+    // noise beside a connection's own buffers. Clamping the chunk size to the ceiling
+    // would cost more than it saves - ChunkLength would have to become a field, and every
+    // `index / ChunkLength` and `index % ChunkLength` in the accessors below would stop
+    // const-folding into a shift and a mask, on the path that touches every received
+    // CRYPTO byte. Revisit only if a caller ever wants a sub-chunk ceiling to mean
+    // something.
     private const int ChunkLength = 4096;
 
     private readonly int _maximumLength;
@@ -104,8 +122,11 @@ internal sealed class TlsQuicCryptoStreamReassembler
         }
         // Every index in [_deliveredLength, contiguousEnd) passed IsReceived above, so its
         // chunk is allocated and ByteAt cannot dereference a null. A byte-at-a-time copy
-        // rather than a span slice because the range can straddle a chunk boundary; this
-        // runs once per handshake flight, not per packet.
+        // rather than a span slice because the range can straddle a chunk boundary. It
+        // runs on every Add that advances _deliveredLength - once per in-order CRYPTO
+        // frame, not once per flight - but each byte is copied out exactly once over the
+        // reassembler's whole life, since _deliveredLength only moves forward. Amortized
+        // O(bytes delivered), which is the same total work the span slice it replaced did.
         var result = new byte[contiguousEnd - _deliveredLength];
         for (var index = 0; index < result.Length; index++)
         {

@@ -48,8 +48,11 @@ internal static class TlsQuicPacketNumber
 
         // RFC 9000 s17.1: "Packet Number: This field is 1 to 4 bytes long." Four is
         // therefore the widest truncation the wire format has, and the arithmetic above
-        // asks for five as soon as num_unacked passes 2^31 - min_bits = log2(2^31) + 1 =
-        // 32 is the last value that still fits. Past that point A.2 has no answer, because
+        // asks for five as soon as num_unacked passes 2^31, which is the last num_unacked
+        // that still fits. NOT the last min_bits: min_bits is 32 at 2^31 AND at 2^31 + 1,
+        // and it is the boundary bump above - num_unacked not a power of two, min_bits on
+        // an 8-bit boundary - that carries the second one to five. Past that point A.2 has
+        // no answer, because
         // A.3's DecodePacketNumber resolves a 32-bit truncation only to within pn_hwin =
         // 2^31 of expected_pn: a wider gap decodes to a DIFFERENT packet number at the
         // peer, and nothing on either side notices.
