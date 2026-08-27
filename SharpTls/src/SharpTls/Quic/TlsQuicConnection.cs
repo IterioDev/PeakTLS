@@ -1579,8 +1579,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal static long IntegrityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
         cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305 ? 1L << 36 : 1L << 52;
 
-    // RFC 9001 s6's two reasons to rotate, in the order they bind. Called once per receive,
-    // between the frame walk and the answer.
+    // RFC 9001 s6's two reasons to rotate, in the order they bind.
+    //
+    // TWO CALLERS, NOT ONE, AND THE COMMENT USED TO SAY "called once per receive". PumpOnceAsync
+    // calls it between the frame walk and the answer, which is s6.2's "Sending keys MUST be
+    // updated before sending an acknowledgment for the packet that was received with updated
+    // keys"; TlsQuicApplicationSendPath calls it again on the send path, which is s6.6's
+    // confidentiality limit, a count of packets SENT that a receive-only trigger would miss on a
+    // connection doing nothing but sending. Both arms below are idempotent - ConsumeKeyUpdate
+    // takes the flag and the confidentiality test re-reads the live counter - so the second call
+    // is a second question rather than a second rotation.
     private void ApplyKeyUpdateIfNeeded()
     {
         // s6.2's response. The receiver has already promoted its READ keys - it had to, to
