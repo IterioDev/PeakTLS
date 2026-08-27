@@ -788,6 +788,95 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     // ------------------------------------------------------------------------
+    // RFC 9000 s19.4's RESET_STREAM on a request stream - audit finding #3's HTTP/3 half.
+    // ------------------------------------------------------------------------
+
+    // THE RESET LANDS ON A FRAME BOUNDARY, AND THAT IS THE WHOLE POINT OF THE ROW. A reset
+    // stopping mid-frame is caught by RFC 9114 s7.1's own rule - TlsQuicHttp3Response answers
+    // H3_FRAME_ERROR for "a frame payload that terminates before the end of the identified
+    // fields" - so it was never the dangerous shape. The dangerous shape is a peer that resets
+    // between two whole frames: the reader's buffer is empty, its stage is Content, and every
+    // condition its completion rule tests is satisfied.
+    //
+    // WHY end-of-stream IS TRUE HERE AT ALL, which is the part that looks wrong and is not.
+    // RFC 9000 s3.2 puts a reset stream's receiving part in "Reset Recvd" and s4.5 leaves the
+    // bytes below the reset's final size undelivered forever, so TlsQuicStream.ReceiveComplete
+    // MUST answer true on a reset - a completion test that waited for the missing bytes is the
+    // hang audit finding #3 named, and TlsQuicStreamsTests.AResetStreamEndsTheStreamAndReports
+    // ThePeersApplicationErrorCode pins that. TlsQuicHttp3Connection.TryProcess reads exactly
+    // that property as its endOfStream, so before the fix this response arrived at
+    // TlsQuicHttp3Response.TryRead as "the stream ended cleanly with nothing left over" and
+    // came back a complete 200 carrying half a body.
+    //
+    // s4.1 IS WHAT MAKES THAT WRONG RATHER THAN MERELY ODD: a request stream reset before the
+    // response is complete is a FAILED response, and s4.1.1's retry rules - "The client can
+    // treat requests rejected by the server as though they had never been sent at all" for
+    // H3_REQUEST_REJECTED, but not for H3_REQUEST_CANCELLED - only mean something if the
+    // caller can see which code arrived. Hence both assertions: not complete, AND the number.
+    //
+    // AND THE CONNECTION SURVIVES. s8: "This is referred to as a 'stream error'." A server
+    // cancelling one request must not cost the others, so TryProcess answers true and
+    // ConnectionErrorCode stays zero.
+    [Fact]
+    public async Task AResetResponseIsNotCompleteAndCarriesThePeersErrorCode()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(cancellation.Token);
+        Assert.NotNull(harness.Http3.TryOpenRequest(Request(), out _, out _));
+        await harness.FlushAsync(cancellation.Token);
+
+        // A whole HEADERS frame and a whole DATA frame, and no FIN. Everything the peer sent
+        // parses, so nothing is left in the reader's buffer to fail on.
+        var partial = ResponseBytes(200, [], Encoding.UTF8.GetBytes("first half"));
+        await harness.PeerSendsAsync(cancellation.Token, PeerControl());
+
+        // ONE DATAGRAM CARRYING BOTH FRAMES, which is also what makes the harness pump: its
+        // Delivered check counts the STREAM frame's bytes, and a bare RESET_STREAM would look
+        // delivered before a single datagram had been opened.
+        //
+        // H3_REQUEST_CANCELLED (0x010c), s8.1's code for s4.1.1's "When a server abandons a
+        // response after partial processing". A REAL CODE AND NOT ZERO: 0 is H3_NO_ERROR and a
+        // legal thing to reset with, so a nullable that defaulted would read the same.
+        await harness.PeerSendsAsync(
+            cancellation.Token,
+            expectAccepted: true,
+            Stream(FirstRequestStreamId, 0, partial),
+            Reset(FirstRequestStreamId, (ulong)partial.Length, 0x010c));
+
+        Assert.True(harness.Http3.TryProcess(out var error));
+        Assert.Equal(0UL, error);
+        Assert.Equal(0UL, harness.Http3.ConnectionErrorCode);
+
+        var response = harness.Http3.ResponseFor(FirstRequestStreamId);
+        Assert.NotNull(response);
+        Assert.False(response.IsComplete);
+        Assert.True(response.IsReset);
+        Assert.Equal(0x010cUL, response.ResetErrorCode);
+
+        // REPEATED PUMPS DO NOT CHANGE THE ANSWER, and cannot re-raise s4.4.2's Stream
+        // Cancellation either: the reset arm runs once per stream, not once per pump.
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.True(harness.Http3.TryProcess(out var repeated));
+            Assert.Equal(0UL, repeated);
+        }
+
+        Assert.False(response.IsComplete);
+        Assert.Equal(0x010cUL, response.ResetErrorCode);
+    }
+
+    // s19.4's frame as the PEER sends it, built here for the reason Stream's own note in
+    // TlsQuicConnectionStreamTests gives: these are the peer's frames, and a helper that reused
+    // the send path's construction would make the two directions one implementation.
+    private static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
+    {
+        RawType = (ulong)TlsQuicFrameType.ResetStream,
+        StreamId = streamId,
+        ApplicationProtocolErrorCode = errorCode,
+        FinalSize = finalSize,
+    };
+
+    // ------------------------------------------------------------------------
     // The response reader's buffering ceiling - audit finding #6.
     // ------------------------------------------------------------------------
 

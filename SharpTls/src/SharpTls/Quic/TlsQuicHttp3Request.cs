@@ -1512,9 +1512,81 @@ internal sealed class TlsQuicHttp3Response
     internal int Status { get; private set; } = -1;
 
     /// <summary>Gets whether a final response was read and the stream then ended.</summary>
-    /// <remarks><see langword="false"/> after a stream that ended carrying only interim
-    /// responses: s4.1 requires "a single final HTTP response" to follow them.</remarks>
+    /// <remarks>
+    /// <para><see langword="false"/> after a stream that ended carrying only interim
+    /// responses: s4.1 requires "a single final HTTP response" to follow them.</para>
+    /// <para>AND <see langword="false"/> AFTER A RESET, WHICH IS THE POINT OF
+    /// <see cref="ResetErrorCode"/>. RFC 9000 s4.5 leaves the bytes below a reset stream's
+    /// final size undelivered forever, so a response cut short by RESET_STREAM has a
+    /// <see cref="Body"/> that is a PREFIX of the real one - and this property saying yes
+    /// over it would hand a caller a truncated message it has no way to distinguish from a
+    /// whole one. That is not a hypothetical: the stream layer reports a reset stream as
+    /// having finished receiving (RFC 9000 s3.2 puts it in "Reset Recvd", and waiting for the
+    /// missing bytes would hang), and this reader's completion rule is FIN plus an empty
+    /// buffer - which a reset landing on a frame boundary satisfies exactly.</para>
+    /// </remarks>
     internal bool IsComplete { get; private set; }
+
+    /// <summary>Gets the RFC 9000 s19.4 Application Protocol Error Code the peer reset this
+    /// request stream with, or <see langword="null"/> if it has not.</summary>
+    /// <remarks>
+    /// <para>THE CODE AND NOT A FLAG, because RFC 9114 s4.1.1 makes the number the whole
+    /// decision. "The server SHOULD abort its response stream with the error code
+    /// H3_REQUEST_REJECTED" when it did no application processing, and "The client can treat
+    /// requests rejected by the server as though they had never been sent at all, thereby
+    /// allowing them to be retried later" - whereas H3_REQUEST_CANCELLED means the server
+    /// "abandons a response after partial processing", which a client may not silently retry.
+    /// A caller told only that the stream was reset cannot tell those apart.</para>
+    /// <para>REPORTED, NOT INTERPRETED. The value is the varint the peer sent, whatever it is;
+    /// s8.1's codes are not exhaustive of what may legally arrive - s8's reserved
+    /// <c>0x1f * N + 0x21</c> space is expressly for codes an endpoint sends in place of
+    /// H3_NO_ERROR. Nothing here maps it onto <see cref="TlsQuicHttp3ErrorCode"/>, whose own
+    /// summary says its members are the codes THIS subsystem raises.</para>
+    /// <para>NULL RATHER THAN 0, for the reason <see cref="TlsQuicStream.ResetErrorCode"/>
+    /// gives: 0 is H3_NO_ERROR and a legal thing for a peer to reset with, so a
+    /// <see cref="ulong"/> defaulting to zero would read "no reset" and "reset, deliberately"
+    /// identically.</para>
+    /// </remarks>
+    internal ulong? ResetErrorCode { get; private set; }
+
+    /// <summary>Gets whether the peer abandoned this response with an RFC 9000 s19.4
+    /// RESET_STREAM.</summary>
+    /// <remarks>A STREAM ERROR AND NOT A CONNECTION ERROR, which is why it is a property here
+    /// rather than a code out of <see cref="TryRead"/>. RFC 9114 s8 draws the line - "This is
+    /// referred to as a 'stream error'" against "This is referred to as a 'connection error'" -
+    /// and s4.1.1 makes cancelling one request an ordinary thing for a server to do: "servers
+    /// cancel requests if they are unable to or choose not to respond". A connection closed over
+    /// it would take every other exchange down with it.</remarks>
+    internal bool IsReset => ResetErrorCode is not null;
+
+    /// <summary>Records that the peer reset this request stream, RFC 9000 s19.4.</summary>
+    /// <returns><see langword="true"/> the first time only.</returns>
+    /// <remarks>
+    /// <para>IDEMPOTENT, AND THE FIRST CODE STANDS. The connection calls this once per pump
+    /// for as long as the exchange is held, and s19.4 admits only one RESET_STREAM per stream
+    /// - the stream layer refuses a second with a different final size as s20.1's
+    /// FINAL_SIZE_ERROR - so a later call carries the same number. Keeping the first is what
+    /// makes that guaranteed rather than merely true today.</para>
+    /// <para>THE RETURN IS WHAT MAKES ONCE-PER-STREAM WORK ONE LAYER UP. RFC 9204 s2.2.2.2's
+    /// Stream Cancellation is emitted per abandoned stream, not per pump, and a caller that
+    /// tested <see cref="IsReset"/> itself would be keeping a second copy of the same fact.
+    /// </para>
+    /// <para>IT DOES NOT CLEAR <see cref="HeaderFields"/>, <see cref="Status"/> OR
+    /// <see cref="Body"/>. RFC 9114 s4.1 tells a client to "begin processing partial HTTP
+    /// messages once enough of the message has been received to make progress", so what did
+    /// arrive is worth keeping and reading; what must not happen is it being presented as the
+    /// WHOLE message, which is <see cref="IsComplete"/>'s job and not this data's.</para>
+    /// </remarks>
+    internal bool OnPeerReset(ulong applicationErrorCode)
+    {
+        if (IsReset)
+        {
+            return false;
+        }
+
+        ResetErrorCode = applicationErrorCode;
+        return true;
+    }
 
     /// <summary>Consumes the next bytes of the response stream.</summary>
     /// <remarks>
@@ -1661,7 +1733,22 @@ internal sealed class TlsQuicHttp3Response
                 return Fail(MessageError, out errorCode);
             }
 
-            IsComplete = _stage != Stage.BeforeFinalHeaders;
+            // `!IsReset` IS THE SILENT-CORRUPTION GUARD, and it is here rather than only at the
+            // caller because THIS property is what a caller reads. RFC 9000 s3.2 puts a reset
+            // stream's receiving part in "Reset Recvd" and s4.5 leaves every byte below its
+            // final size undelivered, so the stream layer necessarily reports such a stream as
+            // finished - waiting on bytes that will never come is the hang audit finding #3
+            // named. A reset that lands on an HTTP/3 frame boundary therefore arrives here as
+            // endOfStream with an empty _pending, satisfies every other test in this block, and
+            // would set a TRUNCATED response complete. RFC 9114 s4.1 is unambiguous that this
+            // is a failed response and not a short one; s4.1.1's retry rules only mean anything
+            // if the two are distinguishable.
+            //
+            // TlsQuicHttp3Connection.TryProcess ALSO SKIPS THE READ ENTIRELY on a reset stream,
+            // and the two are not one rule twice: that one stops a partial body being appended
+            // at all, this one stops the completion flag whoever the caller is - the fuzz
+            // targets and TlsQuicHttp3RequestTests drive this type with no connection above it.
+            IsComplete = !IsReset && _stage != Stage.BeforeFinalHeaders;
         }
 
         errorCode = NoError;

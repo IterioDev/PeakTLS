@@ -711,6 +711,23 @@ internal sealed class TlsQuicHttp3Connection
 
     /// <summary>Gets the reader draining one request stream, or <see langword="null"/> if that
     /// id is not one this connection opened.</summary>
+    /// <remarks>
+    /// <para>THE READER IS WHERE A REQUEST'S OUTCOME LIVES, ALL THREE OF THEM, and no fourth
+    /// accessor here restates any of them.
+    /// <see cref="TlsQuicHttp3Response.IsComplete"/> is a whole response;
+    /// <see cref="TlsQuicHttp3Response.ResetErrorCode"/> is a failed one and carries the RFC
+    /// 9114 s4.1.1 code that decides whether it may be retried; neither is a response still
+    /// arriving. A reset is a STREAM error - s8's own word - so it does not appear in
+    /// <see cref="ConnectionErrorCode"/> and does not stop the sibling exchanges.</para>
+    /// <para>THE SENDING HALF IS THE STREAM'S AND NOT THIS TYPE'S.
+    /// <see cref="TlsQuicStream.SendStopped"/> and
+    /// <see cref="TlsQuicStream.StopSendingErrorCode"/> say whether the peer cut our request
+    /// body short, on the very stream <see cref="TryOpenRequest"/> returned. They are
+    /// deliberately not mirrored onto the response: RFC 9114 s4.1's "Clients MUST NOT discard
+    /// complete responses as a result of having their request terminated abruptly" makes
+    /// STOP_SENDING a routine half of a SUCCESSFUL exchange, and a mirror on the reader would
+    /// invite a caller to read it as a failure.</para>
+    /// </remarks>
     internal TlsQuicHttp3Response? ResponseFor(ulong streamId)
     {
         foreach (var exchange in _exchanges)
@@ -810,6 +827,51 @@ internal sealed class TlsQuicHttp3Connection
 
         foreach (var exchange in _exchanges)
         {
+            // RFC 9000 s19.4's RESET_STREAM, which s4.1.1 makes an ordinary thing for a server
+            // to send: "servers cancel requests if they are unable to or choose not to
+            // respond". THIS EXCHANGE IS OVER AND THE CONNECTION IS NOT - s8 separates "This is
+            // referred to as a 'stream error'" from "This is referred to as a 'connection
+            // error'", and closing the connection here would take every sibling request down
+            // for one server's decision about this one. So the reset is recorded on the reader
+            // and the loop moves on; nothing calls Fail.
+            //
+            // BEFORE THE READ AND NOT AFTER IT, WHICH IS THE WHOLE FIX. TlsQuicStream reports a
+            // reset stream as having finished receiving - it must, because RFC 9000 s4.5 leaves
+            // the bytes below the reset's final size undelivered forever and a completion test
+            // that waited for them would hang, which is audit finding #3. That flag is this
+            // loop's `endOfStream`, and TlsQuicHttp3Response.TryRead's completion rule is
+            // end-of-stream with an empty buffer - so a reset landing on an HTTP/3 frame
+            // boundary would otherwise hand the caller a TRUNCATED body as a complete, 200 OK
+            // response. Skipping the read is what stops the partial tail being appended at all;
+            // the reader's own `!IsReset` conjunct stops the flag for callers that have no
+            // connection above them.
+            //
+            // s4.1 IS WHY THE ARRIVED BYTES ARE KEPT RATHER THAN DISCARDED: "endpoints SHOULD
+            // begin processing partial HTTP messages once enough of the message has been
+            // received to make progress". A caller may read Status and HeaderFields off a reset
+            // exchange; what it may not do is mistake the body for whole, and IsComplete
+            // answers that.
+            if (exchange.Stream.ResetReceived)
+            {
+                if (exchange.Response.OnPeerReset(exchange.Stream.ResetErrorCode!.Value))
+                {
+                    OnRequestStreamAbandoned(exchange);
+                }
+
+                continue;
+            }
+
+            // s19.5's STOP_SENDING NEEDS NO ARM HERE, AND s4.1 SAYS SO IN A MUST NOT: "Clients
+            // MUST NOT discard complete responses as a result of having their request
+            // terminated abruptly." A server that has all it needs "MAY abort reading the
+            // request stream, send a complete response, and cleanly close the sending part of
+            // the stream", with "The error code H3_NO_ERROR ... when requesting that the client
+            // stop sending" - so STOP_SENDING is a routine half of a SUCCESSFUL exchange and an
+            // arm that failed the request on it would break conforming servers. The transport
+            // half is already done where it belongs: TlsQuicStreamSet stops queueing on a
+            // stopped stream and answers s19.5's RESET_STREAM. A caller that needs to know its
+            // request body was cut short reads TlsQuicStream.SendStopped and
+            // StopSendingErrorCode on the stream TryOpenRequest handed back.
             var delivered = exchange.Stream.Received;
             var fresh = delivered.Count - exchange.Consumed;
 
@@ -865,6 +927,47 @@ internal sealed class TlsQuicHttp3Connection
         }
 
         return true;
+    }
+
+    // RFC 9204 s2.2.2.2's two obligations for a request stream that will decode nothing
+    // further, run exactly once per stream because the loop above gates them on
+    // TlsQuicHttp3Response.OnPeerReset's first-time answer.
+    //
+    // s2.2.2.2: "When an endpoint receives a stream reset before the end of a stream or before
+    // all encoded field sections are processed on that stream, or when it abandons reading of a
+    // stream, it generates a Stream Cancellation instruction; see Section 4.4.2. This signals
+    // to the encoder that all references to the dynamic table on that stream are no longer
+    // outstanding."
+    //
+    // THE RELEASE IS THE MORE URGENT OF THE TWO AND IS THIS CHANGE'S OWN DEBT. s2.1.2's
+    // registry is held per blocked stream and TrySynchroniseQpackState is what normally lets a
+    // slot go - which the reset arm above now skips. A stream that was parked on s2.2.1's block
+    // when the peer reset it would otherwise hold its slot for the life of the connection, and
+    // SETTINGS_QPACK_BLOCKED_STREAMS slots are a small number: leaking them ends as
+    // QPACK_DECOMPRESSION_FAILED on some later, innocent request.
+    //
+    // THE CANCELLATION IS CONDITIONED ON THE TABLE, AND s2.2.2.2 GRANTS EXACTLY THAT: "A
+    // decoder with a maximum dynamic table capacity (Section 3.2.3) equal to zero MAY omit
+    // sending Stream Cancellations, because the encoder cannot have any dynamic table
+    // references." Table is null on precisely that arm, so the MAY is taken - which is also
+    // what keeps a default-spec client's bytes unchanged, its SETTINGS being empty and its
+    // advertised capacity therefore zero.
+    //
+    // AND IT IS THE CONDITION THAT KEEPS THE PEER AWAY FROM A THROW. SendStreamCancellation
+    // raises InvalidOperationException when there is no local decoder stream, and a peer's
+    // RESET_STREAM must never reach one. A non-null Table is sufficient rather than merely
+    // convenient: TlsQuicHttp3Streams' constructor builds one only when the open order contains
+    // QpackDecoder as well, so a table existing here implies OpenLocalStreams opened that
+    // stream - and OpenLocalStreams has necessarily run, TryOpenRequest throwing without it and
+    // there being no exchange to reset otherwise.
+    private void OnRequestStreamAbandoned(Exchange exchange)
+    {
+        _streams.BlockedStreams.Release(exchange.Stream.Id);
+
+        if (_streams.Table is not null)
+        {
+            _streams.SendStreamCancellation(exchange.Stream.Id);
+        }
     }
 
     // RFC 9204 s2.1.2's bound and s2.2.2.1's acknowledgment, both of which are about a field
