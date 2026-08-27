@@ -1514,7 +1514,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// immutable and should stay both. What the send path needs is a queue it can take the front
     /// of and put the remainder back into, which is a different thing from the event the TLS
     /// stack raised.</remarks>
-    private readonly record struct PendingCrypto(
+    /// <remarks>INTERNAL FOR THE SAME REASON <see cref="ForgetSpace"/> IS: it is the argument
+    /// <see cref="BuildAnswerDatagram"/> takes, and audit finding 4 - the take that ran before
+    /// the key probe - is a claim about what that method does to this list. The alternative was
+    /// a witness that fabricated a <see cref="TlsQuicProcessResult"/> carrying a
+    /// <see cref="TlsQuicCryptoDataEvent"/>, which would have been witnessing its own fake.
+    /// </remarks>
+    internal readonly record struct PendingCrypto(
         TlsQuicEncryptionLevel Level, ulong Offset, ReadOnlyMemory<byte> Data);
 
     /// <summary>An upper bound on a CRYPTO frame's own framing, RFC 9000 s19.6.</summary>
@@ -5000,7 +5006,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     ];
 
     // NOT async, for the same ref struct reason as BuildInitialFlight.
-    private int BuildAnswerDatagram(
+    //
+    // INTERNAL RATHER THAN PRIVATE, on ForgetSpace's precedent and for its reason: audit
+    // finding 4 is a claim about the ORDER in which this method takes from its inputs and
+    // probes for keys, and the state it needs - a level whose write keys are Discarded while
+    // CRYPTO for it is queued - cannot be produced through PumpOnceAsync, because `crypto` is
+    // rebuilt per call from that pump's own results and every discard this client performs
+    // happens after SendAnswerAsync's loop. A witness therefore drives the real method with
+    // real keys, reached by a real handshake, and supplies only the arrival the TLS stack
+    // would otherwise have supplied.
+    internal int BuildAnswerDatagram(
         List<PendingCrypto> crypto,
         DateTimeOffset now,
         out bool carriedHandshakePacket,
@@ -5032,6 +5047,63 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             // "No write keys at EarlyData".
             if (level == TlsQuicEncryptionLevel.EarlyData)
             {
+                continue;
+            }
+
+            // THE KEY PROBE IS FIRST, BEFORE ANY FRAME IS TAKEN, AND THAT ORDER IS THE WHOLE OF
+            // AUDIT FINDING 4. It used to sit BELOW the two takes - TakeRepairsInto and the
+            // pending-CRYPTO loop - both of which CONSUME: the repair leaves _repairsOwed and
+            // the CRYPTO leaves the caller's list (`crypto.RemoveAt(c--)`). On the discarded
+            // arm the method then dropped `frames` and everything that had been moved into it,
+            // with RecordRepairable not yet reached, so the bytes were neither on the wire nor
+            // retransmittable. SendAnswerAsync's loop saw `written <= 0` and a `crypto` list
+            // shorter than it should be, and reported nothing: a silent stall to the
+            // abandonment deadline.
+            //
+            // TAKE NOTHING YOU CANNOT SEAL is the invariant, and probing first is the only
+            // ordering that states it. A level whose write keys have gone gets no ACK built for
+            // it (the tracker keeps its ranges), no repair drained (they stay owed - though
+            // ForgetSpace has usually already cleared them, per RFC 9000 s13.3), and no CRYPTO
+            // consumed (it stays in the caller's list for a level that can still carry it).
+            //
+            // THE THROW KEPT ITS CONDITION, EXPRESSED ONE LOOP EARLIER. It used to fire when
+            // `frames` had content at a level with no keys; the only content that can exist at
+            // a level whose keys were NEVER installed is pending CRYPTO, because an ACK needs a
+            // packet received at that level and a repair needs a packet sent at it, and both
+            // need keys. So the pending-CRYPTO test below is that guard, asked before the take
+            // rather than after it.
+            //
+            // TlsQuicConnectionTests.CryptoQueuedForALevelWhoseWriteKeysAreGoneIsLeftQueued
+            // RatherThanConsumedAndDropped is the witness.
+            if (!_keys.TryGetWriteKeys(level, out var keys, out var state))
+            {
+                // RFC 9001 s4.9.1: "Endpoints MUST NOT send Initial packets after this point."
+                // A pending ACK for a level whose keys have gone is not sent and is not an
+                // error - that is the ordinary post-discard steady state, and it is the one
+                // case where a missing key is correct rather than a sequencing bug.
+                //
+                // UNREACHABLE TODAY, MEASURED: narrowing this to NeverInstalled - so that a
+                // discarded level throws instead - used to leave 1043 of 1043 green, and the
+                // reason is that TlsQuicKeySet.DiscardKeys takes the READ keys with the write
+                // ones. After the Initial discard no further Initial packet can be opened, so
+                // no further Initial packet is ever recorded, so the ack tracker never has
+                // anything ack-eliciting pending at that level again. It is kept for the two
+                // paths that break that argument - task 9b's Retry, which re-keys Initial, and
+                // A3's retransmission, which resends at a level after the fact.
+                if (state == TlsQuicKeyLevelState.Discarded)
+                {
+                    continue;
+                }
+
+                // NeverInstalled with data queued for the level is a sequencing bug in this
+                // connection rather than anything the peer did, and it stays a throw.
+                if (crypto.Exists(pending => pending.Level == level))
+                {
+                    throw new InvalidOperationException(
+                        $"No write keys at {level} for a flight that carries {level} data; "
+                            + $"the level is {state}.");
+                }
+
                 continue;
             }
 
@@ -5166,33 +5238,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             if (frames.Count == 0)
             {
                 continue;
-            }
-
-            if (!_keys.TryGetWriteKeys(level, out var keys, out var state))
-            {
-                // RFC 9001 s4.9.1: "Endpoints MUST NOT send Initial packets after this point."
-                // A pending ACK for a level whose keys have gone is DROPPED, not sent and not
-                // an error - that is the ordinary post-discard steady state, and it is the one
-                // case where a missing key is correct rather than a sequencing bug.
-                //
-                // UNREACHABLE TODAY, MEASURED: narrowing this to NeverInstalled - so that a
-                // discarded level throws instead - leaves 1043 of 1043 green, and the reason
-                // is that TlsQuicKeySet.DiscardKeys takes the READ keys with the write ones.
-                // After the Initial discard no further Initial packet can be opened, so no
-                // further Initial packet is ever recorded, so the ack tracker never has
-                // anything ack-eliciting pending at that level again and TryBuildAck returns
-                // false before this line is reached. It is kept for the two paths that break
-                // that argument - task 9b's Retry, which re-keys Initial, and A3's
-                // retransmission, which resends at a level after the fact - and it is
-                // deliberately unwitnessed, because a test would have to build one of them.
-                if (state == TlsQuicKeyLevelState.Discarded)
-                {
-                    continue;
-                }
-
-                throw new InvalidOperationException(
-                    $"No write keys at {level} for a flight that carries {level} data; "
-                        + $"the level is {state}.");
             }
 
             RecordRepairable(level, _nextPacketNumber[(int)level], frames);

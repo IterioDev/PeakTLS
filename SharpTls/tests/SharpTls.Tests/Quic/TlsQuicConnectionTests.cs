@@ -948,6 +948,67 @@ public sealed partial class TlsQuicConnectionTests
     private static readonly DateTimeOffset StartOfScriptedTime =
         new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+    /// <summary>
+    /// AUDIT FINDING 4. <c>BuildAnswerDatagram</c> probed for write keys AFTER it had already
+    /// taken from its two sources - <c>TakeRepairsInto</c>, which removes from the owed-repair
+    /// list, and the pending-CRYPTO loop, which removes from the caller's list. On the discarded
+    /// arm it then dropped the frame list it had moved everything into, with
+    /// <c>RecordRepairable</c> not yet reached, so the bytes were neither on the wire nor
+    /// retransmittable. <c>SendAnswerAsync</c> saw <c>written &lt;= 0</c> and a <c>crypto</c> list
+    /// shorter than it should be, raised nothing, and the handshake stalled to the abandonment
+    /// deadline.
+    /// <para>DRIVEN DIRECTLY, AND THE REASON IS RECORDED RATHER THAN ASSUMED. The state the
+    /// finding needs - a level whose write keys are Discarded while CRYPTO for it is queued -
+    /// cannot be produced through <c>PumpOnceAsync</c>: <c>crypto</c> is rebuilt per call from
+    /// that pump's own results, and every discard this client performs happens after
+    /// <c>SendAnswerAsync</c>'s loop. So the KEYS are real - RFC 9001 s4.9.1's "a client MUST
+    /// discard Initial keys when it first sends a Handshake packet", reached by a real handshake
+    /// against a real peer - and only the arrival of the CRYPTO is supplied here, in the shape
+    /// the TLS stack would have supplied it.</para>
+    /// <para>WHAT IS ASSERTED IS THAT NOTHING WAS TAKEN. The bytes cannot go out at a level
+    /// whose keys are gone - RFC 9001 s4.9.1 forbids it in as many words, "Endpoints MUST NOT
+    /// send Initial packets after this point" - so the correct outcome is that they stay
+    /// exactly where they were, at the offset they had, for whatever the caller does next.
+    /// Before the fix this list came back empty.</para>
+    /// </summary>
+    [Fact]
+    public async Task CryptoQueuedForALevelWhoseWriteKeysAreGoneIsLeftQueuedRatherThanConsumedAndDropped()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+
+        // RFC 9001 s4.9.1's trigger has fired: the answer above carried this connection's first
+        // Handshake packet. Asserted, because the whole test is about what happens at a level in
+        // this state and a level that was merely never keyed would take a different arm.
+        Assert.Equal(
+            TlsQuicKeyLevelState.Discarded,
+            connection.WriteStateOf(TlsQuicEncryptionLevel.Initial));
+
+        var stranded = new byte[64];
+        stranded.AsSpan().Fill(0x5A);
+        var crypto = new List<TlsQuicConnection.PendingCrypto>
+        {
+            new(TlsQuicEncryptionLevel.Initial, 17, stranded),
+        };
+
+        connection.BuildAnswerDatagram(crypto, SentAt, out _, out _);
+
+        var left = Assert.Single(crypto);
+        Assert.Equal(TlsQuicEncryptionLevel.Initial, left.Level);
+        Assert.Equal(17UL, left.Offset);
+        Assert.Equal(stranded, left.Data.ToArray());
+    }
+
     // No clock in the loopback half: LoopbackQuicPeer builds every packet at one instant and
     // reads no clock of its own.
     private static readonly DateTimeOffset SentAt =
