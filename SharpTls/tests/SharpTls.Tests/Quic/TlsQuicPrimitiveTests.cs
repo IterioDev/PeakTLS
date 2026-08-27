@@ -188,6 +188,42 @@ public sealed class TlsQuicPrimitiveTests
     }
 
     [Fact]
+    public void CryptoStreamDoesNotCommitItsWholeCeilingForOneFarOffsetFrame()
+    {
+        // A server holding valid handshake keys can send one CRYPTO frame carrying a
+        // single byte at the far end of the configured window. Reassembly must buffer it
+        // - the offset is legal and the bytes below it may still arrive - but it must not
+        // reserve the entire window to do so. The dense layout used to: it grew a byte[]
+        // to the highest offset seen, plus a parallel byte[] of received flags, so this
+        // one byte cost 2 x 32 MiB.
+        //
+        // Measured as ALLOCATION, not as process memory: GC.GetAllocatedBytesForCurrent
+        // Thread is exact for this thread and cannot be perturbed by a collection landing
+        // mid-test, which a working-set reading would be. The gap it has to separate is
+        // three orders of magnitude wide (about 67 MB before, about 140 KB after), so the
+        // threshold is nowhere near either side and needs no tuning.
+        const int Ceiling = 32 * 1024 * 1024;
+        var stream = new TlsQuicCryptoStreamReassembler(Ceiling);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Empty(stream.Add(Ceiling - 1, [0x42]));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(
+            allocated < 4 * 1024 * 1024,
+            $"one far-offset CRYPTO frame allocated {allocated} bytes against a {Ceiling}-byte ceiling");
+
+        // The byte is genuinely held, not dropped: refilling it with a DIFFERENT value is
+        // still the s12.4 conflicting-overlap violation, which is only detectable if the
+        // original is still there to compare against.
+        Assert.Equal(
+            TlsQuicTransportError.ProtocolViolation,
+            Assert.Throws<TlsQuicTransportException>(() =>
+                stream.Add(Ceiling - 1, [0x43])).Error);
+        Assert.Empty(stream.Add(Ceiling - 1, [0x42]));
+    }
+
+    [Fact]
     public void CryptoStreamEnforcesBufferLimitAndCannotDiscardAGap()
     {
         var stream = new TlsQuicCryptoStreamReassembler(1024);
