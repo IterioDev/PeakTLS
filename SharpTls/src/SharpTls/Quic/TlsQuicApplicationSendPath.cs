@@ -636,6 +636,26 @@ internal sealed partial class TlsQuicConnection
                 spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
             }
 
+            // AND THE ACK THAT HAS NOT BEEN ADDED YET, WHICH IS CHARGED BY WHETHER IT EXISTS
+            // RATHER THAN BY WHERE IT WILL SIT. TlsQuicConnectionSpec.AckLeadsInPacket decides
+            // the ACK's POSITION - RFC 9000 imposes no frame order inside a packet - and with
+            // it false the frame is appended AFTER this take, so the loop above cannot see it
+            // and the budget handed to the split was the whole packet's.
+            //
+            // IT ONLY BECAME AN OVERRUN WHEN THE SPLIT BECAME EXACT. The take used to move
+            // whole frames and inherited a cushion from the drain that happened to cover an
+            // ACK; the audit's oversized-first-frame fix now cuts a STREAM head to exactly
+            // `payloadBudget - spent`, so anything not in `spent` is a byte over RFC 9000
+            // s14.2's "sized to fit within the maximum datagram size" - and on a DF-set socket
+            // that is SocketError.MessageSize rather than a fragment. Default presets lead with
+            // the ACK and never saw it; the knob is the whole exposure, which is exactly the
+            // shape of defect a knob nothing measures produces. The witness is
+            // TlsQuicConnectionTests.ADatagramCarryingBothAnAckAndSplitStreamDataStaysWithinThePathMtu.
+            if (hasAck && !_options.Spec.AckLeadsInPacket)
+            {
+                spent += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, ack);
+            }
+
             // A prefix that already fills the datagram leaves nothing for stream data, and the
             // take's own starvation escape - which still takes one frame however large, but now
             // only when nothing else has been taken AND the head cannot be split - would

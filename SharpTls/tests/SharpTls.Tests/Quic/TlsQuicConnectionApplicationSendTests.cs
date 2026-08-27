@@ -223,6 +223,95 @@ public sealed partial class TlsQuicConnectionTests
 
     // ---- RFC 8899 / RFC 9000 s14.3: the path MTU search, end to end -----------------------
 
+    /// <summary>
+    /// RFC 9000 s14.2: "All QUIC packets that are not sent in a PMTU probe SHOULD be sized to
+    /// fit within the maximum datagram size to avoid the datagram being fragmented or dropped."
+    /// The 1-RTT send budget charged for every frame already in the packet and for the coalesced
+    /// prefix in front of it, but not for an ACK that had not been added yet - and with
+    /// <c>TlsQuicConnectionSpec.AckLeadsInPacket</c> false the ACK is appended AFTER the stream
+    /// take, so the split was handed a budget with the ACK's bytes still in it.
+    /// <para>IT ONLY BECAME AN OVERRUN WHEN THE SPLIT BECAME EXACT. While the take moved whole
+    /// frames it inherited a cushion that happened to cover an ACK; the audit's
+    /// oversized-first-frame fix cuts a STREAM head to exactly the budget it is given, so every
+    /// uncharged byte is now a byte over the path MTU - and on a DF-set socket that is
+    /// SocketError.MessageSize rather than a fragment.</para>
+    /// <para>THE KNOB IS THE WHOLE EXPOSURE, WHICH IS WHY THE THEORY HAS BOTH ROWS. Default
+    /// presets lead with the ACK and were never over; a preset that trails it was, and nothing
+    /// measured the difference. The true row is here to show the fix did not move the case that
+    /// was already correct.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADatagramCarryingBothAnAckAndSplitStreamDataStaysWithinThePathMtu(
+        bool ackLeads)
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+
+        // The path-MTU search is off so the only oversized datagram this connection is allowed
+        // to send - s14.2's PMTU probe - cannot be what an assertion here catches.
+        var spec = new TlsQuicConnectionSpec
+        {
+            PaddingTarget = Spec().PaddingTarget,
+            SourceConnectionIdLength = Spec().SourceConnectionIdLength,
+            LocalFlowControl = Spec().LocalFlowControl,
+            TransportParameters = Spec().TransportParameters,
+            PathMtuDiscovery = false,
+            AckLeadsInPacket = ackLeads,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, spec);
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // A BODY SEVERAL DATAGRAMS LONG, so the head of the queue is split rather than taken
+        // whole - which is the only shape in which the budget arithmetic is load-bearing.
+        var stream = connection.Streams.OpenBidirectional();
+        connection.Streams.Send(stream, new byte[4096]);
+
+        // AND AN ACK OWED IN THE SAME PASS. RFC 9000 s19.2 makes PING ack-eliciting, so the
+        // pump that processes it builds the acknowledgment into the very packet the stream
+        // data is being split for. Queued BEFORE the pump for that reason.
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+
+        var before = clientTransport.Sent.Count;
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        var sent = clientTransport.Sent.Skip(before).ToArray();
+        Assert.NotEmpty(sent);
+        foreach (var datagram in sent)
+        {
+            Assert.True(
+                datagram.Length <= connection.CurrentMaxDatagramSize,
+                $"a datagram of {datagram.Length} bytes went out over the "
+                    + $"{connection.CurrentMaxDatagramSize}-byte maximum datagram size "
+                    + $"(AckLeadsInPacket = {ackLeads})");
+        }
+
+        // THE ACK REALLY WAS IN THERE, so a run that fitted because nothing was coalesced
+        // cannot pass for a run that fitted because the budget was right.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ack),
+            serverPeer.LastDatagramFrames);
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Stream),
+            serverPeer.LastDatagramFrames);
+    }
+
     [Fact]
     public async Task PathMtuDiscoveryProbesAndRaisesTheDatagramSize()
     {
