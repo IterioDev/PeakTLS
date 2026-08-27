@@ -1751,6 +1751,61 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         _receivedDatagrams.Add(frame.Data.ToArray());
     }
 
+    // RFC 9000 s19.11's MAX_STREAMS dispatch arm's body - audit finding 11.
+    //
+    // THE FRAME TYPE CARRIES THE DIRECTION AND NOTHING ELSE DOES. s19.11: "Type (i) =
+    // 0x12..0x13 ... A MAX_STREAMS frame with a type of 0x12 applies to bidirectional streams,
+    // and a MAX_STREAMS frame with a type of 0x13 applies to unidirectional streams."
+    // TlsQuicFlowControlFrames.IsUnidirectional is the one reader of that bit, which is why the
+    // mask is not written out here - see its own remark for why it exists at all.
+    //
+    // A DECREASE IS IGNORED AND IS NOT AN ERROR, which is s19.11 stated twice: "MAX_STREAMS
+    // frames that do not increase the stream limit MUST be ignored", with its cause named -
+    // "Loss or reordering can cause an endpoint to receive a MAX_STREAMS frame with a lower
+    // stream limit than was previously received." No error code is attached to the case, and
+    // inventing one would end connections the network merely shuffled. The two TryRaise methods
+    // return whether the allowance moved; nothing here needs the answer, and it is the budget's
+    // own witnesses that read it.
+    //
+    // THE 2^60 CEILING IS ENFORCED BEFORE THIS METHOD AND IS NOT RE-ENFORCED IN IT. s19.11:
+    // "This value cannot exceed 2^60 ... Receipt of a frame that permits opening of a stream
+    // larger than this limit MUST be treated as a connection error of type
+    // FRAME_ENCODING_ERROR." TlsQuicFlowControlFrames.TryReadMaximumStreams already refuses such
+    // a frame against MaximumStreamCount, so it never becomes a TlsQuicFrame and never reaches
+    // this switch arm; the refusal surfaces as TlsQuicPacketReceiver's CloseError and closes the
+    // connection with that code. Writing the bound a second time here would be two owners for
+    // one wire constant, which is the shape of defect this file's other advertisement rules
+    // exist to prevent. TlsQuicConnectionTests.AMaximumStreamsFrameAboveTheStreamCountBound
+    // ClosesWithFrameEncodingError pins the outcome rather than the parser, so the MUST has a
+    // witness at the level a peer can see.
+    //
+    // THE NULL BUDGET IS A REFUSAL AND NOT A THROW, exactly as it is for its two neighbours in
+    // TlsQuicStreams.cs: s12.4 Table 3 gives 0x12 and 0x13 the row "__01", which
+    // TlsQuicFrameLegality already enforces, so 1-RTT read keys - and therefore the peer's
+    // transport parameters - are in hand by the time one arrives. Unreachable, and deliberately
+    // unwitnessed; reaching PeerFlowControl's throw on peer input would be the off-path kill
+    // switch 9a-ii shipped.
+    //
+    // The witness is
+    // TlsQuicConnectionTests.AMaximumStreamsFrameRaisesTheExhaustedBidirectionalAllowance.
+    private void ReceiveMaximumStreamsFrame(in TlsQuicFrame frame, ref string? failure)
+    {
+        if (_peerFlowControl is null)
+        {
+            failure ??= "A MAX_STREAMS frame arrived before the peer's transport parameters, "
+                + "so there is no RFC 9000 s18.2 stream allowance to raise.";
+            return;
+        }
+
+        if (TlsQuicFlowControlFrames.IsUnidirectional(frame.RawType))
+        {
+            _peerFlowControl.TryRaiseUnidirectionalStreamLimit(frame.MaximumStreams);
+            return;
+        }
+
+        _peerFlowControl.TryRaiseBidirectionalStreamLimit(frame.MaximumStreams);
+    }
+
     /// <summary>The Destination Connection ID currently on our outgoing packets. RFC 9000
     /// s7.2: our own unpredictable choice until the server's first packet, the server's
     /// Source Connection ID afterwards.</summary>
@@ -2343,6 +2398,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 // existed both frames fell into the default below and the send
                                 // budget could only shrink.
                                 ReceiveFlowControlFrame(frame, ref streamFailure);
+                                break;
+
+                            case TlsQuicFrameType.MaxStreams:
+                                // The peer raising OUR stream-count allowance - RFC 9000
+                                // s19.11, types 0x12 and 0x13. Until this arm existed the frame
+                                // was parsed in full by
+                                // TlsQuicFlowControlFrames.TryReadMaximumStreams and then
+                                // dropped into the default arm below, so the allowance could
+                                // only ever go down and OpenBidirectionalStream threw once the
+                                // advertised count ran out. That is audit finding 11, and it is
+                                // an HTTP/3 fault rather than a theoretical one: RFC 9114 s4.1
+                                // spends one client-initiated bidirectional stream per request,
+                                // so request N+1 on a reused connection died with an exception
+                                // where the RFC has it wait for credit.
+                                ReceiveMaximumStreamsFrame(frame, ref streamFailure);
                                 break;
 
                             case TlsQuicFrameType.ResetStream:

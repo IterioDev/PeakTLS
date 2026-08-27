@@ -273,14 +273,194 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(0UL, budget.RemainingUnidirectionalStreams);
 
         // THE FOURTH IS THE ONE THAT MATTERS, and it is HTTP/3's shape exactly: control,
-        // QPACK encoder, QPACK decoder, and then anything at all. A4-minimal handles no
-        // MAX_STREAMS, so there is no state in which a fourth becomes available - silently
-        // opening it would exceed a limit the peer never granted.
+        // QPACK encoder, QPACK decoder, and then anything at all. The peer has granted three
+        // and sent no MAX_STREAMS since, so silently opening a fourth would exceed a limit it
+        // never gave.
         var error = Assert.Throws<InvalidOperationException>(
             () => budget.OpenUnidirectionalStream());
 
         Assert.Contains("initial_max_streams_uni (0x09)", error.Message, StringComparison.Ordinal);
-        Assert.Contains("no MAX_STREAMS frame", error.Message, StringComparison.Ordinal);
+
+        // AND THE MESSAGE NAMES THE ONE THING THAT WOULD LIFT IT. It used to say the budget was
+        // static because nothing handled RFC 9000 s19.11 at all; audit finding 11 wired that
+        // frame up, so the message now names it as the route rather than denying it exists -
+        // which is the difference between "you cannot" and "the peer has not".
+        Assert.Contains("MAX_STREAMS frame of type 0x13", error.Message, StringComparison.Ordinal);
+    }
+
+    // ---- RFC 9000 s19.11: MAX_STREAMS, audit finding 11 -----------------------------------
+
+    /// <summary>
+    /// THE FINDING ITSELF. RFC 9000 s19.11's MAX_STREAMS was parsed by
+    /// <c>TlsQuicFlowControlFrames.TryReadMaximumStreams</c>, reached the frame switch, fell into
+    /// its <c>default:</c> arm and was dropped - so the peer's stream allowance could only ever
+    /// go down. s19.11: "A MAX_STREAMS frame with a type of 0x12 applies to bidirectional
+    /// streams", and its Maximum Streams field is "A count of the cumulative number of streams of
+    /// the corresponding type that can be opened over the lifetime of the connection."
+    /// <para>ONE BIDIRECTIONAL STREAM ADVERTISED, WHICH IS HTTP/3's SHAPE AND NOT A CONTRIVANCE.
+    /// RFC 9114 s4.1 puts each request on its own client-initiated bidirectional stream, so a
+    /// peer that grants a small number up front and extends it as requests finish is the ordinary
+    /// case - and request N+1 on a reused connection is exactly the call that threw.</para>
+    /// <para>THROUGH THE WIRE, NOT THROUGH THE BUDGET. The frame is built by the harness's real
+    /// peer, encoded by <c>TlsQuicFrames.WriteFrame</c>, sealed in a 1-RTT packet and opened by
+    /// the connection's own AEAD, so what is under test is the DISPATCH the finding names rather
+    /// than the two methods it dispatches to.</para>
+    /// </summary>
+    [Fact]
+    public async Task AMaximumStreamsFrameRaisesTheExhaustedBidirectionalAllowance()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(
+            credential,
+            connection.OriginalDestinationConnectionId,
+            flowControl: FlowControlParameters(streamsBidi: 1));
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        var budget = connection.PeerFlowControl;
+        Assert.Equal(1UL, budget.InitialMaxStreamsBidi);
+        Assert.Equal(1UL, budget.BidirectionalStreamLimit);
+
+        budget.OpenBidirectionalStream();
+        var exhausted = Assert.Throws<InvalidOperationException>(
+            () => budget.OpenBidirectionalStream());
+        Assert.Contains("exhausted", exhausted.Message, StringComparison.Ordinal);
+
+        // s19.11's grant: three streams over the lifetime of the connection, so two more than
+        // the one already spent.
+        await serverPeer.SendOneRttFramesAsync(
+            [
+                new TlsQuicFrame
+                {
+                    RawType = (ulong)TlsQuicFrameType.MaxStreams,
+                    MaximumStreams = 3,
+                },
+            ],
+            cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // CUMULATIVE, SO THE CREDIT IS THE DIFFERENCE. Three granted minus one spent is two, and
+        // an implementation that treated the field as an increment would find three here.
+        Assert.Equal(3UL, budget.BidirectionalStreamLimit);
+        Assert.Equal(2UL, budget.RemainingBidirectionalStreams);
+        budget.OpenBidirectionalStream();
+        budget.OpenBidirectionalStream();
+        Assert.Throws<InvalidOperationException>(() => budget.OpenBidirectionalStream());
+
+        // AND initial_max_streams_bidi STILL REPORTS WHAT WAS ADVERTISED. A property named for
+        // the transport parameter that moved with the frames would make its two readers - the
+        // RFC 9114 pre-flight and this file's own refusal messages - lie.
+        Assert.Equal(1UL, budget.InitialMaxStreamsBidi);
+    }
+
+    /// <summary>
+    /// s19.11's OTHER HALF, and it is a MUST about a frame that must NOT act: "MAX_STREAMS frames
+    /// that do not increase the stream limit MUST be ignored." s19.11 supplies the cause in the
+    /// same paragraph - "Loss or reordering can cause an endpoint to receive a MAX_STREAMS frame
+    /// with a lower stream limit than was previously received" - which is why a decrease is
+    /// dropped rather than treated as a violation: the peer did nothing wrong, the network
+    /// shuffled two datagrams.
+    /// </summary>
+    [Fact]
+    public void AMaximumStreamsFrameThatDoesNotIncreaseTheLimitIsIgnored()
+    {
+        var budget = Budget(FlowControlParameters(streamsBidi: 4, streamsUni: 4));
+
+        budget.OpenBidirectionalStream();
+        budget.OpenUnidirectionalStream();
+        Assert.Equal(3UL, budget.RemainingBidirectionalStreams);
+        Assert.Equal(3UL, budget.RemainingUnidirectionalStreams);
+
+        // A stale grant, an equal one, and a raise, in that order. The first two must move
+        // nothing; the third must credit exactly its difference and no more.
+        Assert.False(budget.TryRaiseBidirectionalStreamLimit(2));
+        Assert.False(budget.TryRaiseUnidirectionalStreamLimit(2));
+        Assert.False(budget.TryRaiseBidirectionalStreamLimit(4));
+        Assert.False(budget.TryRaiseUnidirectionalStreamLimit(4));
+        Assert.Equal(3UL, budget.RemainingBidirectionalStreams);
+        Assert.Equal(3UL, budget.RemainingUnidirectionalStreams);
+
+        // THE TWO DIRECTIONS ARE RAISED SEPARATELY, and the values differ so that a
+        // single-counter implementation - or a negated direction test - cannot pass. s19.11
+        // spends a whole frame type on the distinction: "Type (i) = 0x12..0x13".
+        Assert.True(budget.TryRaiseBidirectionalStreamLimit(6));
+        Assert.Equal(6UL, budget.BidirectionalStreamLimit);
+        Assert.Equal(5UL, budget.RemainingBidirectionalStreams);
+        Assert.Equal(4UL, budget.UnidirectionalStreamLimit);
+        Assert.Equal(3UL, budget.RemainingUnidirectionalStreams);
+
+        Assert.True(budget.TryRaiseUnidirectionalStreamLimit(9));
+        Assert.Equal(9UL, budget.UnidirectionalStreamLimit);
+        Assert.Equal(8UL, budget.RemainingUnidirectionalStreams);
+        Assert.Equal(6UL, budget.BidirectionalStreamLimit);
+        Assert.Equal(5UL, budget.RemainingBidirectionalStreams);
+    }
+
+    /// <summary>
+    /// s19.11's ceiling, asserted at the level a peer can observe rather than at the parser.
+    /// "This value cannot exceed 2^60, as it is not possible to encode stream IDs larger than
+    /// 2^62-1. Receipt of a frame that permits opening of a stream larger than this limit MUST be
+    /// treated as a connection error of type FRAME_ENCODING_ERROR."
+    /// <para>THE BOUND HAS EXACTLY ONE OWNER, which is why this test exists in this file at all.
+    /// <c>TlsQuicFlowControlFrames.TryReadMaximumStreams</c> enforces it and
+    /// <c>TlsQuicFlowControlFramesTests</c> pins it there; what was never witnessed is that the
+    /// refusal actually reaches the peer as a connection error rather than dying inside the
+    /// parser. Writing the constant a second time in the dispatch would have been two owners for
+    /// one wire value, so the OUTCOME is asserted instead.</para>
+    /// <para>HAND-ENCODED BYTES, BECAUSE NO WRITER IN THIS LIBRARY WILL PRODUCE THEM.
+    /// <c>WriteMaximumStreamsFrameFields</c> throws on a count above the bound, by design - so
+    /// the frame is written here against s19.11's two-field format: the type byte 0x12, then
+    /// 2^60+1 as RFC 9000 s16's eight-byte variable-length integer (the two-bit 0b11 prefix over
+    /// 0x1000000000000001 gives 0xD000000000000001).</para>
+    /// </summary>
+    [Fact]
+    public async Task AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrameEncodingError()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // DRAINED, FOR THE REASON AfterConfirmationTheCloseGoesOutInAOneRttPacketAsSection1023
+        // Requires gives: the pump above answered HANDSHAKE_DONE with a 1-RTT ACK, and
+        // LoopbackQuicPeer.PumpOnceAsync reads ONE datagram per call.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Null(serverPeer.LastConnectionClose);
+
+        await serverPeer.SendOneRttRawFrameAsync(
+            [0x12, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01], cancellation.Token);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        // s20.1 FRAME_ENCODING_ERROR (0x07): "A frame was received that was badly formatted."
+        // And it was SENT, not merely recorded - which is audit finding 9's half of this test.
+        Assert.Equal(TlsQuicTransportError.FrameEncodingError, connection.ClosedWith);
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        var close = Assert.NotNull(serverPeer.LastConnectionClose);
+        Assert.Equal((ulong)TlsQuicTransportError.FrameEncodingError, close.ErrorCode);
     }
 
     [Fact]
