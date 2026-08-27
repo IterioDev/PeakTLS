@@ -9,7 +9,10 @@ from the graphify knowledge graph (`graphify-out/graph.json`, built 2026-08-27 1
 `27f528f`); the graph's community partition supplied the nine audit clusters below and its hub
 ranking picked the read order. Findings are from reading the source those clusters named.
 
-Nothing has been changed. This is the pre-fix report.
+**Status: resolved.** Sixteen of the seventeen correctness findings are fixed, one is withdrawn,
+and all seven performance items are done. See "Resolution" at the end for what changed, what the
+audit got wrong, and what review caught. The finding sections below are kept in their original
+pre-fix wording so the reasoning that produced them stays legible.
 
 | Cluster (graphify community) | Files |
 |---|---|
@@ -486,3 +489,96 @@ Recorded so a later pass does not re-tread them.
 Findings 4, 5 and 12 each have a one-or-two-line fix at the point identified. Findings 1, 2, 3 and 6
 need a small design decision first (key-material ownership; buffered-byte accounting; stream reset
 state; a buffering cap), so they are worth agreeing before the edit.
+
+---
+
+## Resolution
+
+Branch `fix/quic-http3-audit`. Suite went from **3038 passed / 3 failed / 25 skipped** to
+**3101 / 3 / 25** - 63 tests added, no regressions. The three failures are pre-existing and
+unrelated: a certificate-chain quirk, a platform SslStream interop, and the MsQuic loopback test
+discussed below.
+
+Work was split into six groups by file ownership so several could run in parallel. Each went
+through spec-compliance review, then code-quality review, several through three or four rounds.
+
+| Group | Findings | Rounds |
+|---|---|---|
+| A - key material | #1 | 3 |
+| B - stream layer | #2, #3, #8, #12 | 4 |
+| C - HTTP/3 | #6 | 4 |
+| D - packet plane | #13, #14, #17 | 2 |
+| E - connection conformance | #4, #5, #7, #9, #10, #11, #15 | 2 |
+| F - performance | P1-P7 | 2 |
+
+### Where this report was wrong
+
+Three corrections, kept because the errors are instructive.
+
+**#16 was a false positive.** GOAWAY is enforced, unconditionally, in
+`TlsQuicHttp3Connection.TryOpenRequest`. The audit searched for consumers of `PeerGoawayStreamId`
+only within the file that stores it. The fix it recommended would have weakened an unconditional
+MUST NOT into an identifier comparison; the implementer assigned to it declined, correctly. Full
+write-up in the section above.
+
+**#1's fix direction was under-specified.** The report proposed owned copies *or* re-fetching after
+the plan. Owned copies alone are insufficient: material fetched before a key update is intact but
+belongs to the *previous generation*, and a previous-generation key paired with a toggled phase bit
+is exactly as undecryptable as a zeroed one. The fix pairs owned copies with an ordered gate
+(`TryPlanShortHeaderPacket`: state, then plan, then keys) that all four 1-RTT send sites route
+through.
+
+**#2's fix direction was wrong.** The report offered charging retained bytes against the window as
+one option. That would have closed a *conforming* peer with FLOW_CONTROL_ERROR, because the
+descending-overlap pattern is inside RFC 9000 s19.9's accounting by construction. The fix coalesces
+into non-overlapping ranges instead, so the bound follows from the limit already enforced. A
+fragmentation cap was added on top - applied *after* a compaction pass, because a raw piece-count
+cap kills a conforming connection on a single dropped datagram, `Buffer` having never joined merely
+abutting pieces.
+
+### What review caught before it shipped
+
+Recorded because it is the argument for the review rounds, which cost more than the fixes did.
+
+| Would have shipped | Caught by |
+|---|---|
+| A truncated body reported as a **successful** HTTP response - `ReceiveComplete` widened to include resets, silently rewiring a consumer that already read it | spec review of B |
+| A buffer ceiling measuring *arrival* rather than residue, refusing streams whose bytes the next statement would have drained | spec review of C |
+| An encoder ceiling sized from a **test fixture's** table capacity rather than the connection's advertised one | spec review of C |
+| A comment asserting RFC 9001 s6.6 gives AES-CCM the same confidentiality limit as AES-GCM - it is 2^21.5, ~2.8x lower - licensing a future CCM arm to protect nearly 3x the packets the bound permits | re-review of A |
+| A fragmentation cap killing a conforming peer after one lost datagram | B, while implementing |
+| A non-truncating reset still reading as complete, RFC 9000 s4.5 giving `_finalSize` two causes | C, while implementing |
+| Header-protection masking with **CBC and a random IV** - `Aes.Create()` does not default to ECB - making every packet unopenable | F's own equivalence test |
+| A merge resolution reintroducing #1's shape and burning a second packet number per close packet | coordinator, on merge |
+
+### Notable design decisions
+
+- **The confidentiality limit is now a knob** (`AesGcmConfidentialityLimit`,
+  `ChaCha20Poly1305ConfidentialityLimit` on `TlsQuicConnectionSpec`), defaulting to today's values.
+  Without it a locally-initiated key update needed 2^23 packets and the ordering half of #1's fix
+  could not be tested at all.
+- **`FinReceived` became `FinalSizeKnown`.** RFC 9000 s4.5 has RESET_STREAM establish a final size
+  too, so the old name answered true where no FIN had ever arrived. The underlying state was not
+  split: both callers want the union, since s13.3 tests "Size Known **or** Reset Recvd" and RFC 9114
+  s6.2.1 makes closing and resetting a control stream the same error.
+- **P1's cached cipher schedule is receiver-only.** A prepared cipher cannot be copied, only
+  borrowed, and a borrowed handle to key material is #1 one level up. The send path still derives
+  per packet from owned copies, forgoing the win rather than reopening the bug.
+- **The close level order follows `CoalesceAscendingByLevel`** rather than a literal, so a
+  handshake-time close now leads with Initial. Wire-visible and intentional.
+
+### Still open
+
+**The MsQuic loopback test remains red, and it is not a library defect.** Two investigations reached
+the same conclusion independently: `MsQuicLoopbackTests.cs` advertises
+`initial_max_streams_uni = 16` in a hand-built ClientHello blob while leaving the connection spec's
+`TransportParameters` at the one-slot default, so `AsAdvertisedBy` zeroes the enforcing half and the
+client refuses MsQuic's control stream. MsQuic is correct and so are we; the two copies of one wire
+value were never wired together. The library documents this exact trap twice, in
+`TlsQuicClientHelloProfileFactory` and `TestQuicSpecValues`.
+
+This matters more than a single red test suggests: it is the only test in the suite that validates
+against an independent implementation, and it currently fails before opening a stream, so none of
+the stream or HTTP/3 work here is covered by real interop. Its sibling
+`OurQuicClientCompletesAHandshakeAgainstMsQuicOnLoopback` passes only because it never opens a
+stream, so it is not evidence the fixture is sound.
