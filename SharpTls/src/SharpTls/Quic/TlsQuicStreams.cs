@@ -1687,7 +1687,7 @@ internal sealed class TlsQuicStreamSet
         }
 
         _peerStreamsFinished[index]++;
-        var granted = _peerStreamGranted[index] == 0 ? initial : _peerStreamGranted[index];
+        var granted = PeerStreamLimitNow(direction);
         var wanted = initial + _peerStreamsFinished[index];
 
         // s19.11's Maximum Streams "MUST NOT exceed 2^60", and a grant above that is a
@@ -1710,6 +1710,28 @@ internal sealed class TlsQuicStreamSet
                 : TlsQuicFrameType.MaxStreams),
             MaximumStreams = wanted,
         });
+    }
+
+    /// <summary>The stream count of <paramref name="direction"/> this endpoint has actually
+    /// told the peer it may open: the s19.11 MAX_STREAMS grant if one has been sent, and the
+    /// s18.2 initial parameter otherwise.</summary>
+    /// <remarks>
+    /// <para>THE ONE SOURCE FOR BOTH SIDES OF THE NUMBER, and that is the point rather than a
+    /// tidying. Advertisement and enforcement drifting apart is exactly the shape of C9's
+    /// finding 2, recorded in this file's header - "enforcing a number other than the
+    /// advertised one is not a placeholder, it is a divergence" - and it came back at the
+    /// stream COUNT once MAX_STREAMS started moving: CreditPeerStream raised the advertised
+    /// limit and TryReceive kept refusing at the initial one.</para>
+    /// <para>ZERO MEANS NO GRANT HAS BEEN SENT, not a grant of zero. s19.11's Maximum Streams
+    /// is cumulative and CreditPeerStream never queues a frame below <c>initial</c>, so the
+    /// two readings cannot collide: a grant that had genuinely lowered the limit to zero is a
+    /// frame this endpoint does not build.</para>
+    /// </remarks>
+    private ulong PeerStreamLimitNow(TlsQuicStreamDirection direction)
+    {
+        var granted = _peerStreamGranted[
+            direction == TlsQuicStreamDirection.Unidirectional ? 1 : 0];
+        return granted == 0 ? LocalFlowControl.PeerStreamLimitFor(direction) : granted;
     }
 
     /// <summary>RFC 9000 s19.11: "This value cannot exceed 2^60, as it is not possible to
@@ -1925,8 +1947,18 @@ internal sealed class TlsQuicStreamSet
             // breath: "The limit includes streams that have been closed as well as those that
             // are open." The two directions are counted separately because s18.2 gives them
             // separate parameters.
+            // AND IT IS THE LIMIT WE HAVE ADVERTISED, NOT THE ONE WE STARTED FROM, which is the
+            // audit's finding 8. CreditPeerStream sends s19.11 MAX_STREAMS frames raising the
+            // peer's allowance to initial + finished, and this test read
+            // PeerStreamLimitFor - initial_max_streams_uni / _bidi, verbatim and immovable - so
+            // a peer that spent credit WE GAVE IT was killed with STREAM_LIMIT_ERROR. s19.11
+            // makes MAX_STREAMS the definition of the limit the moment one is sent: "the
+            // maximum number of streams of a given type that the receiver permits", cumulative
+            // over the connection. Refusing inside it is a protocol violation on OUR side, and
+            // it is the failure mode that only appears after a connection has been up long
+            // enough to close a stream - which is why nothing before this reached it.
             if (TlsQuicStreamId.OrdinalOf(id)
-                >= LocalFlowControl.PeerStreamLimitFor(TlsQuicStreamId.DirectionOf(id)))
+                >= PeerStreamLimitNow(TlsQuicStreamId.DirectionOf(id)))
             {
                 error = TlsQuicTransportError.StreamLimitError;
                 return false;
