@@ -1142,6 +1142,79 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(510, close.ReasonPhrase.Length);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 10. RFC 9000 s10.2.3, the unconfirmed arm: "Prior to confirming the
+    /// handshake, a peer might be unable to process 1-RTT packets, so an endpoint SHOULD send a
+    /// CONNECTION_CLOSE frame in both Handshake and 1-RTT packets." The same reasoning runs one
+    /// level further down - a server that has not yet installed our Handshake keys can read only
+    /// the Initial packet - and s10.2.3 names the shape of the answer in the next breath: "The
+    /// CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
+    /// datagram."
+    /// <para>THE WALK USED TO <c>return</c> ON ITS FIRST HIT, so [Handshake, Initial] produced a
+    /// Handshake close and nothing else, and the Initial copy the section asks for was never
+    /// built. Deleting the second copy again turns this test's <c>Equal(2, ...)</c> red.</para>
+    /// <para>READ OFF THE CLEAR-TEXT HEADER FIRST, because RFC 9000 s17.2's Long Packet Type
+    /// bits sit above the four bits RFC 9001 s5.4.1's header protection masks - so the two
+    /// packet types are legible with no key at all, which is exactly the position the server
+    /// this defends against is in. The peer then opens both, which is what turns "two packets"
+    /// into "two closes".</para>
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(clientTransport, serverTransport, pki);
+
+        // The s7.3 refusal is used only as a way of reaching an UNCONFIRMED close with both
+        // handshake levels keyed - which is the one window s10.2.3's SHOULD is about. What the
+        // close SAYS is AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
+        // ParameterError's claim, and is not re-asserted here.
+        await using var server = Server(
+            credential,
+            connection.OriginalDestinationConnectionId,
+            overrideOriginalDestination: Convert.FromHexString("F0F1F2F3F4F5F6F7"));
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        Assert.False(connection.IsHandshakeConfirmed);
+        Assert.True(connection.IsDraining);
+
+        // TWO PACKETS IN ONE DATAGRAM, highest protection first. The order is s10.2.3's
+        // "Generally ... the highest level of packet protection" rather than s12.2's ascending
+        // suggestion, because on the teardown path the copy most likely to be openable is the
+        // one to lead with.
+        var closeDatagram = clientTransport.Sent[^1];
+        var coalesced = TlsQuicDatagramReader.Read(closeDatagram).ToList();
+        Assert.Equal(2, coalesced.Count);
+
+        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
+            coalesced[0].Packet, out var handshakeHeader, out _));
+        Assert.Equal(TlsQuicLongPacketType.Handshake, handshakeHeader.Type);
+
+        Assert.True(TlsQuicPacketHeader.TryReadLongHeader(
+            coalesced[1].Packet, out var initialHeader, out _));
+        Assert.Equal(TlsQuicLongPacketType.Initial, initialHeader.Type);
+
+        // AND BOTH CARRY THE FRAME, which the header bits alone cannot say. The peer holds read
+        // keys at both levels, so this is the AEAD's answer rather than a parser's.
+        await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Handshake, TlsQuicFrameType.ConnectionClose),
+            serverPeer.LastDatagramFrames);
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Initial, TlsQuicFrameType.ConnectionClose),
+            serverPeer.LastDatagramFrames);
+    }
+
     // ---- RFC 9000 s10.1: idle timeout ----------------------------------------------------
 
     [Fact]

@@ -5592,11 +5592,33 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // is not merely the level named - it is the only level TryGetWriteKeys could answer for
     // anyway. EarlyData is absent from both arms because this client never sends 0-RTT.
     //
-    // ONE PACKET AND NOT TWO, WHICH IS A NAMED AND NARROWER DEVIATION THAN IT WAS: only the
-    // unconfirmed arm's SHOULD is still unmet, and only in its "both" half. s10.2.3 permits the
-    // pair to be coalesced ("CONNECTION_CLOSE frames sent in multiple packet types can be
-    // coalesced into a single UDP datagram"), so the debt is a second TlsQuicPacketToSend in
-    // the list below rather than anything structural.
+    // EVERY APPLICABLE LEVEL, COALESCED, AND THAT DEBT IS NOW PAID - AUDIT FINDING 10. The walk
+    // used to `return written` on the first level that had keys, so the unconfirmed arm sent a
+    // Handshake close and never the Initial one beside it. s10.2.3 asks for both and says why:
+    // "Prior to confirming the handshake, a peer might be unable to process 1-RTT packets, so an
+    // endpoint SHOULD send a CONNECTION_CLOSE frame in both Handshake and 1-RTT packets" - the
+    // same reasoning one level down, because a server that has not yet processed our Handshake
+    // keys can read only the Initial packet. s10.2.3 also states the shape of the fix: "The
+    // CONNECTION_CLOSE frames sent in multiple packet types can be coalesced into a single UDP
+    // datagram", so this is one datagram carrying two packets, not two sends.
+    //
+    // THE ORDER IS THE CANDIDATE LIST'S, HIGHEST PROTECTION FIRST, and it is deliberate against
+    // s12.2's ascending-order SUGGESTION ("makes it more likely that the receiver will be able
+    // to process all the packets in a single pass"). That is a preference about the receiver's
+    // buffering; s10.2.3's Generally - "sending the frame in a packet with the highest level of
+    // packet protection to avoid the packet being discarded" - is about which copy of a close
+    // the peer is most likely to be ABLE to open, and on the teardown path that is the one to
+    // lead with. It also keeps the close's leading packet type stable for the witnesses that
+    // read it off the clear-text header, which is what
+    // TlsQuicConnectionTests.AServerConnectionIdParameterThatDoesNotMatchClosesWithTransport
+    // ParameterError asserts.
+    //
+    // THE PACKET NUMBER IS DRAWN PER LEVEL, from that level's own counter, because RFC 9000
+    // s12.3 gives each packet number space its own - and the two packets in this datagram are in
+    // two spaces.
+    //
+    // TlsQuicConnectionTests.AnUnconfirmedCloseIsCoalescedIntoBothHandshakeAndInitialPackets is
+    // the witness.
     private int BuildCloseDatagram(bool application, ulong errorCode, string? reason)
     {
         // A TRANSPORT CODE THAT WILL NOT ENCODE SENDS NOTHING, AND THAT IS THE ABSENCE OF A
@@ -5616,6 +5638,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         ReadOnlySpan<TlsQuicEncryptionLevel> candidates = _confirmed
             ? [TlsQuicEncryptionLevel.Application]
             : [TlsQuicEncryptionLevel.Handshake, TlsQuicEncryptionLevel.Initial];
+
+        var packets = new List<TlsQuicPacketToSend>();
+        var sentAsApplicationForm = false;
+        ulong sentErrorCode = 0;
 
         foreach (var candidate in candidates)
         {
@@ -5644,7 +5670,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 && (candidate != TlsQuicEncryptionLevel.Application
                     || !IsEncodableErrorCode(errorCode));
 
-            var sentAsApplicationForm = application && !convert;
+            // RECORDED ACROSS THE WALK RATHER THAN INSIDE IT, because the two properties below
+            // describe the close this connection sent and there is now more than one packet of
+            // it. Every candidate on one arm converts identically - the unconfirmed arm holds
+            // Handshake and Initial, neither of which is Application, so `convert` cannot differ
+            // between them, and the confirmed arm has one candidate - so the last assignment and
+            // the first are the same value. Written per candidate anyway, so that a future arm
+            // mixing levels reports what its LAST packet carried rather than silently reporting
+            // a form no packet had.
+            sentAsApplicationForm = application && !convert;
 
             var frame = new TlsQuicFrame
             {
@@ -5677,51 +5711,52 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 ReasonPhrase = convert ? default : ReasonPhraseBytes(reason),
             };
 
-            var written = TlsQuicDatagramBuilder.BuildDatagram(
-                _options.Spec,
-                [
-                    new TlsQuicPacketToSend
-                    {
-                        // RFC 9000 s17.3.1's short header has none of the four long-header
-                        // fields PlanFor sets, so the 1-RTT arm takes the plan the application
-                        // send path already builds rather than a fifth arm of PlanFor - which
-                        // is why PlanFor throws for Application rather than answering.
-                        Plan = candidate == TlsQuicEncryptionLevel.Application
-                            ? ShortHeaderPlan()
-                            : PlanFor(candidate, _nextPacketNumber[(int)candidate]++),
-                        Frames = [frame],
-                        PacketProtectionCipher = keys.PacketCipher,
-                        Key = keys.Key.ToArray(),
-                        Iv = keys.Iv.ToArray(),
-                        HeaderProtectionCipher = keys.HeaderCipher,
-                        HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
-                    },
-                ],
-                _options.TimeProvider.GetUtcNow(),
-                _sendBuffer,
-                _justSent);
-            RetainSentPackets();
+            sentErrorCode = frame.ErrorCode;
 
-            // RECORDED FROM THE FRAME THAT WAS BUILT, NOT FROM THE ARGUMENTS, so that the
-            // s10.2.3 conversion above is visible to a reader of these properties rather than
-            // hidden behind them: a 0x1d close that went out at Handshake reports the s20.1
-            // code it actually carried and no application code, because that is what left.
-            if (written > 0)
+            packets.Add(new TlsQuicPacketToSend
             {
-                if (sentAsApplicationForm)
-                {
-                    ClosedWithApplicationErrorCode = frame.ErrorCode;
-                }
-                else
-                {
-                    ClosedWith = (TlsQuicTransportError)frame.ErrorCode;
-                }
-            }
-
-            return written;
+                // RFC 9000 s17.3.1's short header has none of the four long-header fields
+                // PlanFor sets, so the 1-RTT arm takes the plan the application send path
+                // already builds rather than a fifth arm of PlanFor - which is why PlanFor
+                // throws for Application rather than answering.
+                Plan = candidate == TlsQuicEncryptionLevel.Application
+                    ? ShortHeaderPlan()
+                    : PlanFor(candidate, _nextPacketNumber[(int)candidate]++),
+                Frames = [frame],
+                PacketProtectionCipher = keys.PacketCipher,
+                Key = keys.Key.ToArray(),
+                Iv = keys.Iv.ToArray(),
+                HeaderProtectionCipher = keys.HeaderCipher,
+                HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+            });
         }
 
-        return 0;
+        if (packets.Count == 0)
+        {
+            return 0;
+        }
+
+        var written = TlsQuicDatagramBuilder.BuildDatagram(
+            _options.Spec, packets, _options.TimeProvider.GetUtcNow(), _sendBuffer, _justSent);
+        RetainSentPackets();
+
+        // RECORDED FROM THE FRAME THAT WAS BUILT, NOT FROM THE ARGUMENTS, so that the s10.2.3
+        // conversion above is visible to a reader of these properties rather than hidden behind
+        // them: a 0x1d close that went out at Handshake reports the s20.1 code it actually
+        // carried and no application code, because that is what left.
+        if (written > 0)
+        {
+            if (sentAsApplicationForm)
+            {
+                ClosedWithApplicationErrorCode = sentErrorCode;
+            }
+            else
+            {
+                ClosedWith = (TlsQuicTransportError)sentErrorCode;
+            }
+        }
+
+        return written;
     }
 
     // RFC 9000 s7.3, and the reason it is here rather than on TlsQuicTransportParameters: every
