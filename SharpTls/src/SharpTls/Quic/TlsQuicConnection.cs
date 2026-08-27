@@ -1556,16 +1556,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// integrity count.</summary>
     internal long AuthenticationFailures => _receiver.AuthenticationFailures;
 
-    // RFC 9001 s6.6's confidentiality limits, per AEAD: "For AEAD_AES_128_GCM and
-    // AEAD_AES_256_GCM, the confidentiality limit is 2^23 encrypted packets ... For
-    // AEAD_CHACHA20_POLY1305, the confidentiality limit is greater than the number of possible
-    // packets (2^62) and so can be disregarded."
+    // RFC 9001 s6.6's confidentiality limits, per AEAD. THE FIGURES ARE NOT HERE: they are
+    // TlsQuicConnectionSpec.AesGcmConfidentialityLimit and
+    // TlsQuicConnectionSpec.ChaCha20Poly1305ConfidentialityLimit, each defaulting to the
+    // section's own value, and this connection reads whichever the selected AEAD names. A
+    // second copy of a limit beside the code that enforces it is how the two drift apart, and
+    // this file has been bitten by exactly that shape before - see the advertisement note on
+    // the flow-control limits.
     //
-    // DISREGARDED IS WRITTEN AS 2^62 RATHER THAN AS long.MaxValue, because that is the number
-    // s6.6 gives its reason from - the count of possible packets - and a reader comparing this
-    // line to the section should find the section's own figure.
-    internal static long ConfidentialityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
-        cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305 ? 1L << 62 : 1L << 23;
+    // MAKING IT A KNOB IS WHAT PUTS THE CROSSING UNDER TEST. Everything past the limit - the
+    // update, the phase bit, WHICH GENERATION the crossing packet is sealed with, s6.1's
+    // acknowledgment gate and s6.6's "MUST stop using the connection" - is shipped code that
+    // 2^23 packets of traffic makes unreachable from a test.
 
     // s6.6's integrity limits: "For AEAD_AES_128_GCM and AEAD_AES_256_GCM, the integrity limit
     // is 2^52 invalid packets ... For AEAD_CHACHA20_POLY1305, the integrity limit is 2^36
@@ -1600,7 +1602,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // duration of a comparison.
         if (!_keys.TryGetPacketProtectionCipher(TlsQuicEncryptionLevel.Application, out var aead)
             || ApplicationPacketsProtectedWithCurrentKeys
-                < ConfidentialityLimitFor(aead))
+                < _options.Spec.ConfidentialityLimitFor(aead))
         {
             return;
         }

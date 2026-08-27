@@ -487,6 +487,92 @@ public sealed partial class TlsQuicConnectionTests
         }
     }
 
+    [Fact]
+    public async Task ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration()
+    {
+        // s6.6: "Endpoints MUST initiate a key update before sending more protected packets
+        // than the confidentiality limit for the selected AEAD permits." BEFORE, so the packet
+        // that crosses the limit is itself protected with the NEW keys - and s6.1 says which
+        // ones those are: "The endpoint toggles the value of the Key Phase bit and uses the
+        // updated key and IV to protect all subsequent packets."
+        //
+        // THE PAIR IS THE SUBJECT, NOT THE UPDATE. That a key update happens at the limit is
+        // arithmetic; that the packet carrying the toggled bit is sealed with the generation
+        // that bit names is the part the send path can get wrong, and did. Building the packet
+        // plan is what RUNS this update - ShortHeaderPlan reads the phase through
+        // ProtectOneMoreApplicationPacket - so a send path that took its key material before
+        // the plan and used it after paired generation n's key with generation n+1's phase
+        // bit. Worse, the outgoing keys are zeroed as they are replaced, so before
+        // TlsQuicWriteKeyMaterial owned its copies the packet went out under an ALL-ZERO key:
+        // undecryptable, and per s6.6's integrity counter indistinguishable from a forgery.
+        //
+        // THE PEER IS THE ORACLE AND IT IS NOT LOOKING AT THE BIT. LoopbackQuicPeer's receiver
+        // reads the phase bit, reaches for the generation that bit names, and opens the packet
+        // or does not. It cannot be satisfied by a client that agrees with itself about the
+        // wrong generation, which is what an assertion on WriteKeyPhase alone would be.
+        //
+        // THE LIMIT IS LOWERED TO REACH THE CROSSING AT ALL. 2^23 packets is not a test, so
+        // TlsQuicConnectionSpec.AesGcmConfidentialityLimit carries s6.6's figure as its default
+        // and this is the one caller that moves it. Two, not one: the first 1-RTT packet then
+        // sits below the limit and the second crosses it, so a limit read as ">" rather than
+        // ">=" - or a counter that never accumulated - shows up as no update at all.
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        await using var connection = Connection(
+            clientTransport, serverTransport, pki, Spec(aesGcmConfidentialityLimit: 2));
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // HANDSHAKE_DONE is ack-eliciting, so the answer is the first 1-RTT packet this
+        // connection ever protects - one below the limit, and still at s6's initial phase 0.
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.Equal(1, connection.ApplicationPacketsProtectedWithCurrentKeys);
+        Assert.Equal(0, connection.KeyUpdatesApplied);
+        Assert.False(connection.WriteKeyPhase);
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // AND THE SECOND CROSSES IT. The PING is ack-eliciting too, so the client owes an
+        // acknowledgment; that acknowledgment is the packet whose plan trips s6.6.
+        await serverPeer.SendOneRttFramesAsync(
+            [new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Ping }],
+            cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // s6: "The Key Phase bit ... is toggled to signal each subsequent key update", and
+        // s6.1's update is this endpoint's own rather than a response to the peer - the peer
+        // has not rotated, so nothing but the limit could have caused it.
+        Assert.Equal(1, connection.KeyUpdatesApplied);
+        Assert.True(connection.WriteKeyPhase);
+
+        // THE PEER OPENS THE CROSSING PACKET, WHICH IS THE WHOLE TEST. Its read keys for the
+        // toggled phase are s6.3's armed next generation - "endpoints MUST be able to retain
+        // two sets of packet protection keys for receiving packets: the current and the next"
+        // - so a client that sealed under generation n while announcing n+1 leaves this pump
+        // with nothing it can open, and LoopbackQuicPeer's own guard turns that into a throw
+        // rather than a quiet zero.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.Contains(
+            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ack),
+            serverPeer.LastDatagramFrames);
+
+        // NOTHING FAILED AUTHENTICATION IN THE OTHER DIRECTION EITHER. s6.1 updates the
+        // receiving keys of the endpoint that initiates - "The endpoint that initiates a key
+        // update also updates the keys that it uses for receiving packets" - while this peer
+        // is still writing at the old phase, and s6.3's retained previous generation is what
+        // keeps that readable. A client that dropped the old read keys on its own update would
+        // count every subsequent peer packet here.
+        Assert.Equal(0, connection.AuthenticationFailures);
+    }
+
     // ---- RFC 9001 s6.6: the AEAD counts and their limits ----------------------------------
 
     [Theory]
@@ -513,16 +599,24 @@ public sealed partial class TlsQuicConnectionTests
         //    packets ... For AEAD_CHACHA20_POLY1305, the integrity limit is 2^36 invalid
         //    packets."
         //
-        // THE FOUR ARE PINNED AND THE BRANCHES ARE NOT, deliberately. Reaching 2^23 protected
-        // packets in a test is not feasible and a limit made injectable to fake it would be a
-        // knob no shipped code path uses; what is actually at risk here is the arithmetic -
-        // 2^23 against 2^32, or the confidentiality and integrity figures swapped, both of
-        // which this catches and neither of which a branch test would.
+        // THE FOUR ARE PINNED AND THE BRANCHES ARE NOT, deliberately. What is at risk here is
+        // the arithmetic - 2^23 against 2^32, or the confidentiality and integrity figures
+        // swapped, both of which this catches and neither of which a branch test would.
+        //
+        // THE CONFIDENTIALITY HALF IS NOW READ OFF A DEFAULT-CONSTRUCTED SPEC, because that is
+        // where the figure lives: TlsQuicConnectionSpec.AesGcmConfidentialityLimit and its
+        // ChaCha20 sibling are the single source, and TlsQuicConnection reads them. This
+        // paragraph used to say that making the limit injectable "would be a knob no shipped
+        // code path uses"; that is no longer true, and
+        // ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration is what the knob
+        // bought - the crossing itself, which 2^23 packets of traffic otherwise puts out of
+        // reach of any test. What this assertion still owns is that lowering the knob for that
+        // one test did not move the DEFAULT.
         //
         // THE TWO CIPHERS ARE THE OPPOSITE WAY ROUND FOR THE TWO LIMITS, which is the shape a
         // swap would break: ChaCha20 has the LARGER confidentiality limit and the SMALLER
         // integrity limit.
-        Assert.Equal(confidentiality, TlsQuicConnection.ConfidentialityLimitFor(cipher));
+        Assert.Equal(confidentiality, new TlsQuicConnectionSpec().ConfidentialityLimitFor(cipher));
         Assert.Equal(integrity, TlsQuicConnection.IntegrityLimitFor(cipher));
     }
 
