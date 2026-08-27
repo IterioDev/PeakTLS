@@ -788,6 +788,50 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     // ------------------------------------------------------------------------
+    // The response reader's buffering ceiling - audit finding #6.
+    // ------------------------------------------------------------------------
+
+    // THE THIRD OF THE THREE BUFFERS THAT FINDING NAMED, and the only one whose ceiling the
+    // connection has to hand over: TlsQuicHttp3Response defaults to int.MaxValue and reaches
+    // for nothing, exactly as it does for s4.2.2's field-section limit, so a request opened
+    // here and one opened by a caller constructing the reader directly would otherwise hold
+    // different amounts of the same peer's response.
+    //
+    // IT IS THEREFORE A WIRING TEST AS MUCH AS A LIMIT TEST. The ceiling is set on the SPEC,
+    // which is two objects away from the list it bounds - spec to connection to reader - and an
+    // implementation that enforced a constant of its own would satisfy every other assertion
+    // this file makes about response bodies.
+    [Fact]
+    public async Task AResponsePastTheSpecsCeilingIsExcessiveLoad()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(
+            cancellation.Token,
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.QpackCapable,
+                MaximumBufferedResponseBytes = 64,
+            });
+        Assert.NotNull(harness.Http3.TryOpenRequest(Request(), out _, out _));
+        await harness.FlushAsync(cancellation.Token);
+
+        // A perfectly legal 200 with a 512-byte body. NOTHING IS MALFORMED HERE, which is why
+        // the code is s8.1's H3_EXCESSIVE_LOAD - "The endpoint detected that its peer is
+        // exhibiting a behavior that might be generating excessive load" - rather than
+        // H3_FRAME_ERROR: the peer did nothing wrong, this endpoint ran out of the room it said
+        // it would give.
+        var response = ResponseBytes(200, [], new byte[512]);
+        await harness.PeerSendsAsync(cancellation.Token, PeerControl());
+        await harness.PeerSendsAsync(
+            cancellation.Token,
+            expectAccepted: false,
+            Stream(FirstRequestStreamId, 0, response));
+
+        Assert.False(harness.Http3.TryProcess(out var error));
+        Assert.Equal((ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad, error);
+    }
+
+    // ------------------------------------------------------------------------
     // The witnesses the mutation sweep asked for.
     // ------------------------------------------------------------------------
 

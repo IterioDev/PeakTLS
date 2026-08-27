@@ -62,6 +62,25 @@ internal enum TlsQuicHttp3ErrorCode : ulong
     /// with an invalid size was received."</summary>
     H3FrameError = 0x0106,
 
+    /// <summary>H3_EXCESSIVE_LOAD (0x0107): "The endpoint detected that its peer is exhibiting
+    /// a behavior that might be generating excessive load."</summary>
+    /// <remarks>
+    /// <para>THE CODE FOR A PEER THAT IS BUFFERING US TO DEATH, and the only one in s8.1 that
+    /// names a resource rather than a malformed byte. It is raised where this endpoint refuses
+    /// to hold any more of a stream it cannot yet parse -
+    /// <see cref="TlsQuicHttp3Spec.MaximumBufferedControlStreamBytes"/> on the peer's control
+    /// stream and <see cref="TlsQuicHttp3Spec.MaximumBufferedResponseBytes"/> on a request
+    /// stream - both of which are configured ceilings rather than rules the RFC states.</para>
+    /// <para>NOT H3_FRAME_ERROR, and the two are one line apart in
+    /// <see cref="TlsQuicHttp3Frames.TryRead"/>. s8.1 makes H3_FRAME_ERROR "a frame that fails
+    /// to satisfy layout requirements or with an invalid size" - a statement about the FRAME,
+    /// which is why a Length above <see cref="int.MaxValue"/> is that code: no reader could
+    /// ever hand such a payload back. A Length that is merely larger than this endpoint chose
+    /// to buffer is a perfectly legal frame that we decline to accumulate, which is a statement
+    /// about US. Conflating them would tell a peer its frame was invalid when it was not.</para>
+    /// </remarks>
+    H3ExcessiveLoad = 0x0107,
+
     /// <summary>H3_ID_ERROR (0x0108): "A stream ID or push ID was used incorrectly, such as
     /// exceeding a limit, reducing a limit, or being reused."</summary>
     H3IdError = 0x0108,
@@ -132,8 +151,14 @@ internal enum TlsQuicHttp3FrameType : ulong
 /// span multiple packets". A declared Length longer than the bytes in hand on a STREAM is the
 /// ordinary case of a frame still arriving, and collapsing it into the error case would make
 /// every large HEADERS frame a connection error. The bound on how long a caller waits is not
-/// this codec's: <see cref="TlsQuicStream.ReceiveLimit"/> already caps what a single stream
-/// may buffer, so a Length no sender can ever satisfy dies there rather than here.</remarks>
+/// this codec's, and THIS PARAGRAPH USED TO NAME THE WRONG BOUND:
+/// <see cref="TlsQuicStream.ReceiveLimit"/> does not cap it, because the receive window is
+/// re-credited as bytes are delivered and so rises without limit for a peer that keeps sending.
+/// The real bound is each CALLER's own ceiling on the unparsed tail it is willing to hold -
+/// <see cref="TlsQuicHttp3Spec.MaximumBufferedControlStreamBytes"/>,
+/// <see cref="TlsQuicHttp3Spec.MaximumBufferedEncoderStreamBytes"/> and
+/// <see cref="TlsQuicHttp3Spec.MaximumBufferedResponseBytes"/> - so a Length no sender can ever
+/// satisfy dies at whichever of those the stream belongs to, still not here.</remarks>
 internal enum TlsQuicHttp3FrameReadStatus
 {
     /// <summary>A whole frame was read and the offset advanced past it.</summary>

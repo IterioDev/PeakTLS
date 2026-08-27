@@ -34,6 +34,10 @@ internal sealed class TlsQuicHttp3Streams
     // in-order reassembly, which is what a second offset-tracking buffer would amount to.
     private sealed class PeerStreamState
     {
+        // BOUNDED, AND BY TryEnforceBufferCeiling RATHER THAN BY ANYTHING HERE. This list is
+        // filled from the peer's bytes and drained only by a parser that succeeds, so a peer
+        // that declares more than it sends leaves it growing; the banner over that method
+        // argues which ceiling and which error code apply to which stream type.
         internal readonly List<byte> Unparsed = [];
 
         // How many of TlsQuicStream.Received's bytes have been copied into Unparsed. Not how
@@ -436,6 +440,21 @@ internal sealed class TlsQuicHttp3Streams
             return typeError == TlsQuicHttp3ErrorCode.None;
         }
 
+        // THE CEILING ON WHAT WE ARE WILLING TO HOLD, and the answer to a peer that declares a
+        // frame or a string literal it then feeds one byte at a time. Everything below this
+        // line either parses the buffer or defers it; nothing shrinks it on its own, so this is
+        // the last point at which a refusal costs only what has already arrived.
+        //
+        // AFTER TryTakeStreamType AND NOT BEFORE IT, because the type decides both the ceiling
+        // and the error code and a stream whose type has not arrived has neither. That ordering
+        // is free rather than lucky: a stream with no type varint yet is holding at most the
+        // eight bytes of a partial varint, RFC 9000 s16 admitting no longer encoding, so it
+        // cannot breach any ceiling a caller could sensibly set.
+        if (!TryEnforceBufferCeiling(state, out error))
+        {
+            return false;
+        }
+
         // C16's encoder-stream arm, and the ONE stream type that is neither the control stream
         // nor discarded. RFC 9204 s4.3's instructions are what drive the dynamic table, and
         // s2.1.2 is why they arrive here rather than inside a field section: "encoded field
@@ -483,6 +502,57 @@ internal sealed class TlsQuicHttp3Streams
         }
 
         return true;
+    }
+
+    // The bound audit finding #6 said was missing. PeerStreamState.Unparsed grew only from peer
+    // input and nothing ever refused to add to it: TlsQuicHttp3Frames.TryRead answers Incomplete
+    // for a control frame whose declared Length has not arrived, and RFC 9204 s4.1.2's string
+    // literal answers "truncated" for a literal whose declared length has not arrived, so BOTH
+    // of the two things this buffer feeds treat "not here yet" as a wait. That is right for a
+    // frame that is arriving and wrong for a Length no peer intends to satisfy, and the
+    // difference is not visible from inside either parser - which is why the ceiling is here,
+    // over the buffer, rather than in the codecs that answer Incomplete.
+    //
+    // TWO CEILINGS AND TWO CODES, PICKED BY THE STREAM AND NOT BY THE FAULT, because the fault
+    // is the same one in both places - we ran out of patience - and it is the stream the bytes
+    // arrived on that decides how a peer must be told:
+    //
+    //   * The control stream takes RFC 9114 s8.1's H3_EXCESSIVE_LOAD, "The endpoint detected
+    //     that its peer is exhibiting a behavior that might be generating excessive load". Not
+    //     H3_FRAME_ERROR: s8.1 scopes that one to "a frame that fails to satisfy layout
+    //     requirements or with an invalid size", and a frame whose Length we simply declined to
+    //     accumulate has neither fault. TlsQuicHttp3Frames.TryRead still raises H3_FRAME_ERROR
+    //     for a Length above int.MaxValue, which IS an invalid size - no span can carry it - and
+    //     the two live one call apart rather than merged.
+    //   * The encoder stream takes RFC 9204 s6's QPACK_ENCODER_STREAM_ERROR, 0x0201, because
+    //     s7.4 says which registry answers: "If an implementation encounters a value larger than
+    //     it is able to decode, this MUST be treated as a stream error of type
+    //     QPACK_DECOMPRESSION_FAILED if on a request stream or a connection error of the
+    //     appropriate type if on the encoder or decoder stream." The number is taken from
+    //     TlsQuicQpackDynamicTable, which already holds it, rather than spelled a second time.
+    //
+    // A STREAM BEING IGNORED CANNOT BREACH EITHER, and needs no arm of its own: TryTakeStreamType
+    // clears Unparsed for every discarded type and TryProcessPeerStream returns before this on
+    // every later pass, so a push, decoder, GREASE or unknown stream holds nothing at all. That
+    // is what keeps s6.2's "The recipient MUST NOT consider unknown stream types to be a
+    // connection error of any kind" intact through this check.
+    private bool TryEnforceBufferCeiling(PeerStreamState state, out ulong error)
+    {
+        var isEncoderStream = state.StreamType == (ulong)TlsQuicHttp3StreamType.QpackEncoder;
+        var ceiling = isEncoderStream
+            ? _spec.MaximumBufferedEncoderStreamBytes
+            : _spec.MaximumBufferedControlStreamBytes;
+
+        if (state.Unparsed.Count <= ceiling)
+        {
+            error = (ulong)TlsQuicHttp3ErrorCode.None;
+            return true;
+        }
+
+        error = isEncoderStream
+            ? TlsQuicQpackDynamicTable.QpackEncoderStreamError
+            : (ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad;
+        return false;
     }
 
     // RFC 9204 s4.3's encoder instructions, and s2.2.2.3's feedback for them.

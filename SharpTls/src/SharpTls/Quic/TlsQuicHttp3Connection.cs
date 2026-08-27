@@ -693,10 +693,18 @@ internal sealed class TlsQuicHttp3Connection
         // THE TABLE IS THE STREAM LAYER'S AND IS PASSED, NOT REBUILT. It is null on the
         // zero-capacity arm, which is what leaves every narrowed-settings caller on C8's
         // static-only path unchanged.
+        // AND THE BUFFERING CEILING IS THE SPEC'S, for the reason every other number this call
+        // hands over is: TlsQuicHttp3Response is told its limits and reaches for none. Its own
+        // default is int.MaxValue, so a caller that constructed one directly and a request
+        // opened here would otherwise disagree about how much of a response to hold - which is
+        // the difference between an audit finding and a knob.
         _exchanges.Add(new Exchange(
             stream,
             new TlsQuicHttp3Response(
-                MaximumFieldSectionSizeAdvertised, request.Method, _streams.Table)));
+                MaximumFieldSectionSizeAdvertised,
+                request.Method,
+                _streams.Table,
+                _spec.MaximumBufferedResponseBytes)));
         refusal = TlsQuicHttp3RequestRefusal.None;
         return stream;
     }

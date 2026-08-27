@@ -1266,6 +1266,15 @@ internal sealed class TlsQuicHttp3Response
     // code here is. What changed in C10b is that the code exists to return.
     private const ulong MessageError = (ulong)TlsQuicHttp3ErrorCode.H3MessageError;
 
+    // s8.1: "The endpoint detected that its peer is exhibiting a behavior that might be
+    // generating excessive load." A CONNECTION error and not a stream one, which is why it is
+    // spelled beside FrameUnexpected rather than beside MessageError: a peer feeding one stream
+    // past this reader's ceiling has shown what it will do to the next stream too, and s8's own
+    // grant - "An endpoint MAY choose to treat a stream error as a connection error under
+    // certain circumstances" - runs the other way and is not needed here. The caller decides
+    // what to do with the code, as it does with every other code this file returns.
+    private const ulong ExcessiveLoad = (ulong)TlsQuicHttp3ErrorCode.H3ExcessiveLoad;
+
     // ========================================================================
     // WHAT IS DELIBERATELY NOT ENFORCED, each with its reason.
     // ========================================================================
@@ -1325,9 +1334,15 @@ internal sealed class TlsQuicHttp3Response
     // grown the same way: neither number is a bound, both are only where the doubling starts,
     // and the loop retries until TlsQuicQpackDecoder stops answering DestinationTooSmall. A
     // computed bound would have to reason about Huffman EXPANSION and about the 32-byte
-    // per-field overhead, and a bound got subtly wrong is a silent truncation. What stops the
-    // loop growing without limit is not a constant here but TlsQuicStream.ReceiveLimit, which
-    // caps the bytes a single stream may buffer before any of them reach this type.
+    // per-field overhead, and a bound got subtly wrong is a silent truncation.
+    //
+    // WHAT STOPS THE LOOP GROWING WITHOUT LIMIT IS NOT TlsQuicStream.ReceiveLimit, which is
+    // what this paragraph used to claim and what audit finding #6 disproved: that limit is
+    // re-credited as bytes are delivered, so it rises for as long as a peer keeps sending and
+    // caps nothing. Two real bounds stand in its place. The doubling here cannot outrun the
+    // field section it is decoding, which is itself bounded by _maximumFieldSectionSize; and
+    // the bytes that reach this type at all are bounded by _maximumBufferedBytes, checked in
+    // TryRead as they arrive.
     private const int InitialDecodeBufferLength = 1024;
     private const int InitialDecodeLineCount = 32;
 
@@ -1350,6 +1365,13 @@ internal sealed class TlsQuicHttp3Response
 
     private readonly long _maximumFieldSectionSize;
 
+    // The ceiling on _pending.Count + _body.Count, audit finding #6's third buffer. NOT THE
+    // SAME LIMIT AS _maximumFieldSectionSize AND NOT A SUBSTITUTE FOR IT: s4.2.2's limit is on
+    // the UNCOMPRESSED size of one field section and is applied by the QPACK decoder after a
+    // HEADERS frame is whole, which is too late to stop a peer that never finishes one. This
+    // one is on the compressed bytes as they arrive and stops exactly that.
+    private readonly int _maximumBufferedBytes;
+
     // The :method of the request this stream carries, or null when the caller did not say. Read
     // only by IsDefinedAsNeverHavingContent, which is where null's meaning is argued.
     private readonly string? _requestMethod;
@@ -1360,6 +1382,9 @@ internal sealed class TlsQuicHttp3Response
     // and not an assumption that a call arrives frame-aligned.
     private readonly List<byte> _pending = [];
 
+    // s7.2.1's "arbitrary, variable-length sequences of bytes", concatenated. UNBOUNDED UNTIL
+    // THE CONSTRUCTOR SAYS OTHERWISE - see _maximumBufferedBytes, which counts this list and
+    // _pending together because a byte crosses from one to the other as its frame completes.
     private readonly List<byte> _body = [];
     private readonly List<ImmutableArray<TlsQuicHttp3Field>> _interim = [];
 
@@ -1398,14 +1423,25 @@ internal sealed class TlsQuicHttp3Response
     /// <see langword="null"/> - the default - for the static-only arm. A null table cannot
     /// block: <see cref="TlsQuicQpackDecoder"/> refuses a non-zero Required Insert Count
     /// outright on that arm, which is what keeps every zero-capacity caller unchanged.</param>
+    /// <param name="maximumBufferedBytes">How many bytes of this response - the unparsed tail
+    /// and the accumulated content together - to hold before answering RFC 9114 s8.1's
+    /// H3_EXCESSIVE_LOAD. <see cref="int.MaxValue"/>, the default, is effectively no ceiling and
+    /// is the SAME SHAPE AND THE SAME ARGUMENT AS <paramref name="maximumFieldSectionSize"/>'s
+    /// default: a limit this type is told, never one it reaches out for. A connection passes
+    /// <see cref="TlsQuicHttp3Spec.MaximumBufferedResponseBytes"/>; a caller constructing this
+    /// type directly owes the argument, which is why the default is permissive rather than the
+    /// spec's number copied here - a second copy of a default is a second thing to keep in
+    /// step.</param>
     internal TlsQuicHttp3Response(
         long maximumFieldSectionSize = long.MaxValue,
         string? requestMethod = null,
-        TlsQuicQpackDynamicTable? table = null)
+        TlsQuicQpackDynamicTable? table = null,
+        int maximumBufferedBytes = int.MaxValue)
     {
         _maximumFieldSectionSize = maximumFieldSectionSize;
         _requestMethod = requestMethod;
         _table = table;
+        _maximumBufferedBytes = maximumBufferedBytes;
     }
 
     /// <summary>Gets whether a field section on this stream is parked on RFC 9204 s2.2.1's
@@ -1508,6 +1544,27 @@ internal sealed class TlsQuicHttp3Response
         foreach (var b in bytes)
         {
             _pending.Add(b);
+        }
+
+        // AUDIT FINDING #6'S THIRD BUFFER, AND ONE CHECK COVERS BOTH HALVES OF IT. _pending and
+        // _body are the only two lists here that a peer can grow, and this is the only line at
+        // which either does: _body is filled from payloads that were in _pending a moment ago,
+        // so the pair's total rises exactly here and nowhere else. A check at each Add would be
+        // the same rule twice, in the two places most likely to drift apart.
+        //
+        // WHY THE ARITHMETIC IS A SUBTRACTION. _pending.Count + _body.Count is an int addition
+        // and a peer able to reach 2^31 bytes could wrap it to a negative that passes; the
+        // subtraction cannot overflow, because _maximumBufferedBytes and _body.Count are both
+        // non-negative ints and their difference stays in range. A ceiling already exceeded
+        // makes that difference negative, which no non-negative _pending.Count is ever `<=`.
+        //
+        // NOT s7.1's H3_FRAME_ERROR. Nothing about the peer's framing is wrong at this point -
+        // the frame it is sending may well be legal and simply larger than we chose to hold -
+        // and s8.1 gives H3_EXCESSIVE_LOAD to exactly that: "The endpoint detected that its
+        // peer is exhibiting a behavior that might be generating excessive load."
+        if (_pending.Count > _maximumBufferedBytes - _body.Count)
+        {
+            return Fail(ExcessiveLoad, out errorCode);
         }
 
         var buffer = CollectionsMarshal.AsSpan(_pending);
