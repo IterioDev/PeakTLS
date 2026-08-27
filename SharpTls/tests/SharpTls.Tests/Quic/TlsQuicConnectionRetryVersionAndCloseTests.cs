@@ -1259,6 +1259,63 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Null(connection.ClosedWith);
     }
 
+    /// <summary>
+    /// AUDIT FINDING 15. RFC 9000 s10.1's third paragraph: "To avoid excessively small idle
+    /// timeout periods, endpoints MUST increase the idle timeout period to be at least three
+    /// times the current Probe Timeout (PTO). This allows for multiple PTOs to expire, and
+    /// therefore multiple probes to be sent and lost, prior to idle timeout." <c>IdleDeadline</c>
+    /// was <c>_idleSince + EffectiveIdleTimeout()</c> and nothing else, so an endpoint that
+    /// advertised a small max_idle_timeout gave up on a slow path before it had finished probing
+    /// - and before the peer, whose PTO is measured on the same RTT, expected it to.
+    /// <para>ONE MILLISECOND ADVERTISED, AND A DATAGRAM 100 MILLISECONDS LATE. Without the floor
+    /// the receive is bounded at one millisecond and the pump abandons; with it the period is
+    /// three PTOs - about three seconds on kInitialRtt - and the datagram is simply received. The
+    /// gap between the two outcomes is three orders of magnitude, so no clock jitter can blur
+    /// it.</para>
+    /// <para>THE DELAY SITS BELOW ONE PTO ON PURPOSE, asserted rather than assumed below: the
+    /// probe timeout is the OTHER thing that can wake this receive, and a datagram scheduled
+    /// after it would be measuring A.9 rather than s10.1.</para>
+    /// </summary>
+    [Fact]
+    public async Task AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        await using var transport = new ScriptedDatagramTransport();
+
+        // An hour of deadline and three hours of local policy, so neither can be what ends -
+        // or fails to end - this pump. The advertised millisecond is the only short bound.
+        await using var connection = Connection(
+            transport,
+            pki,
+            handshakeDeadline: TimeSpan.FromHours(1),
+            idleTimeout: TimeSpan.FromHours(3),
+            maxIdleTimeoutMilliseconds: 1);
+
+        var late = TimeSpan.FromMilliseconds(100);
+        transport.EnqueueReceive([1, 2, 3, 4], delay: late);
+
+        await connection.StartAsync(cancellation.Token);
+
+        // The advertised value is unchanged by the floor, which is the whole reason the floor
+        // lives in IdleDeadline and not in EffectiveIdleTimeout: s10.1's "minimum of the two
+        // advertised values" is a fact about the advertisements and stays assertable.
+        Assert.Equal(TimeSpan.FromMilliseconds(1), connection.EffectiveIdleTimeout());
+
+        // THE PRECONDITIONS, BOTH OF THEM. The delay must be past the advertised period - or
+        // the old behaviour would have received the datagram too and this test would witness
+        // nothing - and short of one PTO, or the probe timer would be what woke the receive.
+        Assert.True(late > connection.EffectiveIdleTimeout());
+        Assert.True(InitialPtoPeriod > late);
+
+        // RECEIVED, NOT ABANDONED. The four bytes are rubbish and are discarded by the packet
+        // layer under RFC 9000 s12.2, which is all this needs: the claim is that the receive was
+        // still open at 100 milliseconds, and a TimeoutException here is the pre-fix behaviour.
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(connection.IdleTimedOut);
+        Assert.Equal(late, transport.Clock.GetUtcNow() - StartOfScriptedTime);
+    }
+
     [Fact]
     public async Task AbandoningBeforeTheAdvertisedIdleTimeoutSendsTheCloseItCommittedTo()
     {

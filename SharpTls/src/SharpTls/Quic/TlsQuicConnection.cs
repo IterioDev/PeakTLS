@@ -5990,12 +5990,21 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // TlsQuicConnectionOptions.IdleTimeout is what bounds the attempt instead, and no s10.1
     // commitment has been made to anybody.
     //
-    // s10.1'S THIRD PARAGRAPH IS NOT IMPLEMENTED, AND IT IS A KNOWN GAP: "endpoints MUST
-    // increase the idle timeout period to be at least three times the current Probe Timeout
-    // (PTO)". The PTO is loss recovery's, which the user's decision defers to A3, so there is
-    // no current PTO to take three of. The consequence is one-directional - this connection can
-    // give up EARLIER than the RFC's floor, never later - and it is bounded below by the
-    // handshake deadline anyway.
+    // s10.1'S THIRD PARAGRAPH IS THE FLOOR, AND IT IS APPLIED IN IdleDeadline RATHER THAN HERE:
+    // "To avoid excessively small idle timeout periods, endpoints MUST increase the idle timeout
+    // period to be at least three times the current Probe Timeout (PTO). This allows for
+    // multiple PTOs to expire, and therefore multiple probes to be sent and lost, prior to idle
+    // timeout." It was a KNOWN GAP while loss recovery was deferred and there was no current PTO
+    // to take three of; A3 supplied one, and audit finding 15 is that this method was never
+    // revisited.
+    //
+    // THIS METHOD STAYS THE ADVERTISED MINIMUM AND NOTHING ELSE, which is what its two callers
+    // want. s10.1: "Each endpoint advertises a max_idle_timeout ... If a max_idle_timeout value
+    // is provided by either peer ... the effective value at an endpoint is computed as the
+    // minimum of the two advertised values." That is a fact about the two ADVERTISEMENTS, and
+    // TlsQuicConnectionTests.TheEffectiveIdleTimeoutIsTheMinimumOfTheTwoAdvertisedValues asserts
+    // it as one; the PTO floor is a fact about the local timer state, changes between calls, and
+    // would make this property un-assertable if it were folded in here.
     internal TimeSpan? EffectiveIdleTimeout() => (_ourMaxIdleTimeout, _peerMaxIdleTimeout) switch
     {
         ({ } ours, { } theirs) => ours <= theirs ? ours : theirs,
@@ -6022,8 +6031,57 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         return value >= (ulong)year.TotalMilliseconds ? year : TimeSpan.FromMilliseconds(value);
     }
 
-    private DateTimeOffset IdleDeadline() =>
-        _idleSince + (EffectiveIdleTimeout() ?? _options.IdleTimeout);
+    // RFC 9000 s10.1's effective idle period, WITH the floor its third paragraph makes a MUST:
+    // "endpoints MUST increase the idle timeout period to be at least three times the current
+    // Probe Timeout (PTO)", whose stated reason is "This allows for multiple PTOs to expire, and
+    // therefore multiple probes to be sent and lost, prior to idle timeout." Audit finding 15 is
+    // that this was `_idleSince + EffectiveIdleTimeout()` alone, so a peer advertising a small
+    // max_idle_timeout over a high-RTT path was given up on before it had finished probing.
+    //
+    // THE FLOOR APPLIES TO THE ADVERTISED PERIOD AND NOT TO THE LOCAL FALLBACK, WHICH IS A
+    // DISTINCTION THE RFC MAKES AND THIS METHOD HAD NO REASON TO BEFORE. Every sentence of
+    // s10.1 around the floor is about the negotiated value: "Each endpoint advertises a
+    // max_idle_timeout ... If a max_idle_timeout value is provided by either peer ... the
+    // effective value at an endpoint is computed as the minimum of the two advertised values",
+    // and s10.1's closing paragraph gives the floor's purpose as agreement with a peer - "If a
+    // max_idle_timeout is specified by either endpoint in its transport parameters (Section
+    // 18.2), the connection is silently closed and its state is discarded when it remains idle
+    // for longer than the minimum". The hazard is a peer still probing a connection we have
+    // already discarded, and it exists only where a peer was told a number.
+    //
+    // TlsQuicConnectionOptions.IdleTimeout is not that number. It is LOCAL POLICY - "give up on
+    // this attempt after this long" - promised to nobody, and s10.1's floor has no peer to
+    // protect there. Raising it would override an explicit caller instruction on the strength
+    // of a rule about a parameter that was never sent, and would silently multiply a
+    // 250-millisecond give-up into seconds on a slow path. So it is left exactly as the caller
+    // set it, and TlsQuicConnectionTests.APeerThatGoesSilentIsBoundedByTheIdleTimeoutToo is what
+    // holds that: it sets 250 ms with nothing advertised and still expects to be given up on.
+    //
+    // THE PTO IS THE ONE THE APPLICATION SPACE WOULD ARM, PtoDuration(_peerMaxAckDelay), which
+    // is the same expression GetPtoTimeAndSpace's Application arm uses. RFC 9002 s6.2.1 adds
+    // max_ack_delay only in that space - "When the PTO is armed for Initial or Handshake packet
+    // number spaces, the max_ack_delay in the PTO period computation is set to 0" - so this is
+    // the LARGEST of the three current PTOs, and a floor built from the largest satisfies
+    // "at least three times the current PTO" whichever space is armed. It carries A.9's pto_count
+    // backoff with it, which is the reading s10.1's own reason asks for: a connection that has
+    // already lost probes has a longer current PTO and needs a longer floor, not the same one.
+    //
+    // SATURATING, because PtoDuration saturates at TimeSpan.MaxValue on a peer-chosen
+    // max_ack_delay and an unbounded pto_count, and three of that overflows a plain multiply -
+    // which on the idle path would be an ArithmeticException instead of a timeout.
+    //
+    // The witness is
+    // TlsQuicConnectionTests.AShortAdvertisedIdleTimeoutIsRaisedToThreeProbeTimeouts.
+    private DateTimeOffset IdleDeadline()
+    {
+        if (EffectiveIdleTimeout() is not { } advertised)
+        {
+            return AddSaturating(_idleSince, _options.IdleTimeout);
+        }
+
+        var floor = FromTicksSaturating((double)PtoDuration(_peerMaxAckDelay).Ticks * 3.0);
+        return AddSaturating(_idleSince, advertised >= floor ? advertised : floor);
+    }
 
     private TimeSpan RemainingBeforeIdleTimeout() =>
         IdleDeadline() - _options.TimeProvider.GetUtcNow();
