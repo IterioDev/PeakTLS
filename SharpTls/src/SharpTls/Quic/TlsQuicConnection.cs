@@ -986,11 +986,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private ulong? _highestAcknowledgedApplicationPacketNumber;
     private readonly TlsQuicAckTracker _acks;
 
-    // One send buffer for the life of the connection. Unlike the receive buffer this one is
-    // safe to reuse: nothing parses out of it and nothing aliases it past the SendAsync that
-    // consumes it. The Initial flight is the exception and allocates its own, because
-    // TlsQuicDatagramBuilder.BuildInitialFlight hands back one array per datagram.
+    // One send buffer for the life of the connection. Nothing parses out of it and nothing
+    // aliases it past the SendAsync that consumes it. The Initial flight is the exception and
+    // allocates its own, because TlsQuicDatagramBuilder.BuildInitialFlight hands back one array
+    // per datagram.
     private readonly byte[] _sendBuffer = new byte[DatagramBufferSize];
+
+    // AND ONE RECEIVE BUFFER, WHICH USED TO BE A FRESH 65527-BYTE ARRAY PER PUMP. See
+    // PumpOnceAsync for what makes reuse safe here and what would make it unsafe.
+    private readonly byte[] _receiveBuffer = new byte[DatagramBufferSize];
 
     // Reused by the 1-RTT packing loop so measuring the frames already in hand allocates once
     // per connection rather than once per datagram. See TlsQuicFrames.MeasureFrame.
@@ -2203,12 +2207,39 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // TlsQuicApplicationSendPath.cs, which is where they moved so both entries share one.
         EnsureSendable();
 
-        // A FRESH BUFFER PER DATAGRAM, NEVER POOLED. TlsQuicPacketReceiver.Receive's contract
-        // (3) states why in full: a pooled buffer handed back and refilled turns every
-        // retained alias into a read of the NEXT datagram, with no compiler error and no
-        // exception. Pooling is an A3-era optimisation and is exactly the change that would
-        // break this silently.
-        var buffer = new byte[DatagramBufferSize];
+        // ONE BUFFER FOR THE LIFE OF THE CONNECTION, WHERE THIS USED TO ALLOCATE 65527 BYTES
+        // PER PUMP - INCLUDING EVERY PUMP THAT TIMED OUT WITH NOTHING TO SHOW FOR IT.
+        //
+        // The hazard the earlier comment here named is real and is not this buffer's. Quoting
+        // TlsQuicPacketReceiver.Receive's contract (3): a buffer handed back and refilled turns
+        // every retained alias into a read of the NEXT datagram, with no compiler error and no
+        // exception. But the frames a handler sees do not alias THIS array - the receiver
+        // decrypts into its own _scratch and every ReadOnlyMemory inside a TlsQuicFrame points
+        // there - and _scratch is a receiver FIELD, already reused across the packets coalesced
+        // into one datagram and across every later Receive. So "copy anything that must outlive
+        // the call" is already the standing rule for frame contents, it is already what the
+        // handler below does, and reusing this array cannot weaken it.
+        //
+        // WHAT THIS ARRAY ALONE BACKS is the still-protected packet: the clear-text header
+        // fields, read before the AEAD runs. Every one of them that outlives the pump is copied
+        // at the point it is taken - the Destination and Source Connection IDs in
+        // AcceptedUnderSection122 and TryReadDestinationConnectionId, the Retry packet's Source
+        // Connection ID and token in HandleRetryAsync - and a Version Negotiation packet yields
+        // decoded uints rather than a slice. firstDestinationConnectionId is a local of this
+        // method and does not survive it. TlsQuicReceiveResult carries counts, a level and a
+        // packet number, no memory.
+        //
+        // A FIELD RATHER THAN ArrayPool, deliberately: a rented array can be handed to code
+        // that outlives the rent, and this one cannot leave the connection that owns it. It is
+        // the same arrangement, and the same one-thread-of-control requirement, as _sendBuffer.
+        //
+        // CHECKED BY MUTATION RATHER THAN BY THE ARGUMENT ABOVE (performed and reverted):
+        // filling this array with 0xFF here, on every pump, before the receive - the worst case
+        // of "the next datagram landed on it" - left the whole suite green, three known
+        // failures and no others. A retained alias anywhere would have read those bytes back.
+        // TlsQuicConnectionTests.BytesDeliveredByOnePumpAreNotDisturbedByTheNextDatagram keeps
+        // a smaller version of that question asked: two same-shaped datagrams, one buffer.
+        var buffer = _receiveBuffer;
 
         var received = await ReceiveWithinDeadlineAsync(buffer, cancellationToken)
             .ConfigureAwait(false);
