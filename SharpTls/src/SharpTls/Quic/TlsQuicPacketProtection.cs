@@ -28,8 +28,8 @@ internal enum TlsQuicPacketProtectionCipher
 /// Ordering (s5.3): "When constructing packets, the AEAD function is applied
 /// prior to applying header protection... When processing packets, an
 /// endpoint first removes the header protection." So a sender always calls
-/// <see cref="Seal"/> before <see cref="TlsQuicHeaderProtection.TryApply"/>;
-/// a receiver always calls <see cref="TlsQuicHeaderProtection.TryRemove"/>
+/// <see cref="Seal"/> before <c>TlsQuicHeaderProtection.TryApply</c>;
+/// a receiver always calls <c>TlsQuicHeaderProtection.TryRemove</c>
 /// before <see cref="TryOpen"/>. This type implements only the two AEAD ends
 /// of that pipeline - callers own the ordering.
 /// </remarks>

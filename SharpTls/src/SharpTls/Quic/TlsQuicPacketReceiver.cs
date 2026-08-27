@@ -826,8 +826,11 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             return null;
         }
 
+        // Through the level's own prepared key schedule rather than through its raw key: same
+        // s5.4 mask over the same sample, without re-deriving the block cipher for every packet
+        // that arrives. The schedule belongs to `keys` and dies with them.
         if (!TlsQuicHeaderProtection.TryRemove(
-                keys.HeaderCipher, keys.HeaderProtectionKey, packet, packetNumberOffset, out var pnLength))
+                keys.HeaderProtection, packet, packetNumberOffset, out var pnLength))
         {
             discarded++;
             return null;
@@ -1284,8 +1287,22 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         internal required byte[] HeaderProtectionKey { get; init; }
         internal required bool KeyPhase { get; init; }
 
+        // RFC 9001 s5.4's block cipher, prepared once for this key rather than per packet -
+        // see TlsQuicHeaderProtectionKeySchedule, whose whole lifetime rule is that it is
+        // built beside the key and destroyed by whatever zeroes it. That is this class:
+        // HeaderProtectionKey is zeroed below and the schedule goes with it, so no level's
+        // key survives its own discard in either form. Lazy so that the three places that
+        // build a ReadKeys do not each have to remember it.
+        private TlsQuicHeaderProtectionKeySchedule? _headerProtection;
+
+        internal TlsQuicHeaderProtectionKeySchedule HeaderProtection =>
+            _headerProtection ??= new TlsQuicHeaderProtectionKeySchedule(
+                HeaderCipher, HeaderProtectionKey);
+
         public void Dispose()
         {
+            _headerProtection?.Dispose();
+            _headerProtection = null;
             CryptographicOperations.ZeroMemory(Key);
             CryptographicOperations.ZeroMemory(Iv);
             CryptographicOperations.ZeroMemory(HeaderProtectionKey);
