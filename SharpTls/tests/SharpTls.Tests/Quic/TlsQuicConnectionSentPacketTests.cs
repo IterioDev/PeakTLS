@@ -315,11 +315,22 @@ public sealed partial class TlsQuicConnectionTests
     // The CONNECTION_CLOSE send is the third BuildDatagram call site and the only one that is
     // not on the handshake path, so nothing else in this file reaches it.
     //
-    // RETAINED AND IN FLIGHT, which is RFC 9000 s12.4 Table 3's reading and not a choice made
-    // here: Table 3 prints C - "do not count toward bytes in flight" - against ACK alone, and
-    // CONNECTION_CLOSE carries N without it. TlsQuicPacketBuilderTests.ConnectionCloseOnly
-    // PacketsAreNotAckElicitingButAreInFlight is where that row is pinned; this asserts only
-    // that the packet reaches retention at all.
+    // RETAINED AND IN FLIGHT, BUT NOT FOR THE REASON THIS COMMENT USED TO GIVE. It used to read
+    // that RFC 9000 s12.4 Table 3 prints C - "do not count toward bytes in flight" - against ACK
+    // alone and CONNECTION_CLOSE carries N without it, so the close packet must be in flight.
+    // That inverts the marking: C says which frames CANNOT put a packet in flight, never that
+    // every unmarked frame can. RFC 9002 s2 is the positive definition - "Packets are considered
+    // in flight when they are ack-eliciting or contain a PADDING frame" - and CONNECTION_CLOSE
+    // is neither, so it contributes nothing here.
+    //
+    // The flag is still true, because THE PADDING makes it true: only Initial keys exist at this
+    // point, and RFC 9000 s14.1 requires a datagram carrying a client Initial to be padded to at
+    // least 1200 bytes, so the close goes out beside PADDING frames every time. The assertion
+    // survived the IsInFlight correction unchanged and its rationale did not; keeping the old
+    // wording would have left a true assertion resting on a false rule, which is the shape that
+    // silently stops witnessing anything once the padding requirement moves.
+    // TlsQuicPacketBuilderTests.ConnectionCloseOnlyPacketsAreNeitherAckElicitingNorInFlight is
+    // where the close-alone row is pinned, on a packet with no padding to confuse it.
     [Fact]
     public async Task TheConnectionClosePacketIsRetainedLikeAnyOther()
     {

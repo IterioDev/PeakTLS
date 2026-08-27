@@ -88,6 +88,37 @@ public sealed class TlsQuicPacketNumberTests
         Assert.InRange(length, 1, 4);
     }
 
+    [Theory]
+    [InlineData((1UL << 31) + 1)]
+    [InlineData(1UL << 32)]
+    [InlineData(1UL << 40)]
+    public void EncodedLengthRejectsAnAckGapWiderThanFourBytesCanDisambiguate(ulong numUnacked)
+    {
+        // RFC 9000 s17.1 gives the Packet Number field 1 to 4 bytes, so 32 bits is the
+        // widest truncation that exists, and RFC 9000 A.3's DecodePacketNumber resolves a
+        // 32-bit truncation only to within pn_hwin = 2^31 of expected_pn. A.2's arithmetic
+        // therefore asks for 5 bytes once num_unacked passes 2^31 - a length the wire
+        // format has no room for.
+        //
+        // Before the fix this returned 5, and the only place that saw it - TlsQuicPacket
+        // Builder.ValidatePacketNumberEncoding - reported it as a FLOOR ("needs at least 5
+        // bytes") that its own 1-to-4 guard makes unsatisfiable. Name the condition that
+        // actually happened instead. numUnacked - 1 with largestAcked = null gives
+        // num_unacked == fullPn + 1 == numUnacked, per A.2's "largest_acked is None" case.
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TlsQuicPacketNumber.EncodedLength(fullPn: numUnacked - 1, largestAcked: null));
+    }
+
+    [Fact]
+    public void EncodedLengthStillAcceptsTheWidestEncodableAckGap()
+    {
+        // The boundary the throw above must not swallow: num_unacked == 2^31 exactly is
+        // min_bits = 32, which is four bytes and legal. One past it is not.
+        Assert.Equal(
+            4,
+            TlsQuicPacketNumber.EncodedLength(fullPn: (1UL << 31) - 1, largestAcked: null));
+    }
+
     [Fact]
     public void EncodedLengthRejectsFullPnBelowLargestAcked()
     {
