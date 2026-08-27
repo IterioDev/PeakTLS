@@ -449,10 +449,16 @@ internal static class TlsQuicAckFrames
         // this frame carries, whether they came from TryReadAck's zero-copy
         // slice of a received datagram or from WriteAckFrame's freshly encoded
         // scratch buffer.
-        foreach (var b in frame.AckRanges.Span)
-        {
-            destination.Add(b);
-        }
+        //
+        // AddRange RATHER THAN A PER-BYTE Add LOOP: one bulk copy into the same
+        // list, so the bytes and their order are unchanged and only the number of
+        // capacity checks differs. The section grows with the number of ranges the
+        // tracker has to report, and every TlsQuicFrames.MeasureFrame of this frame
+        // re-encodes it. Pinned byte-for-byte by
+        // TlsQuicAckFramesTests.AckReadFromTheWireIsWrittenBackByteForByte, which
+        // reads a multi-range ACK off the wire and asserts the re-encoding is the
+        // identical byte sequence.
+        destination.AddRange(frame.AckRanges.Span);
 
         if (frame.EcnCounts is { } counts)
         {

@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace SharpTls.Quic;
 
 // ============================================================================
@@ -767,6 +769,20 @@ internal sealed class TlsQuicStream
     /// <summary>Gets the bytes delivered so far, in stream order. Bytes that arrived out of
     /// order are not here until the gap before them is filled.</summary>
     internal IReadOnlyList<byte> Received => _delivered;
+
+    /// <summary>The same bytes as <see cref="Received"/>, as a span, for the readers that copy
+    /// a run of them out.</summary>
+    /// <remarks>
+    /// <para>WHY BOTH FORMS EXIST. <see cref="Received"/> is what the tests assert equality
+    /// against and what a caller enumerates; this is what the two readers that copy a RUN of
+    /// delivered bytes need, because an indexer walk through the interface is one virtual call
+    /// and one bounds check per byte and this run is every byte of every response body. The
+    /// list is the same list, so neither form can disagree with the other.</para>
+    /// <para>VALID UNTIL THE NEXT DELIVERY, like any span over a list: <c>TryReceive</c>
+    /// appends to <c>_delivered</c> and that can move the backing array. Copy out before
+    /// receiving again - both callers do, in the same statement they take the span.</para>
+    /// </remarks>
+    internal ReadOnlySpan<byte> ReceivedSpan => CollectionsMarshal.AsSpan(_delivered);
 
     /// <summary>Gets the RFC 9000 s19.4 Application Protocol Error Code the peer abandoned its
     /// sending half with, or <see langword="null"/> if no RESET_STREAM has arrived.</summary>

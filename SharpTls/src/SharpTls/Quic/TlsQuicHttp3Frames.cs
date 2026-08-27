@@ -280,10 +280,16 @@ internal static class TlsQuicHttp3Frames
 
         QuicVariableLengthInteger.Write(destination, frameType);
         QuicVariableLengthInteger.Write(destination, (ulong)payload.Length);
-        foreach (var b in payload)
-        {
-            destination.Add(b);
-        }
+
+        // AddRange RATHER THAN A PER-BYTE Add LOOP. The payload is the whole of a
+        // DATA frame's body and the whole of a HEADERS frame's encoded field
+        // section, so the loop this replaces was the one that ran per byte of every
+        // request and response this client sends. One bulk copy appends the same
+        // bytes in the same order to the same list - what changes is the number of
+        // capacity checks, not the encoding, and
+        // TlsQuicHttp3FramesTests.EveryTypeInSection7sTableRoundTrips reads the
+        // written bytes back for each type.
+        destination.AddRange(payload);
     }
 
     /// <summary>Reads one RFC 9114 s7.1 frame, advancing <paramref name="offset"/> only when a

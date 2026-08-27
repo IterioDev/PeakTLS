@@ -662,11 +662,17 @@ internal static class TlsQuicStreamFrames
     // the frame carries, whether from a reader's zero-copy slice of a received
     // datagram or from a caller's own buffer. Same shape as
     // TlsQuicAckFrames.WriteFrameFields' AckRanges copy.
+    //
+    // AddRange OVER A PER-BYTE Add LOOP, AND THE BYTES ARE THE SAME BYTES. This is
+    // the frame's largest field - a STREAM frame carries whatever the datagram
+    // budget allows, so the loop it replaces ran up to ~1200 times per frame and
+    // again on every TlsQuicFrames.MeasureFrame of it. List<byte>.AddRange grows
+    // the backing array once and memcpys, where Add re-checks capacity per byte;
+    // the resulting list contents are identical, which is what
+    // TlsQuicStreamFramesTests.EachStreamFormMatchesItsHandDerivedBytes pins
+    // against hand-derived bytes.
     private static void WriteData(List<byte> destination, ReadOnlyMemory<byte> data)
     {
-        foreach (var b in data.Span)
-        {
-            destination.Add(b);
-        }
+        destination.AddRange(data.Span);
     }
 }
