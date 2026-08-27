@@ -4669,20 +4669,49 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     private async ValueTask SendInitialFlightAsync(
         ReadOnlyMemory<byte> cryptoStream, CancellationToken cancellationToken)
     {
+        // THE COUNTER IS ALREADY PAST THESE NUMBERS BEFORE THE FIRST await, AND THAT IS THE
+        // WHOLE POINT OF THE SPLIT. BuildInitialFlight advances it, because BuildInitialFlight
+        // is where the numbers are spent; see the AEAD nonce argument on that method.
         var datagrams = BuildInitialFlight(cryptoStream);
         foreach (var datagram in datagrams)
         {
             await SendDatagramAsync(datagram, cancellationToken).ConfigureAwait(false);
         }
-
-        // BuildInitialFlight advances the packet number by one per datagram from the template
-        // (RFC 9000 s12.3 forbids reuse within a space), so the counter moves by the datagram
-        // count and not by one.
-        _nextPacketNumber[(int)TlsQuicEncryptionLevel.Initial] += (ulong)datagrams.Count;
     }
 
     // NOT async, and it cannot be: TlsQuicWriteKeyMaterial is a ref struct, so key material
     // never lives in an async state machine.
+    //
+    // AND IT IS THIS METHOD, NOT ITS CALLER, THAT ADVANCES THE INITIAL PACKET NUMBER - which
+    // is a confidentiality rule rather than a tidiness one. RFC 9001 s5.3 builds the AEAD nonce
+    // by padding the packet number to the IV's length and XOR-ing the two
+    // (TlsQuicPacketProtection.cs, BuildNonce), so a packet number reused under one key is a
+    // REUSED NONCE, and s5.3 states the consequence in the RFC's own words: "The nonce, N, is
+    // formed by combining the packet protection IV with the packet number." For AES-GCM a
+    // repeated nonce under one key discloses the XOR of the two plaintexts and forfeits the
+    // authentication key outright - a break of confidentiality, not a stall.
+    //
+    // THE WINDOW THAT USED TO EXIST WAS BETWEEN THE SEAL AND THE SEND, AND IT WAS REACHABLE.
+    // SendInitialFlightAsync advanced the counter AFTER awaiting every SendDatagramAsync, so
+    // any refusal on the way out - SocketError.MessageSize is the documented one this file
+    // handles by name in SendDatagramAsync, and a cancellation is a second - left the counter
+    // pointing at numbers this method had already sealed packets under. RFC 9000 s17.2.5.2's
+    // Retry path then re-entered SendInitialFlightAsync and drew them again. Retry re-keys
+    // Initial from the new Destination Connection ID first, so a partial send BEFORE a Retry is
+    // survivable; a refusal on the FIRST flight, or a partial send after the Retry has already
+    // re-keyed, repeats a nonce under one key.
+    //
+    // SEALED IS SPENT, WHICH IS THE RULE THE POSITION ENCODES: the number is consumed by
+    // TlsQuicDatagramBuilder.BuildInitialFlight the moment it protects a packet with it,
+    // whether or not that packet ever reaches the socket. RFC 9000 s12.3 wants no more than
+    // that - "A QUIC endpoint MUST NOT reuse a packet number within the same packet number
+    // space in one connection" - and it says nothing about the packet having been sent.
+    // Skipping numbers is explicitly free: s12.3's next paragraph tolerates gaps, and the
+    // peer's ACK ranges simply never name them.
+    //
+    // TlsQuicConnectionTests.ARefusedInitialFlightDoesNotHandItsPacketNumbersToTheRetry is the
+    // witness: it fails the send, takes the Retry, and asserts the second flight's packet
+    // numbers are disjoint from the first's.
     private List<byte[]> BuildInitialFlight(ReadOnlyMemory<byte> cryptoStream)
     {
         if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out var state))
@@ -4712,6 +4741,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // empty list.
         var datagrams = TlsQuicDatagramBuilder.BuildInitialFlight(
             _options.Spec, template, cryptoStream, _options.TimeProvider.GetUtcNow(), _justSent);
+
+        // ONE PER DATAGRAM, AND ON THE LINE AFTER THE SEAL. The builder walks the template
+        // forward by one packet number per datagram it produces (RFC 9000 s12.3 forbids reuse
+        // within a space), so the counter moves by the datagram count and not by one. Nothing
+        // between this line and the builder call may await, and nothing does: see the nonce
+        // argument on this method's header for why the gap is measured in statements rather
+        // than in awaits.
+        _nextPacketNumber[(int)TlsQuicEncryptionLevel.Initial] += (ulong)datagrams.Count;
 
         // A3-8's LEDGER FOR THE OPENING FLIGHT, AND IT IS AN OVER-APPROXIMATION THAT IS SAID TO
         // BE ONE. The CRYPTO split across this flight's datagrams is TlsQuicDatagramBuilder's -

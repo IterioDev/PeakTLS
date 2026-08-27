@@ -152,6 +152,62 @@ public sealed partial class TlsQuicConnectionTests
     }
 
     /// <summary>
+    /// AUDIT FINDING 5, AND IT IS AN AEAD NONCE-REUSE BUG RATHER THAN A COUNTER BUG. RFC 9001
+    /// section 5.3 forms the nonce by XOR-ing the packet number into the packet protection IV, so
+    /// two packets numbered alike under one key are two packets sealed under one nonce - which
+    /// for AES-GCM discloses the XOR of the plaintexts and forfeits the authentication key. RFC
+    /// 9000 section 12.3 states the rule this asserts: "A QUIC endpoint MUST NOT reuse a packet
+    /// number within the same packet number space in one connection."
+    /// <para>THE PROPERTY IS THE COUNTER, NOT THE EXCEPTION, which is why the refusal is only
+    /// the setup here and is asserted on by
+    /// <c>ARefusedInitialFlightFailsWithTheSizesRatherThanTheWindowsText</c> above. The counter
+    /// used to be advanced by <c>SendInitialFlightAsync</c> AFTER awaiting every send, so a
+    /// refusal on the way out left it pointing at a number <c>BuildInitialFlight</c> had already
+    /// sealed a packet under - and RFC 9000 section 17.2.5.2's Retry path re-enters
+    /// <c>SendInitialFlightAsync</c>, drawing it a second time. Retry re-keys Initial from the
+    /// new Destination Connection ID, so the dangerous windows are a refusal on the FIRST flight
+    /// (one key, two identical numbers) and a partial send after the Retry already re-keyed.</para>
+    /// <para>SEALED IS SPENT, and the two accessors below are the two halves of that sentence:
+    /// the retained packet is the number the AEAD consumed, and the counter is the number the
+    /// next flight would draw. The assertion is that they are not the same number.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARefusedInitialFlightDoesNotHandItsPacketNumbersToTheRetry()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        await using var transport = new RefusingDatagramTransport(refuseAtOrAbove: 1000);
+        var spec = Spec();
+        await using var connection = new TlsQuicConnection(
+            new TlsQuicConnectionOptions(
+                transport, transport.RemoteEndPoint, spec, TimeProvider.System),
+            source => TlsClient(pki, source));
+
+        // The 1,200-byte Initial datagram RFC 9000 section 14.1 requires is refused by the host
+        // before it reaches the wire. It was SEALED first - BuildInitialFlight protects every
+        // packet and retains it before SendInitialFlightAsync awaits anything.
+        await Assert.ThrowsAsync<IOException>(
+            () => connection.StartAsync(cancellation.Token).AsTask());
+
+        // WHAT THE AEAD CONSUMED. One Initial packet, numbered from the spec's own starting
+        // point, retained by RetainSentPackets inside BuildInitialFlight.
+        var sealedPacket = Assert.Single(
+            connection.SentPackets(TlsQuicEncryptionLevel.Initial));
+        Assert.Equal(spec.InitialPacketNumber, sealedPacket.PacketNumber);
+
+        // WHAT THE NEXT FLIGHT WOULD DRAW. Before the fix this was still
+        // spec.InitialPacketNumber, so HandleRetryAsync's SendInitialFlightAsync sealed a second
+        // packet under the same nonce. It must now be strictly past every number already spent.
+        Assert.True(
+            connection.NextPacketNumber(TlsQuicEncryptionLevel.Initial)
+                > sealedPacket.PacketNumber,
+            "the Initial packet number counter did not move past the packet the refused flight "
+                + $"already sealed: sealed {sealedPacket.PacketNumber}, next "
+                + $"{connection.NextPacketNumber(TlsQuicEncryptionLevel.Initial)}. A Retry now "
+                + "re-uses it, which is AEAD nonce reuse under RFC 9001 section 5.3.");
+    }
+
+    /// <summary>
     /// A transport whose LOCAL send refuses anything at or above a size, the way a DF-set socket
     /// on a small-MTU interface does. NOT an impairment: it throws synchronously out of the send
     /// rather than declining to deliver, and that difference is the whole point of this file.
