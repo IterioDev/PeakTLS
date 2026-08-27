@@ -4652,6 +4652,48 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         written = 0;
         packetNumber = 0;
 
+        // THE CONTENT FIRST, AND THE REFUSAL BEFORE ANY PLAN IS DRAWN. RFC 9000 s12.3 forbids
+        // reusing a packet number in a space, so a plan built and thrown away burns one - and
+        // building a short-header plan is also what runs RFC 9001 s6.6's key update, so a
+        // discarded plan can rotate this connection's 1-RTT keys for a packet that never
+        // exists, leaving s6.1's gate waiting on "an acknowledgment for a packet that was sent
+        // protected with keys from the current key phase" that was never sent. This method used
+        // to draw the plan, measure, and return false when the size did not fit; the two lines
+        // below are that refusal, moved above the draw.
+        //
+        // THE FLOOR IS EXACT ARITHMETIC AND NOT A SECOND SOLVER. What is refused here is only
+        // the case where the requested probe is smaller than the smallest packet this
+        // connection can build, and that figure is OneRttPacketOverhead - RFC 9000 s17.3.1's
+        // first byte, the Destination Connection ID, the packet number and RFC 9001 s5.3's AEAD
+        // tag, the same decomposition the 1-RTT send budget already charges - plus one byte per
+        // frame, because s19.2's PING and s19.1's PADDING are one byte each. The builder's own
+        // measurement still decides the padding FILL below, which is where its private
+        // fixed-point search is the authority and a copy of it would be the second solver this
+        // file bans.
+        //
+        // AND THE REFUSAL IS UNREACHABLE THROUGH THE SHIPPED KNOBS, SO IT HAS NO WITNESS.
+        // TlsQuicConnectionSpec.MaximumPathMtu is floored at RFC 9000 s14.1's 1200 and
+        // TlsQuicPathMtu never probes below what is already confirmed, so `size` is always
+        // three orders of magnitude above this floor. What the move buys is the invariant
+        // rather than a reachable bug: a plan drawn and discarded burns a packet number and can
+        // run an s6.6 key update for a packet that never exists.
+        var frames = new List<TlsQuicFrame>
+        {
+            new() { RawType = (ulong)TlsQuicFrameType.Ping },
+        };
+
+        PadForHeaderProtectionSample(frames, _options.Spec.PacketNumberEncodedLength);
+
+        // The probe is the one datagram this connection sends that is DELIBERATELY larger than
+        // the current maximum datagram size - s14.2: "Both DPLPMTUD and PMTUD send datagrams
+        // that are larger than the current maximum datagram size, referred to as PMTU probes."
+        // A probe smaller than what is already confirmed would prove nothing, so a size that
+        // cannot be reached is refused rather than sent short.
+        if (OneRttPacketOverhead + frames.Count > size)
+        {
+            return false;
+        }
+
         // THE PLAN AND ITS KEYS IN ONE STEP, because building a short-header plan is what runs
         // RFC 9001 s6.6's key update - see TryPlanShortHeaderPacket. Taking the keys first and
         // the plan second, which is what this method used to do, pairs the previous
@@ -4661,13 +4703,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             return false;
         }
 
-        var frames = new List<TlsQuicFrame>
-        {
-            new() { RawType = (ulong)TlsQuicFrameType.Ping },
-        };
-
         packetNumber = plan.PacketNumber;
-        PadForHeaderProtectionSample(frames, plan.PacketNumberEncodedLength);
 
         var packet = new TlsQuicPacketToSend
         {
@@ -4690,16 +4726,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         var bare = TlsQuicDatagramBuilder.BuildDatagram(
             _options.Spec, [packet], now, _sendBuffer, null);
 
-        // The probe is the one datagram this connection sends that is DELIBERATELY larger than
-        // the current maximum datagram size - s14.2: "Both DPLPMTUD and PMTUD send datagrams
-        // that are larger than the current maximum datagram size, referred to as PMTU probes."
-        // A probe smaller than what is already confirmed would prove nothing, so a size that
-        // cannot be reached is refused rather than sent short.
-        if (bare > size)
-        {
-            return false;
-        }
-
+        // NO REFUSAL HERE ANY MORE, and the loop below is why it is not needed: the floor the
+        // caller was measured against above is this same figure, so `bare` cannot exceed `size`
+        // and the fill runs at least zero times either way. Refusing at this point would be
+        // refusing after the packet number and the s6.6 count had already been spent.
         for (var i = bare; i < size; i++)
         {
             frames.Add(default);
