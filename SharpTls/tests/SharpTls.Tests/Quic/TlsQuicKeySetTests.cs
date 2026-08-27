@@ -48,9 +48,9 @@ public class TlsQuicKeySetTests
 
         Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out var state));
         Assert.Equal(TlsQuicKeyLevelState.Installed, state);
-        Assert.Equal(AppendixAClientKey, Convert.ToHexString(keys.Key));
-        Assert.Equal(AppendixAClientIv, Convert.ToHexString(keys.Iv));
-        Assert.Equal(AppendixAClientHp, Convert.ToHexString(keys.HeaderProtectionKey));
+        Assert.Equal(AppendixAClientKey, Convert.ToHexString(keys.Key.Span));
+        Assert.Equal(AppendixAClientIv, Convert.ToHexString(keys.Iv.Span));
+        Assert.Equal(AppendixAClientHp, Convert.ToHexString(keys.HeaderProtectionKey.Span));
     }
 
     [Fact]
@@ -62,9 +62,9 @@ public class TlsQuicKeySetTests
         keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: false);
 
         Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out _));
-        Assert.Equal(AppendixAServerKey, Convert.ToHexString(keys.Key));
-        Assert.Equal(AppendixAServerIv, Convert.ToHexString(keys.Iv));
-        Assert.Equal(AppendixAServerHp, Convert.ToHexString(keys.HeaderProtectionKey));
+        Assert.Equal(AppendixAServerKey, Convert.ToHexString(keys.Key.Span));
+        Assert.Equal(AppendixAServerIv, Convert.ToHexString(keys.Iv.Span));
+        Assert.Equal(AppendixAServerHp, Convert.ToHexString(keys.HeaderProtectionKey.Span));
     }
 
     [Fact]
@@ -80,13 +80,13 @@ public class TlsQuicKeySetTests
         keySet.InstallInitialKeys(Convert.FromHexString("0102030405060708"), isClient: true);
 
         Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out _));
-        Assert.NotEqual(AppendixAClientKey, Convert.ToHexString(keys.Key));
+        Assert.NotEqual(AppendixAClientKey, Convert.ToHexString(keys.Key.Span));
 
         // And re-deriving against the original CID returns exactly A.1 again, so the
         // change is the CID's doing and not an install counter.
         keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: true);
         Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var restored, out _));
-        Assert.Equal(AppendixAClientKey, Convert.ToHexString(restored.Key));
+        Assert.Equal(AppendixAClientKey, Convert.ToHexString(restored.Key.Span));
     }
 
     // ---- the three states ----------------------------------------------------------
@@ -219,6 +219,15 @@ public class TlsQuicKeySetTests
     }
 
     // ---- zeroing, witnessed rather than assumed ------------------------------------
+    //
+    // THE WITNESS IS TryPeekLiveWriteKeyStorage AND NOT TryGetWriteKeys, AND THE SWAP IS THE
+    // POINT OF THE FIX THESE TESTS SIT BESIDE. The zeroing is defence in depth over memory
+    // this type has stopped referencing, so from outside the only way to see it is to hold
+    // the array being zeroed. TryGetWriteKeys used to provide that incidentally - and that
+    // was the bug: every 1-RTT send path held the aliased material across the packet plan,
+    // which is where RFC 9001 s6.6's key update fires, and shipped packets sealed under the
+    // all-zero array these tests are watching. The safe accessor now copies; the alias lives
+    // under a name no send path reaches for, and the zeroing keeps its witness.
 
     [Fact]
     public void DiscardZeroesTheWriteKeyMaterialItDrops()
@@ -227,18 +236,19 @@ public class TlsQuicKeySetTests
         using var keySet = new TlsQuicKeySet(receiver, TlsQuicVersion.Version1);
         keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: true);
 
-        // The returned spans ALIAS the set's own arrays, so holding them across the
-        // discard reads the very bytes the discard was supposed to zero. Without this
-        // the zeroing has no witness at all - task 6 shipped exactly that gap, and the
-        // mutation deleting its existing zeroing survived a green suite.
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out _));
-        Assert.Contains(keys.Key.ToArray(), b => b != 0);
+        // These ALIAS the set's own arrays, so holding them across the discard reads the very
+        // bytes the discard was supposed to zero. Without this the zeroing has no witness at
+        // all - task 6 shipped exactly that gap, and the mutation deleting its existing
+        // zeroing survived a green suite.
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Initial, out var key, out var iv, out var headerProtectionKey));
+        Assert.Contains(key.ToArray(), b => b != 0);
 
         keySet.DiscardKeys(TlsQuicEncryptionLevel.Initial);
 
-        Assert.All(keys.Key.ToArray(), b => Assert.Equal(0, b));
-        Assert.All(keys.Iv.ToArray(), b => Assert.Equal(0, b));
-        Assert.All(keys.HeaderProtectionKey.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(key.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(iv.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(headerProtectionKey.ToArray(), b => Assert.Equal(0, b));
     }
 
     [Fact]
@@ -248,12 +258,13 @@ public class TlsQuicKeySetTests
         using var keySet = new TlsQuicKeySet(receiver, TlsQuicVersion.Version1);
         keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: true);
 
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var superseded, out _));
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Initial, out var superseded, out _, out _));
         keySet.InstallInitialKeys(Convert.FromHexString("0102030405060708"), isClient: true);
 
         // The Retry path replaces rather than discards, and the old Initial key must not
         // outlive it on the heap.
-        Assert.All(superseded.Key.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(superseded.ToArray(), b => Assert.Equal(0, b));
     }
 
     [Fact]
@@ -263,10 +274,79 @@ public class TlsQuicKeySetTests
         var keySet = new TlsQuicKeySet(receiver, TlsQuicVersion.Version1);
         keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: true);
 
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out _));
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Initial, out var key, out _, out _));
         keySet.Dispose();
 
-        Assert.All(keys.Key.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(key.ToArray(), b => Assert.Equal(0, b));
+    }
+
+    // ---- and what the zeroing must NOT reach: material already handed out ----------
+
+    [Fact]
+    public void WriteKeyMaterialStillHoldsItsKeyAfterTheKeyUpdateThatReplacesIt()
+    {
+        // THE BUG THIS PINS, IN ONE SENTENCE: TryGetWriteKeys used to hand back spans over
+        // the set's live arrays, ApplyKeyUpdate zeroes those arrays as it installs the
+        // replacement (RFC 9001 s6.1: "An endpoint initiates a key update by updating its
+        // packet protection write secret and using that to protect new packets"), and every
+        // 1-RTT send path took the material BEFORE building the packet plan - which is where
+        // s6.6's confidentiality-limit update fires - and copied the key AFTER. The packet
+        // went out AEAD-sealed and header-protected under an all-zero key with the new phase
+        // bit set: undecryptable by the peer, and indistinguishable from a forgery.
+        //
+        // WHY THE ASSERTION IS "UNCHANGED" AND NOT "NOT ALL ZERO". A key set whose update
+        // derived a fresh generation into the same arrays would pass a zero check while
+        // still handing the caller bytes it never asked for. The snapshot taken before the
+        // update is the only correct answer, so it is the one asserted.
+        using var receiver = NewReceiver();
+        using var keySet = new TlsQuicKeySet(receiver, TlsQuicVersion.Version1);
+        using var write = Secret(TlsQuicEncryptionLevel.Application, TlsQuicSecretDirection.Write);
+        using var read = Secret(
+            TlsQuicEncryptionLevel.Application, TlsQuicSecretDirection.Read, fill: 0xCD);
+        keySet.InstallFromTrafficSecret(write);
+        keySet.InstallFromTrafficSecret(read);
+
+        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var keys, out _));
+
+        // Taken through ToArray, so this is a copy that the update below cannot touch under
+        // any implementation - it is the oracle, not part of what is under test.
+        var key = keys.Key.ToArray();
+        var iv = keys.Iv.ToArray();
+        var headerProtectionKey = keys.HeaderProtectionKey.ToArray();
+        Assert.Contains(key, b => b != 0);
+
+        // s6: "Initiating a key update results in both endpoints updating keys."
+        Assert.True(keySet.CanUpdateKeys);
+        keySet.ApplyKeyUpdate(locallyInitiated: true);
+
+        Assert.Equal(key, keys.Key.ToArray());
+        Assert.Equal(iv, keys.Iv.ToArray());
+
+        // s6.1: "The header protection key is not updated" - so this one is carried across
+        // rather than re-derived, which makes it the array the update Clones and then zeroes.
+        Assert.Equal(headerProtectionKey, keys.HeaderProtectionKey.ToArray());
+    }
+
+    [Fact]
+    public void WriteKeyMaterialStillHoldsItsKeyAfterTheLevelIsDiscardedAndTheSetDisposed()
+    {
+        // The same ownership question asked of the other two paths that zero in place, so
+        // that a fix aimed only at ApplyKeyUpdate cannot pass. RFC 9001 s4.9's discard is the
+        // ordinary steady state, and a datagram half-built when it happens must still go out
+        // under the keys it was planned with.
+        using var receiver = NewReceiver();
+        var keySet = new TlsQuicKeySet(receiver, TlsQuicVersion.Version1);
+        keySet.InstallInitialKeys(Convert.FromHexString(AppendixACid), isClient: true);
+
+        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var keys, out _));
+
+        keySet.DiscardKeys(TlsQuicEncryptionLevel.Initial);
+        keySet.Dispose();
+
+        Assert.Equal(AppendixAClientKey, Convert.ToHexString(keys.Key.Span));
+        Assert.Equal(AppendixAClientIv, Convert.ToHexString(keys.Iv.Span));
+        Assert.Equal(AppendixAClientHp, Convert.ToHexString(keys.HeaderProtectionKey.Span));
     }
 
     // ---- it drives the receiver rather than shadowing it ---------------------------
@@ -560,14 +640,17 @@ public class TlsQuicKeySetTests
         keySet.InstallFromTrafficSecret(handshake);
         keySet.InstallFromTrafficSecret(application);
 
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Initial, out var initial, out _));
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Handshake, out var hs, out _));
-        Assert.True(keySet.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var app, out _));
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Initial, out var initial, out _, out _));
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Handshake, out var hs, out _, out _));
+        Assert.True(keySet.TryPeekLiveWriteKeyStorage(
+            TlsQuicEncryptionLevel.Application, out var app, out _, out _));
         keySet.Dispose();
 
-        Assert.All(initial.Key.ToArray(), b => Assert.Equal(0, b));
-        Assert.All(hs.Key.ToArray(), b => Assert.Equal(0, b));
-        Assert.All(app.Key.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(initial.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(hs.ToArray(), b => Assert.Equal(0, b));
+        Assert.All(app.ToArray(), b => Assert.Equal(0, b));
     }
 
     [Fact]

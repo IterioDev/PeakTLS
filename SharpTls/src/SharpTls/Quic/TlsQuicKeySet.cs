@@ -555,6 +555,37 @@ internal sealed class TlsQuicKeySet : IDisposable
     /// <paramref name="state"/> says which of the three states applies, so a caller can
     /// tell a sequencing bug from correct post-discard steady state.
     /// </summary>
+    /// <remarks>
+    /// <para>WHAT COMES BACK IS THE CALLER'S OWN COPY, AND THAT IS THE WHOLE POINT OF THE
+    /// METHOD. It used to hand back <see cref="ReadOnlySpan{T}"/>s ALIASING the arrays below,
+    /// which every mutating path on this type zeroes in place - <see cref="DiscardKeys"/>,
+    /// <see cref="InstallFromTrafficSecret"/>'s replacement, <see cref="Dispose"/>, and above
+    /// all RFC 9001 s6's <see cref="ApplyKeyUpdate"/>, which disposes the outgoing
+    /// <c>WriteKeys</c> the instant it installs the replacement. A caller that held the
+    /// material across ANY of those was reading zeros, and the shape it happened in was the
+    /// worst one available: every 1-RTT send path took the material, then built the packet
+    /// plan - which is where s6.6's confidentiality-limit update fires - and only then copied
+    /// the key. The result was a packet sealed and header-protected under an all-zero key
+    /// while its Key Phase bit already announced the NEW generation, so the peer could neither
+    /// decrypt it nor tell it from a forgery, and the connection died in silence.</para>
+    /// <para>SO THE COPY IS TAKEN HERE RATHER THAN ASKED OF THE CALLER. A rule that reads
+    /// "copy anything that must outlive the call" is a rule every future caller has to be
+    /// told about and can forget once; a type whose fields physically cannot alias this
+    /// object's arrays cannot be misused that way at all. <see cref="TlsQuicWriteKeyMaterial"/>
+    /// copies in its constructor, so the aliasing form is unrepresentable rather than
+    /// discouraged.</para>
+    /// <para>ORDERING IS STILL THE CALLER'S PROBLEM, AND COPIES DO NOT SOLVE IT. Material
+    /// fetched before <see cref="ApplyKeyUpdate"/> is now intact rather than zeroed, but it is
+    /// still the PREVIOUS generation - pairing it with a Key Phase bit read after the update
+    /// is the same undecryptable packet by a different route. The 1-RTT send paths therefore
+    /// build the plan FIRST and ask for keys second; see
+    /// <c>TlsQuicConnection.TryPlanShortHeaderPacket</c>, which is the only way this
+    /// connection obtains a short-header plan and its keys.</para>
+    /// <para>CALLERS THAT WANT ONLY THE AEAD SHOULD NOT COME HERE. Copying three arrays to
+    /// read <c>PacketCipher</c> would put three allocations on both per-packet edges - RFC
+    /// 9001 s6.6's two limit checks - so <see cref="TryGetPacketProtectionCipher"/> exists for
+    /// them, and existence checks belong on <see cref="WriteStateOf"/>.</para>
+    /// </remarks>
     internal bool TryGetWriteKeys(
         TlsQuicEncryptionLevel level,
         out TlsQuicWriteKeyMaterial keys,
@@ -575,6 +606,74 @@ internal sealed class TlsQuicKeySet : IDisposable
 
         keys = new TlsQuicWriteKeyMaterial(
             stored.PacketCipher, stored.Key, stored.Iv, stored.HeaderCipher, stored.HeaderProtectionKey);
+        return true;
+    }
+
+    /// <summary>
+    /// Gets the RFC 9001 s5.3 AEAD a level's write keys use, without copying the key
+    /// material out.
+    /// </summary>
+    /// <remarks>
+    /// FOR THE TWO PLACES THAT ASK WHICH AEAD IS IN USE RATHER THAN FOR A KEY. RFC 9001 s6.6's
+    /// confidentiality and integrity limits are both "for the selected AEAD", and the checks
+    /// that enforce them run on the per-packet send and receive edges. Routing them through
+    /// <see cref="TryGetWriteKeys"/> would allocate three copies of secret material per packet
+    /// purely to read an enum off the front of it - and would put that material on the heap in
+    /// two more places for no reason at all.
+    /// </remarks>
+    internal bool TryGetPacketProtectionCipher(
+        TlsQuicEncryptionLevel level,
+        out TlsQuicPacketProtectionCipher cipher)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfLevelUndefined(level);
+
+        if (_write[(int)level] is not { } stored)
+        {
+            cipher = default;
+            return false;
+        }
+
+        cipher = stored.PacketCipher;
+        return true;
+    }
+
+    /// <summary>
+    /// Aliases the LIVE write-key arrays for one level. Not for protecting packets; the
+    /// only reason this exists is so that the zeroing this type performs has a witness.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE ZEROING NEEDS AN ALIAS TO BE OBSERVABLE AT ALL. Every path that drops write
+    /// keys zeroes the arrays it drops, and that is defence in depth over memory this object
+    /// no longer references - so from outside, the only way to see it happen is to be holding
+    /// a reference to the very array being zeroed. <see cref="TryGetWriteKeys"/> used to
+    /// provide that incidentally, which is exactly why it was also a trap; the witness is
+    /// therefore split out under a name no send path would reach for, and it is deliberate
+    /// that nothing in <c>src/</c> calls it. Deleting the zeroing left the suite green once
+    /// before (mutation row 2), and that must not become true again.</para>
+    /// <para>WHAT IT HANDS BACK IS VALID ONLY UNTIL THE NEXT INSTALL, DISCARD, KEY UPDATE OR
+    /// DISPOSAL AT THAT LEVEL - which is the point: after any of those it reads as zeros.</para>
+    /// </remarks>
+    internal bool TryPeekLiveWriteKeyStorage(
+        TlsQuicEncryptionLevel level,
+        out ReadOnlyMemory<byte> key,
+        out ReadOnlyMemory<byte> iv,
+        out ReadOnlyMemory<byte> headerProtectionKey)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfLevelUndefined(level);
+
+        if (_write[(int)level] is not { } stored)
+        {
+            key = default;
+            iv = default;
+            headerProtectionKey = default;
+            return false;
+        }
+
+        key = stored.Key;
+        iv = stored.Iv;
+        headerProtectionKey = stored.HeaderProtectionKey;
         return true;
     }
 
@@ -772,10 +871,29 @@ internal enum TlsQuicKeyLevelState
 }
 
 /// <summary>
-/// Borrowed write-key material. The spans alias <see cref="TlsQuicKeySet"/>'s own arrays
-/// and are valid until the next install or discard at that level, or the set's disposal -
-/// all three zero what they replace. Copy anything that must outlive the call.
+/// One snapshot of a level's write-key material, OWNED by whoever asked for it. RFC 9001
+/// s5.1's packet protection key, s5.3's IV and s5.4's header protection key, plus the two
+/// ciphers they are used with.
 /// </summary>
+/// <remarks>
+/// <para>OWNED, NOT BORROWED, AND THE CONSTRUCTOR IS WHERE THAT IS ENFORCED. This type used
+/// to hold <see cref="ReadOnlySpan{T}"/>s aliasing <see cref="TlsQuicKeySet"/>'s live arrays,
+/// with a doc comment asking callers to "copy anything that must outlive the call". Every
+/// 1-RTT send path then did the copying one step too late - after the packet plan, which is
+/// where RFC 9001 s6.6's key update fires and zeroes those very arrays - and shipped packets
+/// sealed under an all-zero key. Taking spans in and copying out of them here means the
+/// aliasing form no longer exists to get wrong: there is no constructor that keeps a
+/// reference to somebody else's buffer.</para>
+/// <para>STILL A ref struct, AND STILL FOR THE ORIGINAL REASON. Nothing about the copies
+/// requires it now that the fields are <see cref="ReadOnlyMemory{T}"/>, but the constraint is
+/// worth keeping on its own: it is what stops key material from being captured into a field,
+/// a closure or an async state machine, and it is why the four methods that build packets say
+/// "NOT async, and it cannot be". Loosening it would silently remove that.</para>
+/// <para>WHAT THIS DOES NOT PROMISE is that the snapshot is CURRENT. It is the generation
+/// installed when it was taken; if RFC 9001 s6's key update has run since, the peer is reading
+/// with the next one. Take the plan's Key Phase and the keys from the same moment - see
+/// <see cref="TlsQuicKeySet.TryGetWriteKeys"/>'s remarks.</para>
+/// </remarks>
 internal readonly ref struct TlsQuicWriteKeyMaterial
 {
     internal TlsQuicWriteKeyMaterial(
@@ -786,15 +904,15 @@ internal readonly ref struct TlsQuicWriteKeyMaterial
         ReadOnlySpan<byte> headerProtectionKey)
     {
         PacketCipher = packetCipher;
-        Key = key;
-        Iv = iv;
+        Key = key.ToArray();
+        Iv = iv.ToArray();
         HeaderCipher = headerCipher;
-        HeaderProtectionKey = headerProtectionKey;
+        HeaderProtectionKey = headerProtectionKey.ToArray();
     }
 
     internal TlsQuicPacketProtectionCipher PacketCipher { get; }
-    internal ReadOnlySpan<byte> Key { get; }
-    internal ReadOnlySpan<byte> Iv { get; }
+    internal ReadOnlyMemory<byte> Key { get; }
+    internal ReadOnlyMemory<byte> Iv { get; }
     internal TlsQuicHeaderProtectionCipher HeaderCipher { get; }
-    internal ReadOnlySpan<byte> HeaderProtectionKey { get; }
+    internal ReadOnlyMemory<byte> HeaderProtectionKey { get; }
 }

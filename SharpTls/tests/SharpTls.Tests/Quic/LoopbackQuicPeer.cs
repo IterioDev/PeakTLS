@@ -1051,8 +1051,8 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
         var size = headerLength + payload.Count + TlsQuicPacketBuilder.AuthenticationTagLength;
         TlsQuicPacketProtection.Seal(
             keys.PacketCipher,
-            keys.Key,
-            keys.Iv,
+            keys.Key.Span,
+            keys.Iv.Span,
             packetNumber,
             target[..headerLength],
             CollectionsMarshal.AsSpan(payload),
@@ -1063,7 +1063,7 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
         // to be told our connection ID length out of band.
         var packetNumberOffset = 1 + _destinationConnectionId.Length;
         if (!TlsQuicHeaderProtection.TryApply(
-                keys.HeaderCipher, keys.HeaderProtectionKey, target[..size], packetNumberOffset))
+                keys.HeaderCipher, keys.HeaderProtectionKey.Span, target[..size], packetNumberOffset))
         {
             throw new InvalidOperationException(
                 "The 1-RTT packet is too short for RFC 9001 s5.4.2's 16-byte sample.");

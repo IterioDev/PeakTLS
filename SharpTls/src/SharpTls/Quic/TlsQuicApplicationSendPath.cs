@@ -525,7 +525,15 @@ internal sealed partial class TlsQuicConnection
         // state that cannot arise; it is kept because the state becomes reachable the moment
         // anything installs the two directions apart, and it is labelled rather than asserted
         // to be load-bearing.
-        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var keys, out _))
+        //
+        // IT ASKS FOR THE STATE AND NOT FOR THE KEYS, which is not a micro-optimisation. The
+        // keys this packet is sealed with have to be the generation whose Key Phase bit the
+        // plan writes, and the plan is not built until every frame is in - see
+        // TryPlanShortHeaderPacket. Fetching material here and using it below is precisely the
+        // ordering that shipped 1-RTT packets under an all-zero key; the gate needs to know
+        // whether the level is usable, and that is all it needs.
+        if (_keys.WriteStateOf(TlsQuicEncryptionLevel.Application)
+            != TlsQuicKeyLevelState.Installed)
         {
             return false;
         }
@@ -657,17 +665,65 @@ internal sealed partial class TlsQuicConnection
             return false;
         }
 
+        if (!TryPlanShortHeaderPacket(out var plan, out var keys))
+        {
+            return false;
+        }
+
         packet = new TlsQuicPacketToSend
         {
-            Plan = ShortHeaderPlan(),
+            Plan = plan,
             Frames = frames,
             PacketProtectionCipher = keys.PacketCipher,
-            Key = keys.Key.ToArray(),
-            Iv = keys.Iv.ToArray(),
+            Key = keys.Key,
+            Iv = keys.Iv,
             HeaderProtectionCipher = keys.HeaderCipher,
-            HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+            HeaderProtectionKey = keys.HeaderProtectionKey,
         };
         return true;
+    }
+
+    /// <summary>Builds the next 1-RTT packet plan AND the write-key material that plan's Key
+    /// Phase bit names, in that order, as one step.</summary>
+    /// <remarks>
+    /// <para>THE ORDER IS THE WHOLE METHOD. <see cref="ShortHeaderPlan"/> reads the Key Phase
+    /// bit through <see cref="ProtectOneMoreApplicationPacket"/>, which is where RFC 9001
+    /// s6.6's "Endpoints MUST initiate a key update before sending more protected packets than
+    /// the confidentiality limit for the selected AEAD permits" is enforced - so building a
+    /// plan can, on that one packet, replace this connection's 1-RTT write keys. Material
+    /// taken before the plan is the generation BEFORE the bit the plan carries, and s6.1's
+    /// "The endpoint toggles the value of the Key Phase bit and uses the updated key and IV to
+    /// protect all subsequent packets" makes that pair undecryptable: the peer reads the new
+    /// phase, reaches for its new keys, and authentication fails. It also used to be worse than
+    /// undecryptable - the outgoing keys are zeroed as they are replaced, so the packet went
+    /// out sealed under an all-zero key, which s6.6's own integrity counter on the peer cannot
+    /// tell from a forgery.</para>
+    /// <para>SO NO CALLER GETS TO CHOOSE. All four short-header call sites - this file's
+    /// application packet, the PMTU probe, the PTO probe and the CONNECTION_CLOSE - come
+    /// through here, and there is no other way to obtain a short-header plan. That is the
+    /// difference between fixing four call sites and removing the mistake.</para>
+    /// <para>THE STATE CHECK COMES FIRST SO A PACKET NUMBER IS NOT SPENT ON A LEVEL THAT
+    /// CANNOT PROTECT ONE. RFC 9000 s12.3 forbids reusing a number in a space, so a plan built
+    /// and thrown away burns one; s6.6's protected-packet count would move too. The false
+    /// return from TryGetWriteKeys below is therefore unreachable - nothing between the two
+    /// lines can uninstall a level, because <c>ApplyKeyUpdate</c> REPLACES the write keys
+    /// rather than dropping them - and it is kept as the check that says so rather than as an
+    /// assumption.</para>
+    /// </remarks>
+    private bool TryPlanShortHeaderPacket(
+        out TlsQuicPacketPlan plan, out TlsQuicWriteKeyMaterial keys)
+    {
+        plan = default;
+        keys = default;
+
+        if (_keys.WriteStateOf(TlsQuicEncryptionLevel.Application)
+            != TlsQuicKeyLevelState.Installed)
+        {
+            return false;
+        }
+
+        plan = ShortHeaderPlan();
+        return _keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out keys, out _);
     }
 
     // RFC 9000 s17.3.1's 1-RTT packet. A null Type is what TlsQuicPacketBuilder reads as
@@ -684,20 +740,31 @@ internal sealed partial class TlsQuicConnection
         Token = default,
         LengthVarintWidth = TlsQuicVarintWidth.Minimal,
 
+        // RFC 9001 s5.4: a protected bit of the short header. KEY PHASE FOLLOWS THE INSTALLED
+        // PHASE, and it is a value rather than a constant: RFC 9001 s6 toggles it on every key
+        // update and TlsQuicKeySet owns which generation the write keys are at. This line USED
+        // TO READ `KeyPhase = false` with the reason "TlsQuicKeySet installs every level at
+        // phase 0 - key update is out of scope for this phase"; that reason is gone, and
+        // reading the phase from the key set is what keeps the bit and the keys from ever
+        // disagreeing.
+        //
+        // IT IS ASSIGNED BEFORE PacketNumber, AND THE ORDER IS LOAD-BEARING. C# runs an object
+        // initialiser's assignments in source order, and this one has a side effect: it may run
+        // RFC 9001 s6.6's key update, which records _lowestApplicationPacketNumberInWritePhase
+        // as _nextPacketNumber[Application] - "the lowest packet number sent with each key
+        // phase", per s6.2. THIS packet is the first one sent in the new phase, so that number
+        // has to be the one the next line is about to take. With the two swapped the counter
+        // had already moved, the recorded low was one PAST the first packet of the phase, and
+        // s6.1's gate on "an acknowledgment for a packet that was sent protected with keys from
+        // the current key phase" waited for a packet number that need never be reached.
+        KeyPhase = ProtectOneMoreApplicationPacket(),
+
         // RFC 9000 s12.3 gives 0-RTT and 1-RTT one packet number space, which is the space
         // this counter's Application slot is; s12.3 also forbids reusing a number in it.
         PacketNumber = _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application]++,
         PacketNumberEncodedLength = _options.Spec.PacketNumberEncodedLength,
         LargestAcknowledged = _acks.LargestAcked(TlsQuicEncryptionLevel.Application),
 
-        // RFC 9001 s5.4: both are protected bits of the short header. KEY PHASE FOLLOWS THE
-        // INSTALLED PHASE, and it is now a value rather than a constant: RFC 9001 s6 toggles
-        // it on every key update and TlsQuicKeySet owns which generation the write keys are
-        // at. This line USED TO READ `KeyPhase = false` with the reason "TlsQuicKeySet
-        // installs every level at phase 0 - key update is out of scope for this phase"; that
-        // reason is gone, and reading the phase from the key set is what keeps the bit and the
-        // keys from ever disagreeing.
-        //
         // SPIN BIT: RFC 9000 s17.4's latency spin bit is a passive-measurement aid, not part
         // of packet processing - a constant zero is the disabled reading, it is what the one
         // other short header in this tree (LoopbackQuicPeer's HANDSHAKE_DONE packet) already
@@ -708,7 +775,6 @@ internal sealed partial class TlsQuicConnection
         // one.
         SpinBit = DrawSpinBit(),
         GreaseFixedBit = DrawGreasedQuicBit(),
-        KeyPhase = ProtectOneMoreApplicationPacket(),
     };
 
     /// <summary>RFC 9287 s3's QUIC Bit, drawn per packet when both sides permit it.</summary>

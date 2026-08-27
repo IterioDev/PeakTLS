@@ -1592,9 +1592,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // s6.6's initiation: "Endpoints MUST initiate a key update before sending more
         // protected packets than the confidentiality limit for the selected AEAD permits."
         // BEFORE, so the test is >= and not >.
-        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var write, out _)
+        //
+        // THE AEAD RATHER THAN THE KEYS. s6.6's limit is "for the selected AEAD", and this
+        // runs on the per-packet sending edge; asking TryGetWriteKeys would copy the key, the
+        // IV and the header protection key out of the set on every 1-RTT packet in order to
+        // read an enum, and put three more copies of live key material on the heap for the
+        // duration of a comparison.
+        if (!_keys.TryGetPacketProtectionCipher(TlsQuicEncryptionLevel.Application, out var aead)
             || ApplicationPacketsProtectedWithCurrentKeys
-                < ConfidentialityLimitFor(write.PacketCipher))
+                < ConfidentialityLimitFor(aead))
         {
             return;
         }
@@ -1646,12 +1652,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // can close.
     private void ThrowIfIntegrityLimitReached()
     {
-        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var write, out _))
+        // THE AEAD RATHER THAN THE KEYS, for the same reason as the confidentiality check
+        // above and on the mirror-image edge: this runs once per RECEIVED packet, and
+        // s6.6's integrity limit is "for the selected AEAD" too.
+        if (!_keys.TryGetPacketProtectionCipher(TlsQuicEncryptionLevel.Application, out var aead))
         {
             return;
         }
 
-        if (_receiver.AuthenticationFailures <= IntegrityLimitFor(write.PacketCipher))
+        if (_receiver.AuthenticationFailures <= IntegrityLimitFor(aead))
         {
             return;
         }
@@ -3909,8 +3918,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // a Handshake packet if we can build one, otherwise a padded Initial.
         if (!HasAckElicitingPacketsInFlight())
         {
+            // AN EXISTENCE QUESTION, ASKED OF THE METHOD THAT ANSWERS EXISTENCE QUESTIONS.
+            // TryGetWriteKeys copies the level's key material out; discarding it with `out _`
+            // to learn only whether a Handshake packet could be built spends three array
+            // copies of secret material on every PTO computation.
             var antiDeadlockSpace =
-                _keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Handshake, out _, out _)
+                _keys.WriteStateOf(TlsQuicEncryptionLevel.Handshake)
+                    == TlsQuicKeyLevelState.Installed
                     ? TlsQuicEncryptionLevel.Handshake
                     : TlsQuicEncryptionLevel.Initial;
             return (
@@ -4245,7 +4259,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         written = 0;
         packetNumber = 0;
 
-        if (!_keys.TryGetWriteKeys(TlsQuicEncryptionLevel.Application, out var keys, out _))
+        // THE PLAN AND ITS KEYS IN ONE STEP, because building a short-header plan is what runs
+        // RFC 9001 s6.6's key update - see TryPlanShortHeaderPacket. Taking the keys first and
+        // the plan second, which is what this method used to do, pairs the previous
+        // generation's material with the new phase bit.
+        if (!TryPlanShortHeaderPacket(out var plan, out var keys))
         {
             return false;
         }
@@ -4255,7 +4273,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             new() { RawType = (ulong)TlsQuicFrameType.Ping },
         };
 
-        var plan = ShortHeaderPlan();
         packetNumber = plan.PacketNumber;
         PadForHeaderProtectionSample(frames, plan.PacketNumberEncodedLength);
 
@@ -4264,10 +4281,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             Plan = plan,
             Frames = frames,
             PacketProtectionCipher = keys.PacketCipher,
-            Key = keys.Key.ToArray(),
-            Iv = keys.Iv.ToArray(),
+            Key = keys.Key,
+            Iv = keys.Iv,
             HeaderProtectionCipher = keys.HeaderCipher,
-            HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+            HeaderProtectionKey = keys.HeaderProtectionKey,
         };
 
         var now = _options.TimeProvider.GetUtcNow();
@@ -4416,9 +4433,29 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     {
         written = 0;
 
-        if (!_keys.TryGetWriteKeys(space, out var keys, out _))
+        // TWO ARMS BECAUSE ONLY ONE OF THE TWO SPACES CAN RE-KEY UNDER THE PLAN BUILDER.
+        // RFC 9001 s6.1's Note - "Keys of packets other than the 1-RTT packets are never
+        // updated" - is why PlanFor has no key update in it and the order there is free; the
+        // Application arm goes through TryPlanShortHeaderPacket because ShortHeaderPlan is
+        // where s6.6's update fires, and material fetched ahead of it belongs to the
+        // generation before the phase bit the plan carries.
+        TlsQuicPacketPlan probePlan;
+        TlsQuicWriteKeyMaterial keys;
+        if (space == TlsQuicEncryptionLevel.Application)
         {
-            return false;
+            if (!TryPlanShortHeaderPacket(out probePlan, out keys))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (!_keys.TryGetWriteKeys(space, out keys, out _))
+            {
+                return false;
+            }
+
+            probePlan = PlanFor(space, _nextPacketNumber[(int)space]++);
         }
 
         var frames = new List<TlsQuicFrame>
@@ -4426,9 +4463,6 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             new() { RawType = (ulong)TlsQuicFrameType.Ping },
         };
 
-        var probePlan = space == TlsQuicEncryptionLevel.Application
-            ? ShortHeaderPlan()
-            : PlanFor(space, _nextPacketNumber[(int)space]++);
         PadForHeaderProtectionSample(frames, probePlan.PacketNumberEncodedLength);
 
         var packet = new TlsQuicPacketToSend
@@ -4436,10 +4470,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             Plan = probePlan,
             Frames = frames,
             PacketProtectionCipher = keys.PacketCipher,
-            Key = keys.Key.ToArray(),
-            Iv = keys.Iv.ToArray(),
+            Key = keys.Key,
+            Iv = keys.Iv,
             HeaderProtectionCipher = keys.HeaderCipher,
-            HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+            HeaderProtectionKey = keys.HeaderProtectionKey,
         };
 
         var now = _options.TimeProvider.GetUtcNow();
@@ -4698,10 +4732,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 _nextPacketNumber[(int)TlsQuicEncryptionLevel.Initial]),
             Frames = [],
             PacketProtectionCipher = keys.PacketCipher,
-            Key = keys.Key.ToArray(),
-            Iv = keys.Iv.ToArray(),
+
+            // NO SECOND COPY. TlsQuicWriteKeyMaterial already owns its arrays - the whole
+            // reason it exists - so the ToArray these three lines used to carry duplicated
+            // material that nothing else can reach.
+            Key = keys.Key,
+            Iv = keys.Iv,
             HeaderProtectionCipher = keys.HeaderCipher,
-            HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+            HeaderProtectionKey = keys.HeaderProtectionKey,
         };
 
         // THE THIRD CALL SITE, WHICH THE A3 PLAN'S TASK TEXT DOES NOT NAME. It names the two
@@ -5175,13 +5213,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
             packets.Add(new TlsQuicPacketToSend
             {
+                // THIS LOOP NEVER REACHES Application - the levels it walks are the
+                // long-header ones - so PlanFor cannot re-key underneath it the way
+                // ShortHeaderPlan can, and plan-then-keys is not forced here. The material is
+                // still the caller's own copy, so no ToArray is needed on the three keys.
                 Plan = PlanFor(level, _nextPacketNumber[(int)level]++),
                 Frames = frames,
                 PacketProtectionCipher = keys.PacketCipher,
-                Key = keys.Key.ToArray(),
-                Iv = keys.Iv.ToArray(),
+                Key = keys.Key,
+                Iv = keys.Iv,
                 HeaderProtectionCipher = keys.HeaderCipher,
-                HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+                HeaderProtectionKey = keys.HeaderProtectionKey,
             });
 
             carriedHandshakePacket |= level == TlsQuicEncryptionLevel.Handshake;
@@ -5424,9 +5466,33 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
         foreach (var candidate in candidates)
         {
-            if (!_keys.TryGetWriteKeys(candidate, out var keys, out _))
+            // PLAN FIRST AT Application, KEYS FIRST EVERYWHERE ELSE, for the reason
+            // TryPlanShortHeaderPacket carries: ShortHeaderPlan is where RFC 9001 s6.6's key
+            // update runs, and a close sealed under the previous generation with the new phase
+            // bit is a close the peer discards - which on the teardown path means the peer
+            // learns nothing and waits out its idle timeout instead. s6.1's Note keeps the
+            // long-header levels out of it: "Keys of packets other than the 1-RTT packets are
+            // never updated", so PlanFor has no such side effect.
+            //
+            // BOTH ARMS `continue` RATHER THAN THROW. A level this endpoint cannot protect at
+            // is the ordinary post-discard state of s4.9, and this is the teardown path.
+            TlsQuicPacketPlan closePlan;
+            TlsQuicWriteKeyMaterial keys;
+            if (candidate == TlsQuicEncryptionLevel.Application)
             {
-                continue;
+                if (!TryPlanShortHeaderPacket(out closePlan, out keys))
+                {
+                    continue;
+                }
+            }
+            else
+            {
+                if (!_keys.TryGetWriteKeys(candidate, out keys, out _))
+                {
+                    continue;
+                }
+
+                closePlan = PlanFor(candidate, _nextPacketNumber[(int)candidate]++);
             }
 
             // s12.4 Table 3 gives 0x1d the row "__01" - a 0-RTT or 1-RTT packet and nothing
@@ -5490,16 +5556,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                         // RFC 9000 s17.3.1's short header has none of the four long-header
                         // fields PlanFor sets, so the 1-RTT arm takes the plan the application
                         // send path already builds rather than a fifth arm of PlanFor - which
-                        // is why PlanFor throws for Application rather than answering.
-                        Plan = candidate == TlsQuicEncryptionLevel.Application
-                            ? ShortHeaderPlan()
-                            : PlanFor(candidate, _nextPacketNumber[(int)candidate]++),
+                        // is why PlanFor throws for Application rather than answering. Both
+                        // arms are decided above, with the keys, so that the pair cannot come
+                        // from two different key generations.
+                        Plan = closePlan,
                         Frames = [frame],
                         PacketProtectionCipher = keys.PacketCipher,
-                        Key = keys.Key.ToArray(),
-                        Iv = keys.Iv.ToArray(),
+                        Key = keys.Key,
+                        Iv = keys.Iv,
                         HeaderProtectionCipher = keys.HeaderCipher,
-                        HeaderProtectionKey = keys.HeaderProtectionKey.ToArray(),
+                        HeaderProtectionKey = keys.HeaderProtectionKey,
                     },
                 ],
                 _options.TimeProvider.GetUtcNow(),
