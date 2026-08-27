@@ -77,16 +77,22 @@ public sealed class TlsQuicPacketNumberTests
         Assert.Equal(expectedBytes, TlsQuicPacketNumber.EncodedLength(fullPn: numUnacked - 1, largestAcked: null));
     }
 
-    [Theory]
-    [InlineData(128UL)]
-    [InlineData(255UL)]
-    [InlineData(32768UL)]
-    [InlineData(65536UL)]
-    public void EncodedLengthIsAlwaysBetweenOneAndFourBytes(ulong numUnacked)
-    {
-        var length = TlsQuicPacketNumber.EncodedLength(fullPn: numUnacked - 1, largestAcked: null);
-        Assert.InRange(length, 1, 4);
-    }
+    // DELETED HERE: EncodedLengthIsAlwaysBetweenOneAndFourBytes, a Theory over 128, 255,
+    // 32768 and 65536 asserting InRange(length, 1, 4). Every one of those four rows is
+    // asserted at an EXACT value by the Theory above - 1, 2, 2, 3 - so the range check
+    // could never fail on an input the exact check passed, and the deletion removes no
+    // reachable assertion. It was already subsumed before this change; the change is what
+    // finished the job, by moving the upper bound out of the return value entirely. A
+    // length above 4 is now a throw, witnessed by the Theory below and by TlsQuicPacketNu
+    // mberTests.EncodedLengthStillAcceptsTheWidestEncodableAckGap on the 2^31 boundary it
+    // must not swallow. The deleted name above is left deliberately unqualified: it names
+    // something that no longer exists, and the qualified form is reserved for citations a
+    // checker is meant to resolve.
+    //
+    // Removed rather than narrowed because there was nothing left to narrow it to. A test
+    // that cannot fail is worse than an absent one: it reads as coverage of the 1-to-4
+    // contract while the contract is held somewhere else, so a later edit that breaks the
+    // contract gets a green run from a test named after it.
 
     [Theory]
     [InlineData((1UL << 31) + 1)]

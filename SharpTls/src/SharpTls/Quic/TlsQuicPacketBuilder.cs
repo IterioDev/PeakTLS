@@ -860,9 +860,9 @@ internal static class TlsQuicPacketBuilder
     // return IsAckEliciting. PADDING is on that method's exclusion list, so a packet of
     // ACK plus PADDING is not ack-eliciting and is still in flight; RFC 9000 s13.2.7 says
     // the same thing without the table: "Packets containing PADDING frames are considered
-    // to be in flight for congestion control purposes". Both halves are pinned - Padding
-    // OnlyPacketsAreNotAckElicitingButAreStillInFlight and AnAckPaddedOutIsInFlight
-    // BecauseOfThePaddingAlone.
+    // to be in flight for congestion control purposes". Both halves are pinned -
+    // TlsQuicPacketBuilderTests.PaddingOnlyPacketsAreNotAckElicitingButAreStillInFlight
+    // and TlsQuicPacketBuilderTests.AnAckPaddedOutIsInFlightBecauseOfThePaddingAlone.
     //
     // THIS USED TO READ "anything that is not ACK", derived from RFC 9000 s12.4's legend
     // - "C: Packets containing only frames with this marking do not count toward bytes in
@@ -874,8 +874,8 @@ internal static class TlsQuicPacketBuilder
     // Flight and eating congestion window on the way out. Harmless, since the connection
     // is ending, but it is a divergence from the recovery model that IsAckEliciting one
     // method above did not share: that method already excludes CONNECTION_CLOSE, so the
-    // two disagreed about the same frame. Witnessed by ConnectionCloseOnlyPacketsAre
-    // NeitherAckElicitingNorInFlight.
+    // two disagreed about the same frame. Witnessed by TlsQuicPacketBuilderTests.Connecti
+    // onCloseOnlyPacketsAreNeitherAckElicitingNorInFlight.
     private static bool IsInFlight(IReadOnlyList<TlsQuicFrame> frames)
     {
         if (IsAckEliciting(frames))

@@ -406,6 +406,11 @@ public sealed class TlsQuicPacketBuilderTests
         // the whole suite green: PaddingOnlyPacketsAreNotAckElicitingButAreStillInFlight
         // is the only other test that separates the two, and it would fail on the PADDING
         // half while this one is the pair that pins the disjunction itself.
+        //
+        // THE PADDING IS THE ARRAY'S DEFAULT AND IS LOAD-BEARING: indices 1 to 3 are never
+        // assigned, so they keep default(TlsQuicFrame), whose RawType is 0x00 - PADDING,
+        // per RFC 9000 s19.1. Only index 0 is written. Assigning all four would remove the
+        // frames the assertion below is about.
         var frames = new TlsQuicFrame[4];
         frames[0] = new TlsQuicFrame { RawType = 0x02, LargestAcknowledged = 7, AckDelay = 0, AckRangeCount = 0, FirstAckRange = 0 };
         using var keys = VectorKeys();
