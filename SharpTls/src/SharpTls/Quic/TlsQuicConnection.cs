@@ -3814,13 +3814,41 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         SetLossDetectionTimer();
     }
 
+    // A BINARY SEARCH, AND THE ORDER IT NEEDS IS STRUCTURAL RATHER THAN ASSUMED. RFC 9000
+    // s19.3.1 encodes the ranges as Largest, then a chain of (Gap, ACK Range Length) that walks
+    // DOWNWARDS: TlsQuicAckFrames' decoder computes each next range's Largest as
+    // `smallest - gap - 2` and rejects the frame outright when that would underflow, so a
+    // decoded list is strictly descending and disjoint by construction - there is no legal ACK
+    // frame that produces any other order, and an illegal one produces no list at all.
+    //
+    // WHY IT WAS WORTH CHANGING. The caller runs this once per retained packet, up to
+    // MaxRetainedPacketsPerSpace of them, and the loop it replaces walked every range for each
+    // - the product of two bounded numbers, as the caller's own remark says, but the peer picks
+    // one of the two factors: hundreds of ranges fit in one frame, and a reordering path is
+    // exactly where an ACK carries them. Same answer, log(ranges) comparisons instead of all of
+    // them. Witnessed by
+    // TlsQuicConnectionTests.EveryPacketNamedByAMultiRangeAckIsForgottenAndNoOtherIs.
     private bool Acknowledges(ulong packetNumber)
     {
-        foreach (var range in _ackedRanges)
+        var low = 0;
+        var high = _ackedRanges.Count - 1;
+        while (low <= high)
         {
+            var middle = low + ((high - low) / 2);
+            var range = _ackedRanges[middle];
+
             // TlsQuicAckRange is inclusive at both ends - s19.3.1's ranges name the largest
             // and the smallest packet number they cover, not a half-open interval.
-            if (packetNumber >= range.Smallest && packetNumber <= range.Largest)
+            if (packetNumber > range.Largest)
+            {
+                // Descending order: the bigger numbers are BEFORE this entry, not after it.
+                high = middle - 1;
+            }
+            else if (packetNumber < range.Smallest)
+            {
+                low = middle + 1;
+            }
+            else
             {
                 return true;
             }

@@ -2598,7 +2598,34 @@ internal sealed class TlsQuicStreamSet
 
         _dataBlockedSignalled = false;
 
-        foreach (var stream in _streams.Values.OrderBy(each => each.Id).ToArray())
+        // NOTHING BLOCKED, NOTHING TO ORDER. A MAX_DATA arrives whenever the peer feels like
+        // raising the limit, and the usual case is that no stream was waiting on it - so the
+        // sort and the snapshot below are skipped rather than paid for on every frame. This is
+        // a guard on work, not on behaviour: the loop it guards does nothing when no stream
+        // answers HasBlockedData.
+        var blocked = false;
+        foreach (var stream in _streams.Values)
+        {
+            if (stream.HasBlockedData)
+            {
+                blocked = true;
+                break;
+            }
+        }
+
+        if (!blocked)
+        {
+            return;
+        }
+
+        // ORDERED BY STREAM ID, WHICH DECIDES FRAME ORDER ON THE WIRE and is therefore not an
+        // implementation detail to leave to the dictionary's bucket layout.
+        //
+        // NO .ToArray() AFTER THE OrderBy, and it was never doing anything: OrderBy buffers its
+        // whole source before it yields the first element, so the enumeration below already
+        // walks a private snapshot and Drain may add streams underneath it without disturbing
+        // this loop. The extra array was a second copy of that snapshot.
+        foreach (var stream in _streams.Values.OrderBy(each => each.Id))
         {
             if (stream.HasBlockedData)
             {

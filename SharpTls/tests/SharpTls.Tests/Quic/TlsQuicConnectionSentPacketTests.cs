@@ -159,6 +159,50 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(0, connection.BytesInFlight);
     }
 
+    // MEMBERSHIP ACROSS A CHAIN OF s19.3.1 RANGES, ASSERTED BOTH WAYS. The lookup that decides
+    // it is a binary search over the decoded chain rather than a walk of it, which is only
+    // correct because the decoder emits the ranges strictly descending and disjoint - so the
+    // input that matters is one with SEVERAL ranges, gaps of more than one packet between them,
+    // a single-packet range, and boundary numbers sitting exactly on a range's Largest and
+    // Smallest. A search with an inverted comparison, or one that stopped at the first
+    // half-interval, removes some of these and leaves others, and either direction fails here.
+    [Fact]
+    public async Task EveryPacketNamedByAMultiRangeAckIsForgottenAndNoOtherIs()
+    {
+        await using var connection = Idle();
+
+        for (var i = 0; i < 30; i++)
+        {
+            connection.OnPacketSent(Packet(TlsQuicEncryptionLevel.Application, (ulong)i, size: 10));
+        }
+
+        // Four ranges, descending as s19.3.1's Gap chain forces: 27-29, 20-24, 15 alone, 3-9.
+        connection.OnAckReceived(
+            TlsQuicEncryptionLevel.Application,
+            AckFrame(
+                new TlsQuicAckRange(29, 27),
+                new TlsQuicAckRange(24, 20),
+                new TlsQuicAckRange(15, 15),
+                new TlsQuicAckRange(9, 3)));
+
+        var acknowledged = new HashSet<ulong>(
+            new[] { 27, 28, 29, 20, 21, 22, 23, 24, 15, 3, 4, 5, 6, 7, 8, 9 }
+                .Select(n => (ulong)n));
+
+        var survivors = connection.SentPackets(TlsQuicEncryptionLevel.Application)
+            .Select(p => p.PacketNumber)
+            .ToArray();
+
+        // NOT "the right count" - the right NUMBERS. A count assertion passes for an
+        // off-by-one search that drops a neighbour and keeps a member.
+        Assert.Equal(
+            Enumerable.Range(0, 30).Select(n => (ulong)n).Where(n => !acknowledged.Contains(n)),
+            survivors);
+
+        // And the bytes left with exactly those packets.
+        Assert.Equal(10L * survivors.Length, connection.BytesInFlight);
+    }
+
     // THE BOUND. RFC 9002 A.11 empties Initial and Handshake on key discard, and asserts it is
     // never called for the application space - so nothing but this cap stops a peer that takes
     // datagrams and acknowledges none from growing the application list forever.
