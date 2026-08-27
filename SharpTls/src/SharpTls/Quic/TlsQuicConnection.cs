@@ -2352,10 +2352,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 // s19.12 states no rule of this shape; it stays in the default
                                 // arm with the reason that arm gives.
                                 //
-                                // ACCEPTING IS STILL NOT ACTING. A RESET_STREAM this endpoint
-                                // does not refuse is dropped exactly as it was before, because
-                                // s3.2's state transitions are separate work. What changed is
-                                // that the ones the RFC says to close on now close.
+                                // AND ACCEPTING IS NOW ACTING, WHICH IT WAS NOT. This comment
+                                // used to end "a RESET_STREAM this endpoint does not refuse is
+                                // dropped exactly as it was before" - so the frame's final size
+                                // and application error code were decoded by
+                                // TlsQuicConnectionFrames and thrown away, s4.5's final-size
+                                // accounting never ran, and an HTTP/3 caller awaiting a stream
+                                // the server had abandoned waited out the idle timeout instead
+                                // of seeing the end. STOP_SENDING was ignored the same way and
+                                // this endpoint kept queueing STREAM frames the peer had asked
+                                // it to stop sending. All of that is applied in
+                                // ReceiveStreamStateSignal now; s3.2's full state enumeration
+                                // is still separate work.
                                 ReceiveStreamStateSignal(frame, ref streamFailure);
                                 break;
 

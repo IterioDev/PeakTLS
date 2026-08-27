@@ -1368,6 +1368,270 @@ public sealed class TlsQuicStreamsTests
 
     // ---- Scaffolding ----------------------------------------------------------------------
 
+    // ---- the audit's finding 2: what a window's worth of credit may cost this endpoint ------
+
+    // THE ONE INPUT WHERE FLOW CONTROL AND MEMORY CAME APART, and it is legal traffic rather
+    // than a malformed frame - every frame below is inside the advertised limits and none of
+    // them can be refused.
+    //
+    // RFC 9000 s19.10 fixes the unit the window is spent in: "an endpoint accounts for the
+    // largest received offset of data that is sent or received on the stream. Loss or
+    // reordering can mean that the largest received offset on a stream can be greater than the
+    // total size of data received on that stream." So a peer that sends (offset=1, len=W-1)
+    // first pays for the WHOLE window in one frame, and every frame after it that ends at W
+    // costs nothing at all. Sending them in ASCENDING offset order and holding (offset=0) back
+    // to last means nothing can drain in between: each frame starts past the delivered prefix,
+    // which is still empty.
+    //
+    // A reassembler keyed by arrival offset stored all W-1 of them verbatim - sum(W-i) is
+    // W^2/2 bytes of ours against W bytes of the peer's credit. At the 262144-byte window a
+    // shipped preset advertises that is about 32 GB from one stream; at 1 MiB it is half a
+    // terabyte. THE ASSERTION IS THE RATIO AND NOT A BYTE COUNT, because the defect is that the
+    // two are not proportional: 1024 is picked small enough to run in a test and the amplified
+    // figure is 523,776, so the two are 512x apart and no threshold has to be guessed.
+    //
+    // AND THE CONTENT IS ASSERTED TOO. Coalescing that dropped or double-stored a byte would
+    // hold the right TOTAL and deliver the wrong stream, which is the failure this bound could
+    // otherwise be bought with.
+    [Fact]
+    public void BufferedBytesStayWithinTheAdvertisedWindowUnderADescendingOverlapFlood()
+    {
+        const int window = 1024;
+        var local = new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxStreamDataUni = window,
+            // The connection limit is not the subject: s19.9 charges it the same `advance`,
+            // so one window's worth crosses it however many frames carry that window.
+            InitialMaxData = 1_000_000,
+            // s18.2's absent-parameter zero would let the peer open no stream at all,
+            // so the counts are named even where the test is about data limits.
+            InitialMaxStreamsBidi = 100,
+            InitialMaxStreamsUni = 100,
+            // THE LIMITS THIS TEST IS NOT ABOUT.
+            InitialMaxStreamDataBidiLocal = 100_000,
+            InitialMaxStreamDataBidiRemote = 100_000,
+        };
+        var streams = Set(local: local);
+
+        // Content, not zeroes: a reassembler that stitched the pieces at the wrong offsets
+        // would rebuild the right LENGTH out of zeroes and the comparison would not notice.
+        var body = new byte[window];
+        for (var index = 0; index < body.Length; index++)
+        {
+            body[index] = (byte)((index * 31) + 7);
+        }
+
+        for (var offset = 1; offset < window; offset++)
+        {
+            Assert.True(
+                streams.TryReceive(Frame(3, (ulong)offset, body[offset..]), out var error),
+                $"Refused at offset {offset} with {error} - every frame here is inside the "
+                    + "advertised limits and the defect is what accepting them costs.");
+        }
+
+        var stream = streams.PeerInitiated[0];
+
+        // Nothing has been delivered - offset 0 has not arrived - so everything the peer sent
+        // is still held, and this is the number the whole finding is about.
+        Assert.Empty(stream.Received);
+        Assert.True(
+            stream.UndeliveredBytes <= window,
+            $"Held {stream.UndeliveredBytes} bytes against a {window}-byte window; "
+                + "W-1 frames each ending at W are one window of DISTINCT bytes, so anything "
+                + "above the window is the same byte stored more than once.");
+
+        // The frame that fills the gap, sent last for exactly that reason.
+        Assert.True(streams.TryReceive(Frame(3, 0, body), out _));
+        Assert.Equal(body, stream.Received.ToArray());
+        Assert.Equal(0UL, stream.UndeliveredBytes);
+    }
+
+    // ---- the audit's finding 3: the two frames that were parsed, policed and discarded ------
+
+    // FOUR ASSERTIONS BECAUSE THE DROP COST FOUR SEPARATE THINGS, and a test that checked only
+    // the end-of-stream flag would pass against an implementation that lost the error code.
+    //
+    // RFC 9000 s19.4 gives RESET_STREAM a Final Size and an Application Protocol Error Code,
+    // s4.5 says "A receiver MUST use the final size of the stream to account for all bytes sent
+    // on the stream in its connection level flow controller", and s3.2 puts the receiving part
+    // in "Reset Recvd". Before this the direction rule ran and the two fields were dropped: the
+    // final size was never established, so ReceiveComplete could not become true and an
+    // awaiting HTTP/3 caller waited out the idle timeout on a stream the server had already
+    // given up on.
+    //
+    // THE STREAM IS RESET WITH DATA STILL MISSING, which is the shape that separates a reset
+    // from a FIN: two bytes arrived, the peer claims a final size of nine, and seven of them
+    // will never come. `_finalSize == _delivered.Count` is false forever on this input, so a
+    // completion test written only as that comparison cannot pass however the reset is stored.
+    [Fact]
+    public void AResetStreamEndsTheStreamAndReportsThePeersApplicationErrorCode()
+    {
+        var streams = Set();
+
+        Assert.True(streams.TryReceive(Frame(3, 0, [1, 2]), out _));
+        var stream = streams.PeerInitiated[0];
+        Assert.False(stream.ReceiveComplete);
+
+        // H3_REQUEST_CANCELLED, RFC 9114 s8.1. A real code rather than 0, because 0 is a legal
+        // application error code too and a nullable that defaulted would look the same.
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Reset(3, finalSize: 9, errorCode: 0x010c),
+            out var error),
+            $"Refused a conforming RESET_STREAM with {error}.");
+
+        Assert.True(stream.ResetReceived);
+        Assert.Equal(0x010cUL, stream.ResetErrorCode);
+        Assert.Equal(9UL, stream.FinalSize);
+
+        // THE ONE THE HTTP/3 LAYER HANGS ON. Seven bytes below the final size never arrived
+        // and never will, so this can only be true if the reset ends the stream in its own
+        // right rather than through the length comparison a FIN completes.
+        Assert.True(stream.ReceiveComplete);
+    }
+
+    // s20.1's FINAL_SIZE_ERROR names RESET_STREAM in two of its three cases and neither could
+    // fire while the frame's Final Size went unread: "(2) an endpoint received a STREAM frame
+    // or a RESET_STREAM frame containing a final size that was lower than the size of stream
+    // data that was already received, or (3) an endpoint received a STREAM frame or a
+    // RESET_STREAM frame containing a different final size to the one already established."
+    //
+    // BOTH ROWS, BECAUSE THEY ARE REACHED BY DIFFERENT INPUTS. The first is a reset BELOW what
+    // already arrived and no final size is established at all; the second is ABOVE a FIN that
+    // already fixed the size, which is the only direction case (3) can be reached from on its
+    // own - a reset below an established size is case (2) first. A single row would leave
+    // whichever check it did not reach unwitnessed, which is the lesson this file's rows 24, 25
+    // and 26 record for the STREAM-frame side of the same three cases.
+    [Theory]
+    [InlineData(4, 0, false, 2)]
+    [InlineData(4, 5, true, 3)]
+    public void AResetStreamWhoseFinalSizeContradictsWhatArrivedIsFinalSizeError(
+        int received, ulong resetFinalSize, bool fin, int expectedCase)
+    {
+        var streams = Set();
+
+        Assert.True(streams.TryReceive(Frame(3, 0, new byte[received], fin: fin), out _));
+        Assert.False(
+            streams.TryReceiveStreamStateSignal(
+                Reset(3, resetFinalSize, errorCode: 0x010c), out var error),
+            $"s20.1's case ({expectedCase}) accepted a contradictory final size.");
+        Assert.Equal(TlsQuicTransportError.FinalSizeError, error);
+    }
+
+    // RFC 9000 s3.5: "An endpoint that receives a STOP_SENDING frame MUST send a RESET_STREAM
+    // frame if the stream is in the 'Ready' or 'Send' state", and "An endpoint SHOULD copy the
+    // error code from the STOP_SENDING frame to the RESET_STREAM frame it sends."
+    //
+    // THE SECOND HALF IS WHAT THE DROP COST AND IT IS THE HALF WITHOUT A FRAME TO COUNT: this
+    // endpoint kept queueing STREAM frames on a stream the peer had asked it to stop writing.
+    // So the assertion is on the SECOND write producing nothing, which is invisible to any test
+    // that only looks at what the STOP_SENDING itself queued.
+    [Fact]
+    public void AStopSendingStopsTheSendSideAndAnswersWithAResetStream()
+    {
+        var streams = Set();
+        var stream = streams.OpenBidirectional();
+        streams.Send(stream, new byte[4]);
+        Assert.Single(streams.TakePendingFrames());
+
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(
+                Signal((ulong)TlsQuicFrameType.StopSending, stream.Id) with
+                {
+                    ApplicationProtocolErrorCode = 0x010c,
+                },
+                out var error),
+            $"Refused a conforming STOP_SENDING with {error}.");
+
+        Assert.True(stream.SendStopped);
+        Assert.Equal(0x010cUL, stream.StopSendingErrorCode);
+
+        // s3.5's mandatory answer, carrying s19.4's two fields: the copied error code and the
+        // final size, which for our sending half is the four bytes already on the wire.
+        var answer = Assert.Single(streams.TakePendingFrames());
+        Assert.Equal((ulong)TlsQuicFrameType.ResetStream, answer.RawType);
+        Assert.Equal(stream.Id, answer.StreamId);
+        Assert.Equal(0x010cUL, answer.ApplicationProtocolErrorCode);
+        Assert.Equal(4UL, answer.FinalSize);
+
+        // THE ASSERTION THE FRAME COUNT CANNOT MAKE. A write after the stop must put nothing on
+        // the wire; before this fix it queued a STREAM frame at offset 4 of a stream this
+        // endpoint had just told the peer was finished at offset 4.
+        streams.Send(stream, new byte[4]);
+        Assert.Empty(streams.TakePendingFrames());
+        Assert.Equal(4UL, stream.SendOffset);
+    }
+
+    // ---- the audit's finding 12: the frame that was admitted without being measured --------
+
+    // THE BUDGET MOVES BETWEEN QUEUEING AND SENDING, WHICH IS THE WHOLE FINDING. Drain chunks a
+    // write to DatagramPayloadBudget - OneRttStreamFrameOverheadBound at QUEUE time; the caller
+    // passes budget - spent at SEND time, already reduced by an ACK and by RFC 9000 s12.2's
+    // coalesced Initial or Handshake prefix. TakePendingFrames exempted the first frame from
+    // its own test - `taken.Count > 0 && spent + size > payloadBudget` - so whatever was at the
+    // head of the queue went out at whatever size it happened to be.
+    //
+    // Downstream that is TlsQuicPacketBuilder.Build's "Packet needs N bytes, destination has M"
+    // or a datagram a DF-set socket refuses with WSAEMSGSIZE, which is how it reached the field
+    // reports. RFC 9000 s14.2 is the sentence being broken: "All QUIC packets that are not sent
+    // in a PMTU probe SHOULD be sized to fit within the maximum datagram size."
+    //
+    // THE SHRINK IS SIMULATED BY THE TWO ARGUMENTS AND NOT BY A PATH MTU EVENT, because the
+    // budget the caller passes is the only thing this method can see: queue against 1200, take
+    // against 400. That is exactly what a 800-byte coalesced Handshake packet in front of the
+    // 1-RTT one does, and it needs no transport.
+    //
+    // THREE ASSERTIONS, BECAUSE A SPLIT CAN BE THE RIGHT SIZE AND STILL BE WRONG. The frame has
+    // to fit; the remainder has to keep its place with an ADVANCED offset, since s19.8 makes a
+    // peer reassemble by offset and a tail replayed at the head's offset is silent corruption
+    // rather than a size error; and the bytes have to come back out in stream order.
+    [Fact]
+    public void AFrameQueuedUnderALargerBudgetIsSplitRatherThanOverrunningTheDatagram()
+    {
+        var streams = Set();
+        streams.DatagramPayloadBudget = 1200;
+
+        var stream = streams.OpenUnidirectional();
+        var body = new byte[1000];
+        for (var index = 0; index < body.Length; index++)
+        {
+            body[index] = (byte)((index * 13) + 5);
+        }
+
+        streams.Send(stream, body);
+
+        // One frame, queued whole: 1000 bytes is inside 1200 less the overhead bound.
+        const int shrunken = 400;
+        var first = Assert.Single(streams.TakePendingFrames(shrunken));
+        var firstSize = TlsQuicFrames.MeasureFrame([], first);
+        Assert.True(
+            firstSize <= shrunken,
+            $"Took a {firstSize}-byte frame against a {shrunken}-byte budget, which is the "
+                + "over-MTU datagram RFC 9000 s14.2 forbids.");
+        Assert.Equal(0UL, first.Offset);
+
+        // s19.8's FIN is not on the head - there is none here - but the OFF bit must be on the
+        // remainder whatever the head carried, or the tail claims offset 0.
+        var rest = new List<byte>(first.Data.ToArray());
+        var offset = (ulong)first.Data.Length;
+        while (streams.HasPendingFrames)
+        {
+            var next = Assert.Single(streams.TakePendingFrames(shrunken));
+            Assert.True(
+                TlsQuicFrames.MeasureFrame([], next) <= shrunken,
+                "A later frame overran the budget, so the split is not repeatable.");
+            Assert.Equal(offset, next.Offset);
+            Assert.True(
+                TlsQuicStreamFrames.HasOffset(next.RawType),
+                "The remainder omitted s19.8's OFF bit, so it claims offset 0 and a peer "
+                    + "reassembling by offset would overwrite the head.");
+
+            rest.AddRange(next.Data.ToArray());
+            offset += (ulong)next.Data.Length;
+        }
+
+        Assert.Equal(body, rest.ToArray());
+    }
+
     private static ulong Id(
         TlsQuicStreamInitiator initiator, TlsQuicStreamDirection direction, ulong ordinal) =>
         TlsQuicStreamId.From(initiator, direction, ordinal);
@@ -1448,6 +1712,18 @@ public sealed class TlsQuicStreamsTests
     {
         RawType = frameType,
         StreamId = streamId,
+    };
+
+    // s19.4's frame WITH the two fields Signal deliberately leaves out. Separate from Signal
+    // rather than an overload of it, so that the tests about direction keep saying "the
+    // application error code and final size are omitted because no rule under test looks at
+    // them" and the tests about the reset itself have to name both.
+    private static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
+    {
+        RawType = (ulong)TlsQuicFrameType.ResetStream,
+        StreamId = streamId,
+        ApplicationProtocolErrorCode = errorCode,
+        FinalSize = finalSize,
     };
 
     // s19.10's and s19.9's frames as the PEER would send them. Hand-built for the reason every
