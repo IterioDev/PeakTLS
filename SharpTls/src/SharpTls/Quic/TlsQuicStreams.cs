@@ -738,12 +738,39 @@ internal sealed class TlsQuicStream
     /// the stream has no more of our bytes to carry.</summary>
     internal bool FinSent { get; private set; }
 
-    /// <summary>Gets whether the peer has sent a frame with s19.8's FIN bit.</summary>
-    internal bool FinReceived => _finalSize is not null;
+    /// <summary>Gets whether this stream's final size is established, by EITHER of the two
+    /// routes that establish one.</summary>
+    /// <remarks>
+    /// <para>ONE FIELD, TWO CAUSES, AND RFC 9000 s4.5 IS WHY: "A RESET_STREAM frame ... also
+    /// establishes the final size" - the same final size s19.8's FIN establishes, in the same
+    /// <c>_finalSize</c>. So this is true after a FIN and true after a RESET_STREAM, and it
+    /// was called <c>FinReceived</c> until an HTTP/3 consumer was misled by exactly that.</para>
+    /// <para>THE UNION IS WHAT BOTH CALLERS ACTUALLY WANT, which is why the fix was the name
+    /// and not the value. <see cref="TlsQuicStreamSet.TryRefreshGrant"/> tests it for s13.3's
+    /// "stop sending MAX_STREAM_DATA frames when the receiving part of the stream enters a
+    /// "Size Known" or "Reset Recvd" state" - two states, one test. The HTTP/3 layer tests it
+    /// on the control stream, where RFC 9114 s6.2.1 makes closing and resetting the same
+    /// H3_CLOSED_CRITICAL_STREAM. Splitting the state so a FIN-established size were
+    /// distinguishable from a reset-established one would hand both of them a disjunction to
+    /// remember, to answer a question neither of them asks.</para>
+    /// <para>TO TELL THE TWO APART, ask <see cref="ResetReceived"/>. That is the one
+    /// observable that separates them, and it is derived from the error code rather than
+    /// duplicated into a second flag, so the two cannot drift.</para>
+    /// </remarks>
+    internal bool FinalSizeKnown => _finalSize is not null;
 
-    /// <summary>Gets the stream's final size once the peer's FIN has arrived - s19.8: "The
-    /// final size of the stream is the sum of the offset and the length of this
-    /// frame."</summary>
+    /// <summary>The former name of <see cref="FinalSizeKnown"/>, kept only until its last
+    /// caller moves across.</summary>
+    /// <remarks>MISNAMED, WHICH IS THE WHOLE REASON IT IS BEING RETIRED: RFC 9000 s4.5 has
+    /// RESET_STREAM establish a final size too, so this answers true on a stream where no FIN
+    /// has ever arrived. It survives as a forwarder because TlsQuicHttp3Streams reads it and
+    /// that file belongs to another owner; delete it once that read says
+    /// <see cref="FinalSizeKnown"/>.</remarks>
+    internal bool FinReceived => FinalSizeKnown;
+
+    /// <summary>Gets the stream's final size once one is established - s19.8: "The final size
+    /// of the stream is the sum of the offset and the length of this frame", or s19.4's Final
+    /// Size field where a RESET_STREAM established it instead.</summary>
     internal ulong? FinalSize => _finalSize;
 
     /// <summary>Gets the bytes delivered so far, in stream order. Bytes that arrived out of
@@ -773,28 +800,36 @@ internal sealed class TlsQuicStream
     /// after which <see cref="TlsQuicStreamSet.Send"/> queues nothing more on it.</summary>
     internal bool SendStopped => _stopSendingErrorCode is not null;
 
-    /// <summary>Gets whether the peer's FIN has arrived AND every byte before it has been
-    /// delivered: the stream ended NORMALLY, at its final size, with nothing missing.</summary>
+    /// <summary>Gets whether this stream ended NORMALLY: the peer's FIN arrived, every byte
+    /// below the final size was delivered, and no RESET_STREAM abandoned it.</summary>
     /// <remarks>
     /// <para>FIN ARRIVING IS NOT THE SAME AS THE STREAM BEING DONE, because s19.8's FIN
     /// rides on a frame that may overtake an earlier one. The two are separate properties for
     /// that reason.</para>
-    /// <para>A RESET IS NOT COMPLETION AND MUST NOT BE FOLDED IN HERE. This property briefly
-    /// read <c>_resetErrorCode is not null || _finalSize == _delivered.Count</c>, on the
-    /// reasoning that a reset stream will also deliver nothing further - which is true and is
-    /// the wrong question. TlsQuicHttp3Connection reads this as <c>endOfStream</c> and
-    /// TlsQuicHttp3Request.TryRead turns <c>endOfStream</c> with an empty pending buffer into
-    /// <c>IsComplete</c>; a response with no content-length whose RESET_STREAM lands on a frame
-    /// boundary would therefore have been handed to the caller as a SUCCESSFUL response with a
-    /// truncated body. RFC 9114 s4.1 forbids exactly that: a reset response is incomplete. The
-    /// hang this was meant to cure is the lesser failure, and silent truncation is the worse
-    /// one.</para>
-    /// <para>SO THE RESET IS ITS OWN SIGNAL, which is what <see cref="ResetReceived"/> and
-    /// <see cref="ResetErrorCode"/> are for. A consumer that must not block asks both
-    /// questions; a consumer that asks only this one gets the strictly safe answer, and
-    /// "strictly safe" for a body is "not finished" rather than "finished short".</para>
+    /// <para>A RESET IS NOT COMPLETION, AND SAYING SO CORRECTLY TOOK TWO GOES. This first read
+    /// <c>_resetErrorCode is not null || _finalSize == _delivered.Count</c>, which handed a
+    /// TRUNCATED body to the HTTP/3 layer as a successful response - TlsQuicHttp3Connection
+    /// reads this as <c>endOfStream</c> and TlsQuicHttp3Request.TryRead turns that plus an
+    /// empty pending buffer into <c>IsComplete</c>, where RFC 9114 s4.1 makes a reset response
+    /// incomplete. It then read <c>_finalSize == _delivered.Count</c>, which cured the
+    /// TRUNCATING reset and not the NON-TRUNCATING one: RFC 9000 s4.5 gives RESET_STREAM a
+    /// Final Size field of its own - "A RESET_STREAM frame ... also establishes the final
+    /// size" - so a peer that cancels naming the size it had already sent satisfies that
+    /// comparison exactly, with no FIN anywhere on the wire. A cancelled response was reported
+    /// as a complete one.</para>
+    /// <para>SO THE RESET IS EXCLUDED HERE RATHER THAN BY EVERY CALLER. The HTTP/3 layer worked
+    /// the second version around with <c>ReceiveComplete &amp;&amp; !ResetReceived</c>, which
+    /// was correct and is exactly the conjunction a property like this exists to spare its
+    /// callers - the next one to read it would not have known to write it. The conjunct lives
+    /// in here now, which makes that workaround redundant rather than wrong.</para>
+    /// <para>AND THE THREE QUESTIONS ARE NOW SEPARATE, each with one property. Did it finish:
+    /// this. Is a final size established, by either of s4.5's two routes:
+    /// <see cref="FinalSizeKnown"/>. Was it abandoned, and why: <see cref="ResetReceived"/> and
+    /// <see cref="ResetErrorCode"/>, the second carrying the code RFC 9114 s8.1 makes a caller
+    /// act on.</para>
     /// </remarks>
-    internal bool ReceiveComplete => _finalSize == (ulong)_delivered.Count;
+    internal bool ReceiveComplete =>
+        _resetErrorCode is null && _finalSize == (ulong)_delivered.Count;
 
     // Advances the send offset and records the FIN. Separate from the frame building so that
     // TlsQuicStreamSet.Send charges the budget FIRST and moves nothing when the charge is
@@ -1934,13 +1969,15 @@ internal sealed class TlsQuicStreamSet
     /// <para>AND THE ONE SHOULD THAT SAYS NOT TO. s13.3: "An endpoint SHOULD stop sending
     /// MAX_STREAM_DATA frames when the receiving part of the stream enters a "Size Known" or
     /// "Reset Recvd" state." Size Known is s3.2's state on the peer's FIN, which is exactly
-    /// <see cref="TlsQuicStream.FinReceived"/>. RESET RECVD IS COVERED BY THE SAME TEST RATHER
-    /// THAN BY A SECOND ONE, and this paragraph used to say it did not arise at all because
-    /// "nothing in this tree receives a RESET_STREAM yet". It does now:
-    /// <c>TryReceiveReset</c> establishes the final size, so a stream in s3.2's "Reset Recvd"
-    /// has FinReceived true as well and this refuses to repair its grant on the same line. So
-    /// the FIN test is both halves of the SHOULD, and a false return is a refusal to repair
-    /// rather than a failure to.</para>
+    /// <see cref="TlsQuicStream.FinalSizeKnown"/>. RESET RECVD IS COVERED BY THE SAME TEST
+    /// RATHER THAN BY A SECOND ONE, and this paragraph used to say it did not arise at all
+    /// because "nothing in this tree receives a RESET_STREAM yet". It does now:
+    /// <c>TryReceiveReset</c> establishes the final size, which s4.5 makes RESET_STREAM's job
+    /// as much as the FIN's, so a stream in s3.2's "Reset Recvd" answers the same test and this
+    /// refuses to repair its grant on the same line. THAT UNION IS WHY THE PROPERTY IS NAMED
+    /// FOR THE FINAL SIZE AND NOT FOR THE FIN - it read <c>FinReceived</c> until the name
+    /// misled a consumer that wanted the two states apart. Both halves of the SHOULD, one test,
+    /// and a false return is a refusal to repair rather than a failure to.</para>
     /// <para>NEVER THROWS, FOR ANY FRAME. The argument is a frame this endpoint built, but it
     /// reaches here after a loss declaration whose timing the peer controls, and a stream it
     /// names may have been forgotten in between.</para>
@@ -1976,7 +2013,7 @@ internal sealed class TlsQuicStreamSet
                 return true;
 
             case TlsQuicFrameType.MaxStreamData:
-                if (Find(lost.StreamId) is not { } stream || stream.FinReceived)
+                if (Find(lost.StreamId) is not { } stream || stream.FinalSizeKnown)
                 {
                     return false;
                 }

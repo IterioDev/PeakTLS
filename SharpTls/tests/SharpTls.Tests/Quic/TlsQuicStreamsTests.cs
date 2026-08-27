@@ -1670,6 +1670,56 @@ public sealed class TlsQuicStreamsTests
                 + "truncated body as a successful response.");
     }
 
+    // THE RESET WITH NOTHING MISSING, WHICH THE TRUNCATING ONE'S FIX DID NOT COVER. Excluding
+    // a reset from completion by the length comparison alone cures a reset that leaves a hole
+    // and does nothing for one that does not: RFC 9000 s4.5 gives RESET_STREAM its own Final
+    // Size field - "A RESET_STREAM frame ... also establishes the final size" - written into
+    // the same _finalSize a FIN sets. So a peer that cancels after sending four bytes, naming a
+    // final size of four, satisfies `_finalSize == _delivered.Count` exactly.
+    //
+    // NO FIN IS ON THE WIRE ANYWHERE IN THIS TEST, which is what makes the two properties named
+    // for one indefensible. The HTTP/3 agent hit this for real and worked around it with
+    // `ReceiveComplete && !ResetReceived`; the conjunct belongs in the property, because the
+    // next caller will not know to write it.
+    //
+    // FinalSizeKnown IS ASSERTED TRUE IN THE SAME BREATH, so that excluding the reset from
+    // completion cannot be mistaken for pretending no final size was established - s13.3's
+    // "Size Known or Reset Recvd" SHOULD in TlsQuicStreamSet.TryRefreshGrant depends on that
+    // staying true, and a fix that switched it off would silently start repairing grants for
+    // reset streams.
+    [Fact]
+    public void ACancelledStreamWithNothingMissingIsStillNotNormalCompletion()
+    {
+        var streams = Set();
+
+        Assert.True(streams.TryReceive(Frame(3, 0, [1, 2, 3, 4]), out _));
+        var stream = streams.PeerInitiated[0];
+        Assert.Equal(4, stream.Received.Count);
+
+        // The final size EQUALS what already arrived: a cancelled response with no hole in it.
+        Assert.True(
+            streams.TryReceiveStreamStateSignal(Reset(3, finalSize: 4, errorCode: 0x010c),
+            out var error),
+            $"Refused a conforming RESET_STREAM with {error}.");
+
+        Assert.True(stream.ResetReceived);
+        Assert.Equal(0x010cUL, stream.ResetErrorCode);
+        Assert.Equal(4UL, stream.FinalSize);
+
+        // s4.5's final size IS established - by the reset, with no FIN - which is what
+        // FinalSizeKnown answers and what its old name FinReceived claimed falsely.
+        Assert.True(stream.FinalSizeKnown);
+
+        // AND THE STREAM STILL DID NOT FINISH. Every byte below the final size was delivered
+        // and the comparison alone would say yes; RFC 9114 s4.1 says a reset response is
+        // incomplete however much of it arrived.
+        Assert.False(
+            stream.ReceiveComplete,
+            "A cancelled stream whose final size matched what arrived reported normal "
+                + "completion, so a caller reading only this property calls a cancelled "
+                + "response a successful one.");
+    }
+
     // s13.3: "An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the receiving part of
     // the stream enters a "Size Known" or "Reset Recvd" state." TlsQuicStreamSet.TryRefreshGrant
     // quotes that sentence as its reason for refusing to REPAIR such a grant, so originating one
