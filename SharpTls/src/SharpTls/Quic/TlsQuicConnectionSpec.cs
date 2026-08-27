@@ -481,10 +481,21 @@ internal sealed class TlsQuicConnectionSpec
     private long _chaCha20Poly1305ConfidentialityLimit = 1L << 62;
 
     /// <summary>Gets the RFC 9001 s6.6 confidentiality limit for one AEAD.</summary>
-    /// <remarks>THE SELECTION LIVES BESIDE THE TWO VALUES rather than in the connection, so
-    /// that adding an AEAD adds a limit in one place. s5.3 defines four AEADs and pairs
-    /// AEAD_AES_128_GCM, AEAD_AES_256_GCM and AEAD_AES_128_CCM with the same figure, which is
-    /// why the ChaCha20 arm is the named one and everything else falls to the AES limit.
+    /// <remarks>
+    /// <para>THE SELECTION LIVES BESIDE THE TWO VALUES rather than in the connection, so that
+    /// adding an AEAD adds a limit in one place.</para>
+    /// <para>THE FALLTHROUGH IS SAFE BECAUSE THE ENUM HAS TWO MEMBERS, NOT BECAUSE THE
+    /// NON-ChaCha20 AEADS SHARE A FIGURE - THEY DO NOT.
+    /// <c>TlsQuicPacketProtectionCipher</c> (TlsQuicPacketProtection.cs:12-19) defines exactly
+    /// <c>AesGcm</c> and <c>ChaCha20Poly1305</c>, so today "not ChaCha20" is "AES-GCM" and the
+    /// else arm is a name for that and nothing wider. s6.6 gives AEAD_AES_128_CCM its OWN
+    /// figure: "For AEAD_AES_128_CCM, the confidentiality limit is 2^21.5 encrypted packets;
+    /// see [CCM-ANALYSIS]" - roughly 2.8 times BELOW the 2^23 this arm would hand it. So
+    /// ADDING A CCM MEMBER TO THAT ENUM REQUIRES ADDING ITS OWN ARM HERE, and a member that
+    /// fell through to <see cref="AesGcmConfidentialityLimit"/> would be protecting nearly
+    /// three times as many packets as the AEAD's own bound permits - a confidentiality
+    /// failure, not an untidy default. RFC 9001 s5.3 lists four AEADs; this library speaks
+    /// three of them and the fourth is why this paragraph exists.</para>
     /// </remarks>
     internal long ConfidentialityLimitFor(TlsQuicPacketProtectionCipher cipher) =>
         cipher == TlsQuicPacketProtectionCipher.ChaCha20Poly1305

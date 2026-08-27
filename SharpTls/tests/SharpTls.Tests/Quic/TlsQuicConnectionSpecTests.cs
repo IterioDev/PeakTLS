@@ -201,6 +201,41 @@ public sealed class TlsQuicConnectionSpecTests
         Assert.Equal("PaddingTarget", error.ParamName);
     }
 
+    // RFC 9001 s6.6's confidentiality limit is a MAXIMUM - "Endpoints MUST initiate a key
+    // update before sending more protected packets than the confidentiality limit for the
+    // selected AEAD permits" - so lowering it is conformant and the knob does not police the
+    // upper end. ONE is still the floor, and the reason is s6.1 rather than tidiness: at zero
+    // the first packet's update finds the gate open, because
+    // _lowestApplicationPacketNumberInWritePhase is still null and there is nothing to wait
+    // for; the SECOND packet then finds that gate closed against an acknowledgment that has
+    // not arrived, and s6.6's other half - "If a key update is not possible ... the endpoint
+    // MUST stop using the connection" - closes the connection with AEAD_LIMIT_REACHED. A spec
+    // that kills every connection on its second 1-RTT packet is worth rejecting at the
+    // constructor rather than at the second packet.
+    //
+    // One witness per property, for the reason the varint-width trio below gives.
+    [Fact]
+    public void AnAesGcmConfidentialityLimitBelowOneIsRejected()
+    {
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => _ = new TlsQuicConnectionSpec
+            {
+                AesGcmConfidentialityLimit = 0,
+            });
+        Assert.Equal("AesGcmConfidentialityLimit", error.ParamName);
+    }
+
+    [Fact]
+    public void AChaCha20Poly1305ConfidentialityLimitBelowOneIsRejected()
+    {
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => _ = new TlsQuicConnectionSpec
+            {
+                ChaCha20Poly1305ConfidentialityLimit = -1,
+            });
+        Assert.Equal("ChaCha20Poly1305ConfidentialityLimit", error.ParamName);
+    }
+
     // RFC 9000 s16 Table 4 has four widths: 1, 2, 4 and 8 bytes. Minimal is this spec's own
     // "let the writer pick", not a wire width. 3 is the interesting rejection because it sits
     // *inside* the numeric span 0 to 8 - a range check rather than a definedness check would

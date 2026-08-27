@@ -608,8 +608,8 @@ public sealed partial class TlsQuicConnectionTests
         // ChaCha20 sibling are the single source, and TlsQuicConnection reads them. This
         // paragraph used to say that making the limit injectable "would be a knob no shipped
         // code path uses"; that is no longer true, and
-        // ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration is what the knob
-        // bought - the crossing itself, which 2^23 packets of traffic otherwise puts out of
+        // TlsQuicConnectionTests.ALocallyInitiatedKeyUpdateSealsTheCrossingPacketWithTheNewGeneration
+        // is what the knob bought - the crossing itself, which 2^23 packets otherwise puts out of
         // reach of any test. What this assertion still owns is that lowering the knob for that
         // one test did not move the DEFAULT.
         //
