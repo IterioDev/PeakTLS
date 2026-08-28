@@ -706,6 +706,38 @@ internal sealed partial class TlsQuicConnection
             return false;
         }
 
+        // RFC 9001 s5.4.2, AND IT IS THE LAST THING DONE TO THE FRAME LIST BECAUSE IT IS A
+        // PROPERTY OF THE FINISHED PAYLOAD. "This results in needing at least 3 bytes of frames
+        // in the unprotected payload if the packet number is encoded on a single byte, or 2
+        // bytes of frames for a 2-byte packet number encoding" - the sample starts at
+        // pn_offset + 4 and runs 16 bytes, so a payload short of that leaves
+        // TlsQuicHeaderProtection.TryApply nothing to sample and TlsQuicPacketBuilder.Build
+        // throws.
+        //
+        // THIS LINE IS A FIELD BUG, NOT A PRECAUTION. The two probe builders have always
+        // called PadForHeaderProtectionSample and this path never did, so any pass that left
+        // exactly one small frame to send threw ArgumentException out of an ordinary POST: a
+        // lone RFC 9000 s19.16 RETIRE_CONNECTION_ID for a sequence number below 64 is two
+        // bytes, one short of the floor at a 1-byte packet number, and FlushRetireConnectionIds
+        // queues it on its own whenever the peer's NEW_CONNECTION_ID retires an ID in a pass
+        // with no ACK owed. The throw escaped the send path, killed the session, and left every
+        // later request on that connection to its 60-second timeout.
+        //
+        // AFTER THE PLAN RATHER THAN BEFORE IT, so the width being padded against is the one
+        // this packet will actually write - plan.PacketNumberEncodedLength - rather than the
+        // spec field it was read from, which is the same reason TryBuildProbeDatagram pads
+        // against its own probePlan. The plan is not disturbed by what follows: PADDING changes
+        // the payload and nothing in the header, and s19.1 puts no restriction on where in a
+        // packet PADDING may sit.
+        //
+        // IT CANNOT OVERRUN RFC 9000 s14.2's DATAGRAM BOUND that the stream take above spends
+        // against, because it adds at most 2 bytes and only to a payload of fewer than 3 - a
+        // packet three orders of magnitude below the budget the take was refused by.
+        // Witnessed by TlsQuicConnectionTests.AOneRttPacketWhoseOnlyFrameIsShorterThanTheSecti
+        // onFiveFourTwoSampleIsPaddedAtEveryPacketNumberWidth, whose four rows are the four
+        // legal widths and therefore pin the floor as 4 - packetNumberLength rather than as 3.
+        PadForHeaderProtectionSample(frames, plan.PacketNumberEncodedLength);
+
         packet = new TlsQuicPacketToSend
         {
             Plan = plan,
