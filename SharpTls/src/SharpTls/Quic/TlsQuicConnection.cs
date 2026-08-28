@@ -4596,22 +4596,69 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// unprotected payload if the packet number is encoded on a single byte, or 2 bytes of
     /// frames for a 2-byte packet number encoding", and "endpoints can add PADDING frames".
     /// </para>
-    /// <para>THE TWO PROBE BUILDERS ARE THE ONLY PAYLOADS SHORT ENOUGH TO NEED IT. Both send a
-    /// lone PING - one byte - and both then MEASURE the datagram by building it once before
-    /// padding it to the size they want. That throwaway build is a real build: it protects the
-    /// header, so it hits this bound first and throws, and the padding that would have fixed
-    /// it never gets added. A profile with a 1-byte packet number therefore could not send a
-    /// PTO probe or a path MTU probe at all.</para>
-    /// <para>COUNT IS LENGTH HERE, and only here: PING and PADDING are one byte each (s19.1,
-    /// s19.2), so a list of them encodes to its own count. Do not reuse this on a list that
-    /// can hold anything else.</para>
+    /// <para>THE TWO PROBE BUILDERS ARE NOT THE ONLY PAYLOADS SHORT ENOUGH TO NEED IT, AND THIS
+    /// PARAGRAPH USED TO SAY THEY WERE. Both probes send a lone PING - one byte - and both then
+    /// MEASURE the datagram by building it once before padding it to the size they want. That
+    /// throwaway build is a real build: it protects the header, so it hits this bound first and
+    /// throws, and the padding that would have fixed it never gets added. But THE ORDINARY
+    /// 1-RTT SEND PATH REACHES THE SAME FLOOR, and it did not call this: a flush that leaves
+    /// exactly one small frame to send builds a payload under the bound and
+    /// <see cref="TlsQuicPacketBuilder.Build"/> throws out of an ordinary send. The reachable
+    /// case in the field is <see cref="FlushRetireConnectionIds"/>: RFC 9000 s19.16's
+    /// RETIRE_CONNECTION_ID is a type byte plus a Sequence Number varint, so retiring a
+    /// sequence number below 64 is a TWO-BYTE payload - one byte under the floor at a 1-byte
+    /// packet number - and it is queued on its own whenever the peer's NEW_CONNECTION_ID
+    /// retires an ID in a pass with no ACK owed. A small flow-control frame or the tail of a
+    /// split STREAM frame arrive at the same place.</para>
+    /// <para>THE LONG-HEADER LEVELS DO NOT NEED IT, AND THAT IS ARITHMETIC RATHER THAN AN
+    /// ASSUMPTION. <c>BuildAnswerDatagram</c> skips EarlyData and can put only two kinds of
+    /// frame in an Initial or Handshake packet. RFC 9000 s19.3 gives an ACK five varint fields
+    /// before its first range - Type, Largest Acknowledged, ACK Delay, ACK Range Count, First
+    /// ACK Range - so the smallest ACK is 5 bytes; s19.6 gives CRYPTO a Type, an Offset and a
+    /// Length before its data, so the smallest CRYPTO frame is 3 bytes, and both of those
+    /// varint widths are knobs that can only WIDEN. Three is the floor itself at a 1-byte
+    /// packet number, so no legal long-header frame list can fall under it and a call there
+    /// would be padding that never fires.</para>
+    /// <para>IT MEASURES BYTES AND DOES NOT COUNT FRAMES, which is the change that let it serve
+    /// the ordinary path. The version that shipped read <c>frames.Count</c> as the payload
+    /// length with the note "COUNT IS LENGTH HERE, and only here: PING and PADDING are one byte
+    /// each (s19.1, s19.2)" - true of a probe's payload and false of every other one. The count
+    /// is now an encoded length from <see cref="TlsQuicFrames.MeasureFrame"/>, the same encoder
+    /// that will write these frames, so there is no second size model to drift.</para>
     /// </remarks>
-    /// <param name="frames">The probe's frames, PING first.</param>
+    /// <param name="frames">The packet's frames, in the order they will be written.</param>
     /// <param name="packetNumberLength">The encoded packet number length this packet will use.</param>
-    private static void PadForHeaderProtectionSample(
+    private void PadForHeaderProtectionSample(
         List<TlsQuicFrame> frames, int packetNumberLength)
     {
-        for (var length = frames.Count; length < HeaderProtectionSampleOffset - packetNumberLength; length++)
+        // s5.4.2's sample begins 4 bytes past pn_offset and the packet number itself fills the
+        // first `packetNumberLength` of those 4, so what the payload owes is the remainder -
+        // 3 bytes at a 1-byte packet number, 2 at two, and nothing at four. THE FLOOR MOVES
+        // WITH THE KNOB; a constant 3 here would pad packets that need no padding, which is
+        // wire output this fix is not allowed to change.
+        var floor = HeaderProtectionSampleOffset - packetNumberLength;
+
+        var length = 0;
+        foreach (var frame in frames)
+        {
+            // MEASURED BY ENCODING, which is what TlsQuicFrames.MeasureFrame does and says it
+            // does - and the loop STOPS at the floor rather than totalling the payload. The
+            // ordinary caller's list is one STREAM frame carrying a request body, so a total
+            // would be a second full encode of the whole packet to answer a question that the
+            // first three bytes already settle.
+            length += TlsQuicFrames.MeasureFrame(_frameMeasureScratch, frame);
+            if (length >= floor)
+            {
+                return;
+            }
+        }
+
+        // RFC 9000 s19.1: "A PADDING frame (type=0x00) has no semantic value... A PADDING frame
+        // has no content. That is, a PADDING frame consists of the single byte that identifies
+        // the frame as a PADDING frame." One byte per frame, and 0x00 is what a default
+        // TlsQuicFrame's RawType already carries - so `default` IS the PADDING frame rather
+        // than a stand-in for one.
+        for (; length < floor; length++)
         {
             frames.Add(default);
         }

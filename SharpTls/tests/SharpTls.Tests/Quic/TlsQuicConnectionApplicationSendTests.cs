@@ -1215,4 +1215,118 @@ public sealed partial class TlsQuicConnectionTests
             async () => await connection.SendPendingAsync(cancellation.Token));
         Assert.Contains("closing or draining", draining.Message, StringComparison.Ordinal);
     }
+
+    // ---- RFC 9001 s5.4.2's sample floor, on the ORDINARY send path -----------------------
+
+    // THIS IS A FIELD BUG WITH A DATE ON IT, NOT A HYPOTHETICAL. An HTTP/3 POST died on
+    //
+    //   ArgumentException: Payload of 1 bytes is too short for RFC 9001 s5.4.2's 16-byte
+    //   header-protection sample at a 1-byte packet number
+    //
+    // out of TlsQuicPacketBuilder.Build, and every later request on that connection then timed
+    // out. s5.4.2 samples 16 bytes from sample_offset = pn_offset + 4, so a packet has to reach
+    // 4 bytes past pn_offset before the sample begins, and the packet number itself supplies
+    // only some of them: "This results in needing at least 3 bytes of frames in the unprotected
+    // payload if the packet number is encoded on a single byte, or 2 bytes of frames for a
+    // 2-byte packet number encoding."
+    //
+    // TlsQuicConnection.PadForHeaderProtectionSample has always existed for exactly this and
+    // had two callers, both probe builders; TryBuildApplicationPacket - the ordinary 1-RTT send
+    // path - was not one of them. Any pass that left one small frame to send therefore built a
+    // packet under the floor and threw out of a send.
+    //
+    // FOUR ROWS BECAUSE THE FLOOR MOVES, AND THAT IS THE POINT OF THE THEORY. It is
+    // 4 - PacketNumberEncodedLength, so a one-byte packet number owes 3 payload bytes and a
+    // four-byte one owes none. A single row at width 1 would be satisfied by a fix that padded
+    // every packet to 3 bytes, which would put PADDING on the wire in the default preset -
+    // width 4, RFC 9001 A.2's - where none belongs. The expected PADDING counts below are the
+    // floor less the one byte of s19.2's PING: 2, 1, 0, 0.
+    //
+    // THE PAYLOAD IS A LONE PING BECAUSE IT IS THE SMALLEST FRAME RFC 9000 HAS, so it exercises
+    // the widest span of the floor. The shape that actually reached a user is a lone
+    // RETIRE_CONNECTION_ID: s19.16 makes it a type byte plus a Sequence Number varint, so a
+    // sequence number below 64 is two bytes - one short of the floor at a 1-byte packet number
+    // - and FlushRetireConnectionIds queues it by itself whenever the peer's NEW_CONNECTION_ID
+    // retires an ID in a pass that owes no ACK. Both arrive at the same line; this one pins
+    // three distinct floors rather than one.
+    //
+    // THE PADDING IS COUNTED ON THE PEER'S SIDE OF THE AEAD, which is the only place it can be
+    // counted: it is inside the sealed payload, so the sending transport sees ciphertext. The
+    // frame reader emits one PADDING frame per byte (s19.1: "a PADDING frame consists of the
+    // single byte that identifies the frame as a PADDING frame"), so the recorded list IS the
+    // byte count.
+    [Theory]
+    [InlineData(1, 2)]
+    [InlineData(2, 1)]
+    [InlineData(3, 0)]
+    [InlineData(4, 0)]
+    public async Task AOneRttPacketWhoseOnlyFrameIsShorterThanTheSectionFiveFourTwoSampleIsPaddedAtEveryPacketNumberWidth(
+        int packetNumberEncodedLength, int expectedPaddingFrames)
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+
+        // PathMtuDiscovery OFF so that SendPendingAsync puts exactly one datagram on the wire.
+        // A probe riding the same pass would be a second datagram for the peer to open and
+        // would make the assertion below depend on which one it read first.
+        var spec = new TlsQuicConnectionSpec
+        {
+            PaddingTarget = Spec().PaddingTarget,
+            SourceConnectionIdLength = Spec().SourceConnectionIdLength,
+            PacketNumberEncodedLength = packetNumberEncodedLength,
+            PathMtuDiscovery = false,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+
+        // THE PEER KEEPS THE DEFAULT WIDTH. The knob under test is this connection's, and
+        // narrowing the peer's would put its own packets under RFC 9000 Appendix A.2's
+        // encoding floor for a reason that has nothing to do with what is being measured.
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+
+        // THE PEER'S INBOX IS DRAINED FIRST, for the reason
+        // TlsQuicConnectionTests.PathMtuDiscoveryProbesAndRaisesTheDatagramSize gives: the
+        // answer to HANDSHAKE_DONE is still queued, LoopbackQuicPeer reads one datagram per
+        // pump, and a peer pumped once after the send below would record that stale answer's
+        // frames instead of this one's.
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // ONE PING AND NOTHING ELSE. Queued rather than produced by driving some feature that
+        // happens to emit a small frame, because what is under test is the send path's floor
+        // and not any particular frame's provenance; RFC 9000 s19.2's PING is one byte, which
+        // is as far under s5.4.2's floor as a QUIC payload can get.
+        connection.Streams.QueueConnectionFrame(new TlsQuicFrame
+        {
+            RawType = (ulong)TlsQuicFrameType.Ping,
+        });
+
+        // WITHOUT THE PAD THIS LINE THROWS rather than failing an assertion, at widths 1 and 2.
+        Assert.True(await connection.SendPendingAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+
+        // AND THE PEER OPENED IT, which is the half that proves the packet is well formed
+        // rather than merely emitted: opening it means s5.4's header protection came off at
+        // pn_offset + 4 - the sample this padding exists to create - and s5.3's AEAD verified
+        // the header it covers.
+        var expected = new List<(TlsQuicEncryptionLevel, TlsQuicFrameType)>
+        {
+            (TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Ping),
+        };
+        for (var i = 0; i < expectedPaddingFrames; i++)
+        {
+            expected.Add((TlsQuicEncryptionLevel.Application, TlsQuicFrameType.Padding));
+        }
+
+        Assert.Equal(expected, serverPeer.LastDatagramFrames);
+    }
 }

@@ -623,6 +623,30 @@ internal static class TlsQuicPacketBuilder
         // otherwise go out looking perfectly well-formed.
         // Witnessed by TlsQuicPacketBuilderTests.APayloadTooShortForTheSectionFiveFourT
         // woSampleIsRejected.
+        //
+        // AND IT STAYS A THROW, WHICH WAS RE-ARGUED RATHER THAN INHERITED, BECAUSE THIS
+        // ONE ESCAPED INTO A PRODUCTION SEND. TlsQuicConnection.TryBuildApplicationPacket
+        // did not pad its payload, so an ordinary 1-RTT flush that left one small frame -
+        // a lone RFC 9000 s19.16 RETIRE_CONNECTION_ID is two bytes - reached this line and
+        // threw out of a POST, killing the session. THE FIX IS THE PADDING AT THE CALLER
+        // (TlsQuicConnection.PadForHeaderProtectionSample, now called by every send path
+        // that can go short), NOT A SOFTER FAILURE HERE, and the distinction is the one
+        // TlsQuicPacketProtection already draws between Seal and TryOpen: TryOpen returns
+        // false because RFC 9000 s14 makes a forged datagram routine INPUT from a hostile
+        // network, while Seal throws because a mis-sized destination for your own plaintext
+        // "is a caller bug". A payload the sender itself assembled is Seal's case, not
+        // TryOpen's - nothing outside this process chose these bytes.
+        //
+        // A `Try`-SHAPED REFUSAL WOULD ALSO BE WORSE THAN THE THROW RATHER THAN SAFER. By
+        // the time this line runs the caller has drawn a plan, which spent a packet number
+        // RFC 9000 s12.3 forbids reusing, may have run RFC 9001 s6.6's key update, and has
+        // recorded these frames against that number for loss recovery. A `false` return
+        // would drop the packet while leaving all three - a permanent hole in the packet
+        // number space and frames the ledger believes are in flight that were never sent,
+        // which is the silent stall this file's other guards exist to prevent. The loud
+        // failure is the honest one; what it now means, since the send path pads, is that
+        // a caller built a frame list without the padding its own packet number width
+        // requires, and that is a bug in the caller exactly as the exception type says.
         if (!TlsQuicHeaderProtection.TryApply(
                 headerProtectionCipher, headerProtectionKey, destination[..size], packetNumberOffset))
         {
