@@ -102,33 +102,114 @@ public sealed class TlsQuicDatagramTransportTests
         await transport.DisposeAsync();
     }
 
+    /// <summary>
+    /// A production report: two hosts in one run, the first connection fine and the second
+    /// dying with "SocketException: I/O operation aborted". That is Winsock's
+    /// WSA_OPERATION_ABORTED (995) - "The I/O operation has been aborted because of either a
+    /// thread exit or an application request" - which on a UDP socket means the handle was
+    /// closed while an overlapped receive was posted. It is a lifecycle event, and it used to
+    /// reach the pump loop looking exactly like a network failure.
+    /// </summary>
+    /// <remarks>
+    /// WHY .NET DOES NOT ALREADY COVER THIS. SocketAsyncEventArgs turns OperationAborted into
+    /// an OperationCanceledException only by calling ThrowIfCancellationRequested on the token
+    /// the operation started with. Here that token is CancellationToken.None - nobody
+    /// cancelled, the transport was disposed - so the call is a no-op and the raw
+    /// SocketException falls through. Before the fix this assertion reads:
+    /// "Assert.Throws() Failure: Exception type was not an exact match
+    ///  Expected: typeof(System.ObjectDisposedException)
+    ///  Actual:   typeof(System.Net.Sockets.SocketException)".
+    /// </remarks>
     [Fact]
-    public async Task DisposingWhileReceivePendingFaultsTheReceive()
+    public async Task DisposingWhileAReceiveIsPendingSurfacesAsDisposal()
     {
         var transport = TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetwork);
         var pending = transport.ReceiveAsync(new byte[64], CancellationToken.None).AsTask();
 
+        // Give the receive a chance to actually post before the handle closes under it. The
+        // assertion holds either way - a receive that has not started yet fails from the
+        // disposed socket instead - but only the posted case reproduces the reported 995.
+        await Task.Delay(50);
         await transport.DisposeAsync();
 
-        // The exact type is platform-dependent, so assert only that it faults
-        // and does not hang. Consumers must treat this as shutdown, not as a
-        // protocol error.
-        await Assert.ThrowsAnyAsync<Exception>(
+        var exception = await Assert.ThrowsAsync<ObjectDisposedException>(
             async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        // Named after the transport, not after System.Net.Sockets.Socket: the caller disposed
+        // this object and should be told about the object it holds.
+        Assert.Equal(nameof(TlsQuicUdpDatagramTransport), exception.ObjectName);
     }
 
+    /// <summary>
+    /// The other half of the same guard, and the one TlsQuicConnection depends on. Its
+    /// ReceiveWithinDeadlineAsync separates a deadline cancel from a caller cancel by testing
+    /// the two token sources inside an OperationCanceledException filter, so a caller cancel
+    /// that arrived as anything else would never reach that filter at all.
+    /// </summary>
     [Fact]
-    public async Task ReceiveHonoursCancellation()
+    public async Task CancellingAPendingReceiveSurfacesAsCancellation()
     {
         await using var transport =
             TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetwork);
 
         using var cts = new CancellationTokenSource();
         var pending = transport.ReceiveAsync(new byte[64], cts.Token).AsTask();
+        await Task.Delay(50);
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        // The caller's own token, so a caller can tell its cancellation from anyone else's.
+        Assert.Equal(cts.Token, exception.CancellationToken);
+    }
+
+    [Fact]
+    public async Task SendingThroughADisposedTransportSurfacesAsDisposal()
+    {
+        // The send path had the same bare socket call as the receive. A UDP send usually
+        // completes into the driver without pending, so the abort window is narrow - but a
+        // send issued AFTER disposal is the deterministic end of the same range, and before
+        // the fix it reported ObjectName "System.Net.Sockets.Socket": an internal handle the
+        // caller never saw, from a type it did dispose.
+        var transport = TlsQuicUdpDatagramTransport.Create(AddressFamily.InterNetwork);
+        await transport.DisposeAsync();
+
+        var exception = await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+            await transport.SendAsync(
+                new IPEndPoint(IPAddress.Loopback, 9), new byte[] { 1 }, CancellationToken.None));
+
+        Assert.Equal(nameof(TlsQuicUdpDatagramTransport), exception.ObjectName);
+    }
+
+    /// <summary>
+    /// The teardown translation must not eat a real answer from the stack. Two SocketErrors
+    /// are named because both are load-bearing elsewhere in this stack.
+    /// </summary>
+    [Fact]
+    public void TheTeardownPredicateAcceptsOnlyLifecycleFaults()
+    {
+        // WSA_OPERATION_ABORTED (995) and use-after-dispose: lifecycle, translated.
+        Assert.True(TlsQuicUdpDatagramTransport.IsTeardownFault(
+            new SocketException((int)SocketError.OperationAborted)));
+        Assert.True(TlsQuicUdpDatagramTransport.IsTeardownFault(
+            new ObjectDisposedException("socket")));
+
+        // WSAEMSGSIZE (10040): TlsQuicConnection catches this one by name to report a datagram
+        // the host refused, which is path MTU discovery's only feedback. Swallowing it here
+        // would disable that silently.
+        Assert.False(TlsQuicUdpDatagramTransport.IsTeardownFault(
+            new SocketException((int)SocketError.MessageSize)));
+
+        // WSAECONNRESET (10054): already suppressed at its ICMP source by
+        // DisableUdpConnectionReset, and RFC 9000 s10.2.2 forbids treating an ICMP message as
+        // a connection error - but where it does arrive it is about a real datagram, not about
+        // this transport's lifetime.
+        Assert.False(TlsQuicUdpDatagramTransport.IsTeardownFault(
+            new SocketException((int)SocketError.ConnectionReset)));
+
+        // Not a socket fault at all.
+        Assert.False(TlsQuicUdpDatagramTransport.IsTeardownFault(new InvalidOperationException()));
     }
 
     [Theory]
@@ -313,6 +394,65 @@ public sealed class TlsQuicDatagramTransportTests
                 .AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
 
         Assert.Equal(TlsQuicProxyError.AssociationTerminated, exception.Error);
+    }
+
+    /// <summary>
+    /// The relayed transport has TWO things to tear down under a pending receive - the UDP
+    /// relay socket and the TCP control connection whose life RFC 1928 ties the association to
+    /// - and disposal touches both. The caller cancelled nothing, so what it must not get is
+    /// either a cancellation it never asked for or a Winsock error code.
+    /// </summary>
+    /// <remarks>
+    /// Before the fix this assertion reads:
+    /// "Assert.Throws() Failure: Exception type was not an exact match
+    ///  Expected: typeof(System.ObjectDisposedException)
+    ///  Actual:   typeof(System.OperationCanceledException)".
+    /// The receive links the caller's token with an internal termination token, and DisposeAsync
+    /// cancels that internal one first - so disposal used to be indistinguishable from the
+    /// association simply ending, and both were indistinguishable from a caller's own cancel
+    /// except by inspecting a token the caller does not hold.
+    /// </remarks>
+    [Fact]
+    public async Task DisposingARelayedTransportWhileAReceiveIsPendingSurfacesAsDisposal()
+    {
+        await using var relay = FakeSocks5Relay.Start();
+        var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options { ProxyEndPoint = relay.ProxyEndPoint },
+            CancellationToken.None);
+
+        var pending = transport.ReceiveAsync(new byte[64], CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        await transport.DisposeAsync();
+
+        var exception = await Assert.ThrowsAsync<ObjectDisposedException>(
+            async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(nameof(TlsQuicSocks5Transport), exception.ObjectName);
+    }
+
+    /// <summary>
+    /// And the distinction the pump loop actually runs on: a caller's own cancellation of a
+    /// relayed receive stays a cancellation carrying the caller's own token, so
+    /// TlsQuicConnection.ReceiveWithinDeadlineAsync can still tell it from a deadline.
+    /// </summary>
+    [Fact]
+    public async Task CancellingAPendingRelayedReceiveSurfacesAsCancellation()
+    {
+        await using var relay = FakeSocks5Relay.Start();
+        await using var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options { ProxyEndPoint = relay.ProxyEndPoint },
+            CancellationToken.None);
+
+        using var cts = new CancellationTokenSource();
+        var pending = transport.ReceiveAsync(new byte[64], cts.Token).AsTask();
+        await Task.Delay(50);
+        await cts.CancelAsync();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(cts.Token, exception.CancellationToken);
+        Assert.Null(relay.BackgroundException);
     }
 
     [Theory]
