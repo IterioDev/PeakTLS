@@ -327,9 +327,32 @@ internal sealed class Http11Connection : IHttpConnection
     }
 }
 
+/// <summary>
+/// The connection this request was leased cannot carry it, and a fresh one can.
+/// </summary>
+/// <remarks>
+/// <para>AN <see cref="IOException"/> BECAUSE THE TYPE IS THE RETRY DECISION.
+/// <c>TlsSession.ShouldRetryException</c> retries an <see cref="IOException"/>, and
+/// <c>TlsConnectionPool</c> additionally evicts the entry that raised one, so this type is how a
+/// connection says "take another one" to both of them at once.</para>
+/// <para>IT CARRIES A CAUSE BECAUSE A CONNECTION USUALLY DIED OF SOMETHING. HTTP/3's read loop
+/// stops for a reason — a spent QUIC deadline, a peer CONNECTION_CLOSE, or a fault in our own
+/// packet construction — and until this constructor existed that reason reached exactly the
+/// requests that were registered at the instant the loop stopped. Every request that arrived
+/// AFTERWARDS was told only that the loop had stopped, so a long run over one poisoned
+/// connection reported a generic stale-connection error (or, once the retry budget was spent,
+/// the session timeout) for a failure that was really an <see cref="ArgumentException"/> out of
+/// the QUIC layer. Naming the cause is what keeps the report honest; it changes no retry or
+/// eviction decision, both of which read the type and not the chain.</para>
+/// </remarks>
 internal sealed class StaleHttpConnectionException : IOException
 {
     public StaleHttpConnectionException(string message) : base(message)
+    {
+    }
+
+    public StaleHttpConnectionException(string message, Exception? innerException)
+        : base(message, innerException)
     {
     }
 }

@@ -268,6 +268,7 @@ internal sealed class Http3StreamMultiplexer(IHttp3Streams streams) : IAsyncDisp
     private int _interruptRequests;
     private int _stopped;
     private int _disposed;
+    private Exception? _fault;
     private TaskCompletionSource _pumped =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Task? _loop;
@@ -277,6 +278,22 @@ internal sealed class Http3StreamMultiplexer(IHttp3Streams streams) : IAsyncDisp
 
     /// <summary>Gets whether the read loop has stopped, for whatever reason.</summary>
     internal bool IsStopped => Volatile.Read(ref _stopped) != 0;
+
+    /// <summary>
+    /// Gets what ended the read loop, or <see langword="null"/> if it is running or was merely
+    /// disposed.
+    /// </summary>
+    /// <remarks>KEPT BECAUSE <see cref="FailAll"/> REACHES ONLY THE STREAMS THAT EXISTED. The
+    /// loop's fault is delivered to every request registered at the instant it stopped, and
+    /// until it was retained here it was then discarded — so every request that arrived
+    /// afterwards was told that the loop had stopped and never what stopped it. On a connection
+    /// serving a long run of requests that is nearly all of them: the first caller sees an
+    /// <see cref="ArgumentException"/> out of QUIC packet construction and every later one sees
+    /// a bare stale-connection error, or, once the retry budget is spent, a session timeout. The
+    /// connection is evicted either way — <c>Http3Connection.IsReusable</c> reads
+    /// <see cref="IsStopped"/> — so this changes what is REPORTED and not what is recovered.
+    /// </remarks>
+    internal Exception? Fault => Volatile.Read(ref _fault);
 
     /// <summary>
     /// Gets a task that completes the next time the read loop makes progress, or when it stops.
@@ -521,6 +538,10 @@ internal sealed class Http3StreamMultiplexer(IHttp3Streams streams) : IAsyncDisp
     /// withdrawn there.</remarks>
     private void FailAll(Exception? fault)
     {
+        // THE FAULT IS PUBLISHED BEFORE THE FLAG, for the same reason the flag precedes the
+        // walk: OpenAsync re-reads IsStopped after registering, and a caller that finds the flag
+        // raised must find the cause with it rather than a null that has not landed yet.
+        Volatile.Write(ref _fault, fault);
         Volatile.Write(ref _stopped, 1);
         var ended = fault ?? Stopped();
         foreach (var pair in _active)
@@ -578,8 +599,21 @@ internal sealed class Http3StreamMultiplexer(IHttp3Streams streams) : IAsyncDisp
         }
     }
 
-    private static StaleHttpConnectionException Stopped() => new(
-        "The HTTP/3 connection's read loop has stopped, so it accepts no further requests.");
+    /// <summary>
+    /// The refusal every entry point raises once the read loop has stopped, naming what stopped
+    /// it.
+    /// </summary>
+    /// <remarks>NOT STATIC ANY MORE, WHICH IS THE POINT. A stopped loop is a
+    /// <see cref="StaleHttpConnectionException"/> so that <c>TlsSession.ShouldRetryException</c>
+    /// retries an idempotent request on a fresh connection and <c>TlsConnectionPool</c> evicts
+    /// this one; both read the TYPE, so attaching <see cref="Fault"/> changes neither decision.
+    /// What it changes is the report: without it a caller who arrived after the loop died was
+    /// told only that it had died, and the QUIC fault that actually killed it — the one thing
+    /// that says whether a fresh connection can help — reached nobody.</remarks>
+    private StaleHttpConnectionException Stopped() => new(
+        "The HTTP/3 connection's read loop has stopped, so it accepts no further requests." +
+        (Fault is { } fault ? $" It stopped because: {fault.Message}" : string.Empty),
+        Fault);
 
     /// <summary>
     /// Stops the read loop and waits for it to finish before anything it touches is disposed.

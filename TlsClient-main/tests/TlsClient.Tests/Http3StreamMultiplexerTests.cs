@@ -184,6 +184,19 @@ public sealed class Http3StreamMultiplexerTests
         /// does.</summary>
         internal void PostTransportFailure() =>
             Post(_ => throw new TimeoutException("the QUIC deadline passed"));
+
+        /// <summary>
+        /// Delivers a datagram whose processing throws the way a fault in our own packet
+        /// construction does.
+        /// </summary>
+        /// <remarks>AN <see cref="ArgumentException"/> AND NOT A <see cref="TimeoutException"/>,
+        /// because the two take different arms of the loop's catch and only this one is
+        /// UNEXPECTED. A deadline and a peer CONNECTION_CLOSE are shapes the loop names and
+        /// rewrites into an <see cref="IOException"/>; a bad argument reaching frame encoding is
+        /// a bug in this stack, falls through to the general arm, and is the shape a field
+        /// report saw kill a live HTTP/3 session.</remarks>
+        internal void PostPacketConstructionFailure() => Post(
+            _ => throw new ArgumentException("the QUIC packet could not be built"));
     }
 
     private static TlsQuicHttp3Request Request(string path = "/") => new()
@@ -516,6 +529,84 @@ public sealed class Http3StreamMultiplexerTests
         await Assert.ThrowsAsync<StaleHttpConnectionException>(
             () => multiplexer.OpenAsync(Request(), false, 1 << 20, default).AsTask()
                 .WaitAsync(Bound));
+    }
+
+    /// <summary>
+    /// A request that arrives after a fatal fault killed the read loop is told WHAT killed it,
+    /// not merely that it is dead.
+    /// </summary>
+    /// <remarks>
+    /// <para>THIS IS THE HALF OF A CASCADE THAT SURVIVES THE TRIGGER BEING FIXED. A field report
+    /// had one HTTP/3 session take an <see cref="ArgumentException"/> out of QUIC packet
+    /// construction and then fail every later request; the connection itself IS evicted and
+    /// replaced — <c>Http3Connection.IsReusable</c> reads <see cref="Http3StreamMultiplexer
+    /// .IsStopped"/> and <c>TlsConnectionPool</c> retires anything that reports false — but
+    /// <c>FailAll</c> handed the fault only to the streams registered at the instant the loop
+    /// stopped and then discarded it. On a connection serving a run of requests that is the
+    /// first caller and no one else: every later one was told "the read loop has stopped" and,
+    /// once <c>TlsRetryOptions.MaximumAttempts</c> was spent, the caller was left with a
+    /// timeout for what was really a bug in our own frame encoding.</para>
+    /// <para>THE ASSERTION IS THE CHAIN AND NOT THE MESSAGE. A message can be widened without
+    /// the cause being carried; <see cref="Exception.InnerException"/> is the thing a logger,
+    /// a caller's <c>catch</c> filter and a bug report all read.</para>
+    /// <para>The type stays <see cref="StaleHttpConnectionException"/> deliberately: it is an
+    /// <see cref="IOException"/>, so <c>TlsSession.ShouldRetryException</c> still retries an
+    /// idempotent request onto a fresh connection and <c>TlsConnectionPool</c> still evicts this
+    /// one. Naming the cause changes what is REPORTED and not what is recovered.</para>
+    /// </remarks>
+    [Fact]
+    public async Task ARequestArrivingAfterAFatalFaultIsToldWhatKilledTheConnection()
+    {
+        var fake = new FakeHttp3Streams();
+        await using var multiplexer = new Http3StreamMultiplexer(fake);
+        multiplexer.Start();
+
+        // One request in flight when the loop dies, and it is the one caller that was always
+        // told the truth — asserted here so that a fix which moved the cause instead of
+        // spreading it would fail rather than pass.
+        var inFlight = await OpenAsync(multiplexer);
+        var finished = FinishAsync(multiplexer, inFlight);
+        fake.PostPacketConstructionFailure();
+        var end = await finished.WaitAsync(Bound);
+        var cause = Assert.IsType<ArgumentException>(end.Fault);
+
+        // The loop is what the connection reads to decide it is no longer reusable, which is
+        // what makes the pool evict it. Without this the test could pass on a live loop.
+        Assert.True(multiplexer.IsStopped);
+        Assert.Same(cause, multiplexer.Fault);
+
+        // And now the request the field report is about: the NEXT one.
+        var refused = await Assert.ThrowsAsync<StaleHttpConnectionException>(
+            () => multiplexer.OpenAsync(Request(), false, 1 << 20, default).AsTask()
+                .WaitAsync(Bound));
+
+        Assert.Same(cause, refused.InnerException);
+        Assert.Contains(
+            "the QUIC packet could not be built",
+            refused.Message,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Disposal is not a fault, so the refusal it produces names none.
+    /// </summary>
+    /// <remarks>The companion to the test above, and the reason <c>Fault</c> is nullable rather
+    /// than always populated: a caller told "this connection was closed BECAUSE ..." for an
+    /// orderly <c>DisposeAsync</c> would be told about a failure that never happened.</remarks>
+    [Fact]
+    public async Task AnOrderlyDisposalRefusesWithoutInventingACause()
+    {
+        var fake = new FakeHttp3Streams();
+        var multiplexer = new Http3StreamMultiplexer(fake);
+        multiplexer.Start();
+        await multiplexer.DisposeAsync().AsTask().WaitAsync(Bound);
+
+        var refused = await Assert.ThrowsAsync<StaleHttpConnectionException>(
+            () => multiplexer.OpenAsync(Request(), false, 1 << 20, default).AsTask()
+                .WaitAsync(Bound));
+
+        Assert.Null(multiplexer.Fault);
+        Assert.Null(refused.InnerException);
     }
 
     [Fact]
