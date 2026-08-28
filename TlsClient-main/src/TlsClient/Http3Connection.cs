@@ -353,8 +353,20 @@ internal sealed class Http3Connection : IHttpConnection
             ObjectDisposedException.ThrowIf(IsDisposed, this);
             if (!IsReusable)
             {
+                // THE MULTIPLEXER'S FAULT, WHEN IT HAS ONE, RATHER THAN SILENCE. Five things end
+                // reuse and only one of them has a cause to name: a read loop that stopped
+                // because something threw. The other four — disposal, a spent stream allowance,
+                // a peer GOAWAY, a passed idle budget — are states rather than failures and
+                // leave Fault null, which is exactly the bare message below. Dropping the cause
+                // on the one clause that has it is what made a fatal QUIC packet-construction
+                // fault reach the first caller and no one else: every later request on the same
+                // poisoned connection was told the loop had stopped and never what stopped it.
                 throw new StaleHttpConnectionException(
-                    "The HTTP/3 connection no longer accepts new request streams.");
+                    "The HTTP/3 connection no longer accepts new request streams." +
+                    (_multiplexer.Fault is { } fault
+                        ? $" Its read loop stopped because: {fault.Message}"
+                        : string.Empty),
+                    _multiplexer.Fault);
             }
 
             // NO CONNECTION-WIDE GATE AROUND THE REST OF THIS METHOD, WHICH IS THE CHANGE.

@@ -642,6 +642,90 @@ public sealed class Http3ClientMachineryTests
         Assert.All(fabric.Dials, dial => Assert.Equal(Http3Only, dial.VersionPolicy));
     }
 
+    /// <summary>
+    /// One fatal transport fault costs one connection and not the session: the requests riding
+    /// the dead connection are told the real cause, the connection is evicted and disposed, and
+    /// the next request is answered on a fresh one.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE FIELD REPORT THIS PINS SAID "NO RECOVERY". An HTTP/3 session took an
+    /// <see cref="ArgumentException"/> out of QUIC packet construction and every later request
+    /// then failed with a session timeout, so an onboarding run fetched nothing. The trigger is
+    /// one bug; a client library surviving one bad connection is a separate property, and it is
+    /// this one.</para>
+    /// <para>AN <see cref="ArgumentException"/> IS THE FAULT DELIBERATELY, because it is the one
+    /// shape that reaches the caller unrewritten and unretried.
+    /// <c>TlsSession.ShouldRetryException</c> retries an <see cref="IOException"/> and an
+    /// <see cref="HttpRequestException"/>, so either of those would let a silent retry supply
+    /// the second connection and the test would prove nothing about eviction. Here the first
+    /// caller gets the fault itself, and the SECOND request — a new call, the caller's own
+    /// decision to reissue — is what must find a live connection.</para>
+    /// <para>THE FOUR CONCURRENT REQUESTS ARE THE POINT AND NOT DECORATION. A connection dying
+    /// under one request evicts on the path that request already walks; a connection dying under
+    /// four has three more callers arriving at a corpse, which is the shape the report describes
+    /// and the shape that leaves an entry pooled with outstanding leases. All four must be told,
+    /// and the entry must still be gone afterwards.</para>
+    /// </remarks>
+    [Fact]
+    public async Task AFatalTransportFaultEvictsTheHttp3ConnectionRatherThanPoisoningTheSession()
+    {
+        const int Together = 4;
+        using var arrived = new SemaphoreSlim(0, Together);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var fabric = new Http3Fabric
+        {
+            Respond = async exchange =>
+            {
+                if (exchange.ConnectionOrdinal != 0)
+                {
+                    return Ok(exchange);
+                }
+                arrived.Release();
+                await release.Task.ConfigureAwait(false);
+                throw new ArgumentException("the QUIC packet could not be built");
+            },
+        };
+        await using var session = Session(fabric);
+
+        var requests = new Task<TlsResponse>[Together];
+        for (var index = 0; index < Together; index++)
+        {
+            requests[index] = session.GetAsync(First);
+            Assert.True(
+                await arrived.WaitAsync(Bound),
+                $"HTTP/3 request {index + 1} of {Together} never reached the connection that " +
+                "was about to die");
+        }
+        release.SetResult();
+
+        foreach (var request in requests)
+        {
+            // THE REAL CAUSE, NOT A TIMEOUT. A caller told only that its request expired cannot
+            // tell a dead peer from a bug in this stack, and the report that started this said
+            // "TaskCanceledException" for what was an ArgumentException all along.
+            var fault = await Assert.ThrowsAsync<ArgumentException>(
+                async () => await request.WaitAsync(Bound));
+            Assert.Contains(
+                "the QUIC packet could not be built",
+                fault.Message,
+                StringComparison.Ordinal);
+        }
+
+        // Evicted AND disposed, not merely marked. A pool that removed the entry and leaked the
+        // QUIC connection would still leave the socket and the read loop alive.
+        Assert.True(fabric.Connections[0].IsDisposed);
+
+        // The whole claim: the session still works. Bounded, so a pool that parked this request
+        // behind a corpse it would not replace fails the run rather than hanging it — which is
+        // exactly how the reported failure presented.
+        var recovered = await session.GetAsync(First).WaitAsync(Bound);
+
+        Assert.Equal(HttpVersion.Version30, recovered.HttpVersion);
+        Assert.Equal(2, fabric.Dials.Count);
+        Assert.Equal(1, fabric.Exchanges[^1].ConnectionOrdinal);
+        Assert.All(fabric.Dials, dial => Assert.Equal(Http3Only, dial.VersionPolicy));
+    }
+
     // ------------------------------------------------------------------------------
     // The harness.
     // ------------------------------------------------------------------------------
