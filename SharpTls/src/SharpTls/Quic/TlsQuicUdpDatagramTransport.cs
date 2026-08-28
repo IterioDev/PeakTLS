@@ -24,7 +24,12 @@ public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
 
     private readonly Socket _socket;
     private readonly IPEndPoint _receiveTemplate;
-    private bool _disposed;
+
+    // Volatile because DisposeAsync and a pending SendAsync/ReceiveAsync are routinely on
+    // different threads: the pump awaits the receive while whoever owns the connection's
+    // lifetime disposes. The exception filters below read this flag to tell a teardown from a
+    // network error, so a stale read would misclassify the very race it exists to classify.
+    private volatile bool _disposed;
 
     private TlsQuicUdpDatagramTransport(Socket socket)
     {
@@ -133,6 +138,67 @@ public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
         }
     }
 
+    /// <summary>
+    /// True for the two shapes a socket teardown takes under a pending operation, and for no
+    /// network condition at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>WSA_OPERATION_ABORTED (995) IS A LIFECYCLE EVENT WEARING A NETWORK ERROR'S
+    /// CLOTHES. Winsock defines it as "The I/O operation has been aborted because of either a
+    /// thread exit or an application request", and .NET surfaces it as
+    /// <see cref="SocketError.OperationAborted"/>. On a UDP socket only two things in this
+    /// process can produce it: closing the handle while an overlapped receive is posted, or
+    /// CancelIoEx against that receive - which is exactly what .NET's own cancellation support
+    /// for the ValueTask socket overloads calls. No peer, no router and no ICMP message can
+    /// cause it, so nothing diagnostic is lost by translating it.</para>
+    /// <para>WHY .NET DOES NOT ALREADY TRANSLATE IT ON THE PATH THAT MATTERS.
+    /// SocketAsyncEventArgs turns OperationAborted into an
+    /// <see cref="OperationCanceledException"/> only by calling ThrowIfCancellationRequested on
+    /// the token the operation was started with. When the abort came from Dispose rather than
+    /// from that token, the token is NOT cancelled, the call falls through, and the raw
+    /// <see cref="SocketException"/> reaches the caller. That is the reported defect: a second
+    /// connection's transport is disposed under a pending receive and the pump sees
+    /// "SocketException: I/O operation aborted" instead of a shutdown.</para>
+    /// <para>DELIBERATELY NARROW. <see cref="SocketError.ConnectionReset"/> (10054, which
+    /// <see cref="DisableUdpConnectionReset"/> suppresses at its ICMP source) and
+    /// <see cref="SocketError.MessageSize"/> (10040, which TlsQuicConnection catches by name to
+    /// report a datagram the host refused) are real answers from the stack about real
+    /// datagrams. Widening this predicate to "any SocketException during teardown" would eat
+    /// both.</para>
+    /// </remarks>
+    /// <param name="exception">The exception a socket call produced.</param>
+    internal static bool IsTeardownFault(Exception exception) =>
+        exception is ObjectDisposedException
+            || (exception is SocketException socket
+                && socket.SocketErrorCode == SocketError.OperationAborted);
+
+    // Which teardown happened decides the shape, and the two answers are not
+    // interchangeable to a caller.
+    //
+    // A CALLER'S CANCELLATION IS ROUTINE, NOT EXCEPTIONAL. The pump loop cancels a pending
+    // receive with an interrupt token on every ordinary shutdown, so it must arrive as the
+    // cancellation shape the rest of this namespace uses. TlsQuicConnection's
+    // ReceiveWithinDeadlineAsync catches OperationCanceledException and separates a deadline
+    // cancel from a caller cancel by testing the two token sources rather than the exception,
+    // so carrying `cancellationToken` here keeps that distinction intact: a caller cancel
+    // fails its `!cancellationToken.IsCancellationRequested` guard and propagates, exactly as
+    // it did before this translation existed.
+    //
+    // A DISPOSAL IS STILL A FAULT, JUST NOT A PLATFORM-SPECIFIC ONE.
+    // ITlsQuicDatagramTransport.ReceiveAsync promises that disposing under a pending call
+    // faults it, and ObjectDisposedException is what every .NET type raises for use after
+    // dispose - the same exception a receive STARTED after DisposeAsync already gets, so the
+    // two orderings of the same race now agree instead of differing by platform.
+    private static Exception TranslateTeardown(
+        Exception cause, CancellationToken cancellationToken) =>
+        cancellationToken.IsCancellationRequested
+            ? new OperationCanceledException(
+                "The QUIC datagram socket operation was cancelled.", cause, cancellationToken)
+            : new ObjectDisposedException(
+                nameof(TlsQuicUdpDatagramTransport),
+                "The QUIC datagram transport was disposed while a socket operation was "
+                    + "pending.");
+
     /// <inheritdoc />
     public async ValueTask SendAsync(
         IPEndPoint destination,
@@ -143,9 +209,24 @@ public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
         ArgumentOutOfRangeException.ThrowIfGreaterThan(
             payload.Length, MaxDatagramPayloadSize, nameof(payload));
 
-        _ = await _socket
-            .SendToAsync(payload, SocketFlags.None, destination, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            _ = await _socket
+                .SendToAsync(payload, SocketFlags.None, destination, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsTeardownFault(exception)
+            && (cancellationToken.IsCancellationRequested || _disposed))
+        {
+            // THE SEND HAS THE SAME EXPOSURE AS THE RECEIVE, AND IT IS SMALLER ONLY BY LUCK. A
+            // UDP send usually completes into the driver without pending, so the window is
+            // narrow - but it is the same window, and the pump sends under the same interrupt
+            // token it receives under. The filter's `IsTeardownFault` leaves SocketError
+            // .MessageSize untouched, which is load-bearing: TlsQuicConnection catches that
+            // one by name to report a datagram the host refused, and swallowing it here would
+            // silently disable path MTU discovery's only feedback.
+            throw TranslateTeardown(exception, cancellationToken);
+        }
     }
 
     /// <inheritdoc />
@@ -153,9 +234,26 @@ public sealed class TlsQuicUdpDatagramTransport : ITlsQuicDatagramTransport
         Memory<byte> buffer,
         CancellationToken cancellationToken)
     {
-        var result = await _socket
-            .ReceiveFromAsync(buffer, SocketFlags.None, _receiveTemplate, cancellationToken)
-            .ConfigureAwait(false);
+        SocketReceiveFromResult result;
+        try
+        {
+            result = await _socket
+                .ReceiveFromAsync(buffer, SocketFlags.None, _receiveTemplate, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsTeardownFault(exception)
+            && (cancellationToken.IsCancellationRequested || _disposed))
+        {
+            // THE FILTER'S SECOND HALF IS WHAT KEEPS THIS HONEST. Without it a 995 arriving
+            // with neither the caller cancelling nor this transport disposed - a thread exit,
+            // which is the other cause Winsock names - would be relabelled as a disposal this
+            // type never performed. Such a fault falls through unchanged instead.
+            //
+            // TlsQuicDatagramTransportTests.DisposingWhileAReceiveIsPendingSurfacesAsDisposal
+            // and TlsQuicDatagramTransportTests.CancellingAPendingReceiveSurfacesAsCancellation
+            // pin the two branches; without this catch the first sees SocketException 995.
+            throw TranslateTeardown(exception, cancellationToken);
+        }
 
         return new TlsQuicDatagramReceiveResult(
             result.ReceivedBytes, (IPEndPoint)result.RemoteEndPoint);

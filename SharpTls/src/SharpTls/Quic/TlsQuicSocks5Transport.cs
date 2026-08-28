@@ -287,6 +287,50 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
         return buffer;
     }
 
+    // THE SAME WINSOCK LIFECYCLE FAULT AS THE PLAIN UDP TRANSPORT, WITH ONE MORE WAY TO
+    // ARRIVE. TlsQuicUdpDatagramTransport.IsTeardownFault has the full account of why
+    // WSA_OPERATION_ABORTED (995) and ObjectDisposedException are lifecycle events rather than
+    // network errors, and it is shared rather than restated so the two transports cannot drift
+    // on which SocketErrors are real.
+    //
+    // WHAT IS DIFFERENT HERE IS THAT THERE ARE TWO THINGS TO TEAR DOWN. This transport owns a
+    // UDP relay socket AND a TCP control connection, and RFC 1928 makes the association end
+    // when the control connection ends - so a pending receive can be aborted by our own
+    // disposal, by the caller's token, or by the control watcher cancelling the internal
+    // token, and those are three different answers to "what happened". The order below is the
+    // order of authority: the caller's own request outranks our disposal, which outranks a
+    // proxy-side end that the disposal would have caused anyway.
+    //
+    // THE FILTER AT EACH CALL SITE GUARANTEES THE LAST BRANCH IS REACHED ONLY WHEN IT IS TRUE,
+    // so an abort with none of the three causes - Winsock's other documented cause is a thread
+    // exit - is never relabelled as a teardown this transport performed. It propagates
+    // untouched instead.
+    private Exception TranslateTeardown(Exception cause, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return new OperationCanceledException(
+                "The SOCKS5 relayed socket operation was cancelled.", cause, cancellationToken);
+        }
+
+        if (_disposed)
+        {
+            return new ObjectDisposedException(
+                nameof(TlsQuicSocks5Transport),
+                "The SOCKS5 UDP transport was disposed while a socket operation was pending.");
+        }
+
+        return new TlsQuicProxyException(
+            TlsQuicProxyError.AssociationTerminated,
+            "The SOCKS5 UDP association has ended; the control connection closed.");
+    }
+
+    // True when one of the three teardowns above is the reason a socket call failed.
+    private bool IsTeardownInProgress(CancellationToken cancellationToken) =>
+        cancellationToken.IsCancellationRequested
+            || _disposed
+            || _terminationCts.IsCancellationRequested;
+
     /// <inheritdoc />
     public async ValueTask SendAsync(
         IPEndPoint destination, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
@@ -321,6 +365,17 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
                     cancellationToken)
                 .ConfigureAwait(false);
         }
+        catch (Exception exception) when (
+            TlsQuicUdpDatagramTransport.IsTeardownFault(exception)
+                && IsTeardownInProgress(cancellationToken))
+        {
+            // The check at the top of this method closes the association-already-ended case
+            // BEFORE the send; this closes the one that opens between that check and the
+            // socket call. SocketError.MessageSize is outside IsTeardownFault and so still
+            // propagates - TlsQuicConnection reads it as the host refusing an oversized
+            // datagram, which is the only feedback path MTU discovery has.
+            throw TranslateTeardown(exception, cancellationToken);
+        }
         finally
         {
             ArrayPool<byte>.Shared.Return(rented);
@@ -348,17 +403,42 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
                             rented.AsMemory(0, scratchLength), SocketFlags.None, _receiveTemplate, linked.Token)
                         .ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (
-                    !cancellationToken.IsCancellationRequested &&
-                    _terminationCts.IsCancellationRequested &&
-                    !_disposed)
+                catch (OperationCanceledException exception)
+                    when (IsTeardownInProgress(cancellationToken))
                 {
-                    // The caller did not cancel and we are not mid-disposal, so the only
-                    // remaining source of the internal token firing is the control watcher
-                    // observing the control connection end.
-                    throw new TlsQuicProxyException(
-                        TlsQuicProxyError.AssociationTerminated,
-                        "The SOCKS5 UDP association has ended; the control connection closed.");
+                    // THE RECEIVE RUNS ON A LINKED TOKEN, SO THE EXCEPTION .NET RAISES NAMES
+                    // THE LINK AND NOT ITS CAUSE. All three teardowns cancel that one token:
+                    // the caller's own request flows into it, DisposeAsync cancels the
+                    // internal source before closing the sockets, and the control watcher
+                    // cancels it on seeing the association end. TranslateTeardown re-reads the
+                    // sources in order of authority and re-raises the shape that belongs to
+                    // each - a caller cancel carrying the CALLER's token rather than a linked
+                    // one it never held, a disposal as a disposal, and only what is left as
+                    // RFC 1928's association-ended.
+                    //
+                    // The filter clause this replaced was `!cancellationToken.Is
+                    // CancellationRequested && _terminationCts.IsCancellationRequested &&
+                    // !_disposed`, which is the same order of authority written as one
+                    // condition - it just had nowhere to send the two cases it excluded.
+                    throw TranslateTeardown(exception, cancellationToken);
+                }
+                catch (Exception exception) when (
+                    TlsQuicUdpDatagramTransport.IsTeardownFault(exception)
+                        && IsTeardownInProgress(cancellationToken))
+                {
+                    // WHY THIS CLAUSE IS NEEDED WHEN THE ONE ABOVE ALREADY EXISTS. That one
+                    // catches an OperationCanceledException, which is what .NET produces when
+                    // the token the receive was STARTED with is the thing that fired. Neither
+                    // of this transport's own teardowns is guaranteed to arrive that way: the
+                    // UDP socket's Dispose aborts the pending overlapped receive with
+                    // WSA_OPERATION_ABORTED and no token cancelled, and a receive re-entered
+                    // after that disposal - this loop continues past a datagram it drops -
+                    // throws ObjectDisposedException before it reaches the wire. Both used to
+                    // escape as themselves.
+                    //
+                    // TlsQuicDatagramTransportTests.DisposingARelayedTransportWhileAReceiveIs
+                    // PendingSurfacesAsDisposal pins it.
+                    throw TranslateTeardown(exception, cancellationToken);
                 }
 
                 // RFC 9000 s14: a datagram that fails validation is dropped and the receive
@@ -435,9 +515,12 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
         await _terminationCts.CancelAsync().ConfigureAwait(false);
 
         // The UDP socket closes first: a pending ReceiveAsync then faults from that
-        // disposal directly (see ITlsQuicDatagramTransport's remarks — the exact
-        // exception is platform-dependent) rather than from the control connection
-        // closing a moment later.
+        // disposal directly rather than from the control connection closing a moment later.
+        // What the caller sees is no longer platform-dependent - _disposed is already true
+        // above, so whichever shape the platform produces (an OperationCanceledException from
+        // the internal token, WSA_OPERATION_ABORTED from closing the handle under a posted
+        // overlapped receive, or ObjectDisposedException from a receive re-entered after it)
+        // is translated to ObjectDisposedException by TranslateTeardown.
         _udp.Dispose();
         _control.Dispose();
 
