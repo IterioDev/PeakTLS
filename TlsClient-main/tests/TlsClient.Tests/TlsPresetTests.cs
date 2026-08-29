@@ -18,6 +18,82 @@ public sealed class TlsPresetTests
     /// code, and this test is what notices if a later edit gives one of them a value the other
     /// did not get.
     /// </summary>
+    /// <summary>
+    /// The vendor parameter follows the OS BUILD and nothing else - in particular not whether
+    /// a proxy is configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>WHY A TRANSPORT COULD NEVER BE ALLOWED TO DECIDE THIS. 0xff080808 is absent from
+    /// the iOS 26 capture and last in 4 of 4 iOS 27 ones, which is what identifies it as an OS
+    /// marker rather than an artifact of how the traffic was captured. A client that sent it on
+    /// its proxied dials and not its direct ones would therefore present as iOS 27 through a
+    /// proxy and iOS 26 without one - two personas from one preset, and the proxied half
+    /// carrying a marker its own ClientHello says it does not have.</para>
+    /// <para>THE CLAIM THIS PINS IS Http3Connection's: "THE TRANSPORT IS THE ONLY THING A PROXY
+    /// CHANGES HERE." That file builds its TlsQuicClientHelloProfileFactory before it chooses
+    /// between the UDP and SOCKS5 transports, so the hello cannot see the choice. This test is
+    /// what notices if a later edit moves the factory below the branch, or reaches for the
+    /// proxy while composing.</para>
+    /// <para>COMPOSED REPEATEDLY, NOT ONCE, because the seven known parameters rotate per
+    /// connection and the vendor one is appended after the rotating block. Sixty-four
+    /// compositions cover every one of the seven offsets many times over, so a rotation that
+    /// dropped or reordered the tail for a single offset cannot hide behind a lucky draw.</para>
+    /// </remarks>
+    [Fact]
+    public void SpotifyIosHttp3_TheVendorParameterIgnoresWhetherAProxyIsConfigured()
+    {
+        const ulong Vendor = 0xFF08_0808UL;
+
+        foreach (var (preset, carriesVendor) in new[]
+        {
+            (TlsPresets.Spotify917602050IOS260Http3, false),
+            (TlsPresets.Spotify917602050IOS270Http3, true),
+        })
+        {
+            var direct = preset.CreateOptions();
+            var proxied = preset.CreateOptions();
+
+            // Never dialled: the assertion is about what composition does with a proxy set,
+            // so an address that would refuse a connection is the honest one to use here.
+            proxied.Proxy = TlsProxy.Socks5("socks5://127.0.0.1:1080");
+
+            for (var draw = 0; draw < 64; draw++)
+            {
+                var directIds = ComposedIds(direct);
+                var proxiedIds = ComposedIds(proxied);
+
+                Assert.Equal(carriesVendor, directIds.Contains(Vendor));
+                Assert.Equal(carriesVendor, proxiedIds.Contains(Vendor));
+
+                // Same set either way. Order is drawn per connection, so ordering the two
+                // before comparing asks the question this test is about - membership - and
+                // leaves the rotation to the test that owns it.
+                Assert.Equal(directIds.Order(), proxiedIds.Order());
+
+                if (carriesVendor)
+                {
+                    // Appended after the rotating block, so it is last for every offset.
+                    Assert.Equal(Vendor, directIds[^1]);
+                    Assert.Equal(Vendor, proxiedIds[^1]);
+                }
+            }
+        }
+    }
+
+    /// <summary>The identifiers this options object would put in extension 57, composed the
+    /// way a real dial composes them - through the connection spec, so a rotation is drawn.
+    /// </summary>
+    private static ulong[] ComposedIds(TlsSessionOptions options)
+    {
+        // Snapshot is what a real dial takes, so this composes from the same immutable spec
+        // Http3Connection hands to TlsQuicConnection rather than from the mutable options.
+        var spec = options.Quic.Snapshot(options.Http3).ConnectionSpec;
+        return [.. spec.TransportParameters
+            .Compose(spec, stackalloc byte[0])
+            .Parameters
+            .Select(parameter => parameter.Id)];
+    }
+
     [Fact]
     public void SpotifyIosHttp3_Ios26DiffersOnlyInProfileAndVendorParameter()
     {
