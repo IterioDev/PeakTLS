@@ -899,6 +899,70 @@ internal sealed class TlsQuicConnectionSpec
         }
     }
 
+    /// <summary>The default <see cref="RetainedPacketBufferBytes"/>. Named, and referenced by
+    /// <see cref="TlsQuicPacketReceiver"/>'s own two-argument constructor, so that the two
+    /// cannot drift into disagreeing about what an unconfigured receiver retains.</summary>
+    internal const int DefaultRetainedPacketBufferBytes = 16 * 1024;
+
+    /// <summary>Gets how many bytes of not-yet-openable packet this endpoint retains under
+    /// RFC 9001 s5.7 while waiting for the read keys that would open them.</summary>
+    /// <remarks>
+    /// <para>RFC 9001 s5.7 PERMITS THE RETENTION AND NAMES NO SIZE: "Received packets
+    /// protected with 1-RTT keys MAY be stored and later decrypted and used once the handshake
+    /// is complete." Without it, a Handshake or 1-RTT packet that arrives in an EARLIER
+    /// datagram than the flight carrying its keys is discarded permanently, and with loss
+    /// recovery unable to ask for it again the handshake stalls - the proxied-only failure that
+    /// motivated this knob, because a SOCKS5 relay re-emits each datagram on its own path and
+    /// makes that reordering ordinary. <see cref="TlsQuicPacketReceiver"/> owns the mechanism.
+    /// </para>
+    /// <para>A BOUND IS NOT OPTIONAL AND THIS IS WHY IT IS A KNOB RATHER THAN JUST A CONSTANT.
+    /// Every byte here is put there by whoever can send this endpoint a datagram, before any
+    /// key has authenticated anything, so an unbounded buffer is a remote memory-exhaustion
+    /// vector. RFC 9001 s4.3 makes the identical point about QUIC's other buffer of
+    /// unauthenticated peer input - buffering fragments "could consume excessive resources if
+    /// the client's address has not yet been validated". The ceiling is a knob for the reason
+    /// every limit on this type is one: a caller running behind a relay that reorders harder
+    /// than the default expects must be able to raise it, and a caller that wants the
+    /// pre-s5.7 behaviour back sets it to 0, which disables retention outright.</para>
+    /// <para>BYTES AND NOT A PACKET COUNT. Bytes is the resource being protected; a count is a
+    /// proxy for it, and two knobs can be set to values that disagree about what they bound.
+    /// The count follows anyway - every retained entry costs at least the smallest packet that
+    /// can reach the retain branch - which is what keeps the receiver's linear scans over the
+    /// buffer cheap.</para>
+    /// <para>THE DEFAULT IS SIZED FROM A SERVER FLIGHT, NOT FROM A CAPTURE. It is
+    /// <see cref="DefaultRetainedPacketBufferBytes"/> = 16 KiB, about eleven datagrams at
+    /// <see cref="MaximumPathMtu"/>'s <see cref="EthernetMaximumUdpPayload"/> ceiling, where a
+    /// server's whole handshake flight is a handful - so a flight reordered end to end still
+    /// fits with room over, and 16 KiB per connection is not a number worth economising on.
+    /// This is a receive-side buffer and changes no byte this client sends, so unlike
+    /// <see cref="AckRangeLimit"/> or <see cref="PacketNumberEncodedLength"/> it is not a
+    /// fingerprint dimension and nothing in task 11 has to report it.</para>
+    /// <para>READ BY <see cref="TlsQuicConnection"/>'s constructor, which passes it straight to
+    /// the receiver, and witnessed in the strong sense the notice at the top of this file asks
+    /// for: setting it to 0 turns a handshake that completes into one that stalls, over the
+    /// identical exchange - the pair
+    /// TlsQuicConnectionTests.AHandshakePacketDeliveredBeforeItsInitialStillCompletesTheHandshake
+    /// and
+    /// TlsQuicConnectionTests.TheSameReorderingEndsOnTheHandshakeDeadlineWhenRetentionIsTurnedOff.
+    /// The guard and the default are
+    /// TlsQuicConnectionSpecTests.ARetentionCeilingBelowZeroIsRejectedAndZeroIsAccepted and
+    /// TlsQuicConnectionSpecTests.TheRetentionCeilingDefaultsToSixteenKibibytes.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Below 0. Zero is meaningful - it turns
+    /// retention off - so the floor is 0 and not 1.</exception>
+    public int RetainedPacketBufferBytes
+    {
+        get => _retainedPacketBufferBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(
+                value, nameof(RetainedPacketBufferBytes));
+            _retainedPacketBufferBytes = value;
+        }
+    }
+
+    private readonly int _retainedPacketBufferBytes = DefaultRetainedPacketBufferBytes;
+
     /// <summary>Gets whether packets coalesced into one datagram are ordered by ascending
     /// encryption level.</summary>
     /// <remarks>

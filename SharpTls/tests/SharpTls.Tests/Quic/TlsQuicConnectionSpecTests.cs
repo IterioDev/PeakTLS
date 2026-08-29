@@ -306,6 +306,36 @@ public sealed class TlsQuicConnectionSpecTests
         Assert.Equal(1, new TlsQuicConnectionSpec { AckRangeLimit = 1 }.AckRangeLimit);
     }
 
+    // RFC 9001 s5.7's retention ceiling. ZERO IS THE SMALLEST LEGAL VALUE AND IS NOT THE
+    // GUARD'S EDGE BY ACCIDENT: it means "retain nothing", which is the receiver's behaviour
+    // before s5.7 landed and is the value
+    // TlsQuicConnectionTests.TheSameReorderingEndsOnTheHandshakeDeadlineWhenRetentionIsTurnedOff
+    // uses to reproduce the bug the retention fixes. A floor of one would take that away.
+    [Fact]
+    public void ARetentionCeilingBelowZeroIsRejectedAndZeroIsAccepted()
+    {
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => _ = new TlsQuicConnectionSpec
+            {
+                RetainedPacketBufferBytes = -1,
+            });
+        Assert.Equal("RetainedPacketBufferBytes", error.ParamName);
+
+        Assert.Equal(
+            0, new TlsQuicConnectionSpec { RetainedPacketBufferBytes = 0 }.RetainedPacketBufferBytes);
+    }
+
+    // THE DEFAULT IS STATED HERE AND NOWHERE ELSE, so a change to it is a change to this line
+    // rather than a silent change to every connection. 16 KiB is about eleven full-MTU
+    // datagrams against a server flight of a handful, and the receiver's own two-argument
+    // constructor takes the same constant so an unconfigured receiver cannot disagree with an
+    // unconfigured spec.
+    [Fact]
+    public void TheRetentionCeilingDefaultsToSixteenKibibytes()
+    {
+        Assert.Equal(16 * 1024, new TlsQuicConnectionSpec().RetainedPacketBufferBytes);
+    }
+
     // The knob s16 exists for: a longer-than-necessary encoding, on all three fields at once,
     // which is what a client whose Length field is not minimally encoded would set. Also pins
     // the member values to Table 4's byte counts, which the writer casts straight to a width.

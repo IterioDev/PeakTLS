@@ -1177,8 +1177,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // from the server carries our Source Connection ID there. Getting it from the spec
         // rather than from a constant is the whole reason it is a parameter one layer down.
         _version = options.Spec.Version;
+        //
+        // AND ITS RFC 9001 s5.7 RETENTION CEILING, from the spec for the same reason: how much
+        // reordering a path inflicts is a property of the path, and a caller behind a relay
+        // that splits a flight across datagrams needs to be able to say so.
         _receiver = new TlsQuicPacketReceiver(
-            (uint)_version, options.Spec.SourceConnectionIdLength);
+            (uint)_version,
+            options.Spec.SourceConnectionIdLength,
+            options.Spec.RetainedPacketBufferBytes);
         _keys = new TlsQuicKeySet(_receiver, _version);
 
         // RFC 8899's search range, from the spec's two knobs. MAX_PLPMTU is also bounded by
@@ -1944,9 +1950,33 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal int DiscardedPackets { get; private set; }
 
     /// <summary>The subset of <see cref="DiscardedPackets"/> that met no read keys at their
-    /// level - s12.2's "because the keys are not available", which is the coalescing stall's
-    /// signature.</summary>
+    /// level - s12.2's "because the keys are not available".</summary>
+    /// <remarks>
+    /// <para>IT NO LONGER MEANS "STALLED" ON ITS OWN, and the pair it must be read with is
+    /// <see cref="RetainedForLaterKeys"/>. Since RFC 9001 s5.7 retention landed, a packet
+    /// counted here is counted for the PASS that could not open it, and most of them are
+    /// retained and replayed moments later - landing in a later pass's processed count, not
+    /// here. So this number rising in step with <see cref="RetainedForLaterKeys"/> is ordinary
+    /// reordering being absorbed, which is what a relayed path produces and recovers from.</para>
+    /// <para>WHAT STILL SIGNALS A STALL is this number rising while
+    /// <see cref="RetainedForLaterKeys"/> does not: the packet could not be retained at all,
+    /// either because its level's keys were already discarded under s4.9 or because the
+    /// retention ceiling was full. <see cref="DeadlineExceeded"/> reports both numbers for
+    /// exactly that comparison.</para>
+    /// </remarks>
     internal int DiscardedForMissingKeys { get; private set; }
+
+    /// <summary>How many packets the receiver has retained under RFC 9001 s5.7 rather than
+    /// dropping them for want of read keys - see
+    /// <see cref="TlsQuicPacketReceiver.PacketsRetainedForKeys"/>.</summary>
+    internal int RetainedForLaterKeys => _receiver.PacketsRetainedForKeys;
+
+    /// <summary>How many retained packets have since been replayed through the frame handler -
+    /// see <see cref="TlsQuicPacketReceiver.PacketsReplayed"/>.</summary>
+    /// <remarks>The gap between this and <see cref="RetainedForLaterKeys"/> is packets still
+    /// waiting for keys plus packets whose level's keys were discarded before they arrived.
+    /// </remarks>
+    internal int ReplayedAfterKeysArrived => _receiver.PacketsReplayed;
 
     /// <summary>How many HANDSHAKE_DONE frames were received, not whether one was. A conforming
     /// server retransmits an unacknowledged one, and until task 14c this connection never
@@ -2227,6 +2257,16 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// <c>Processed == 0</c> cannot fire on it: the stall's shape is <c>Processed=1,
     /// Discarded=1</c>. <see cref="TlsQuicReceiveResult.DiscardedForMissingKeys"/> exists so
     /// it can be detected rather than inferred, and it is used.</para>
+    /// <para>SPLITTING IS NOT ENOUGH ON ITS OWN, AND RFC 9001 s5.7 IS THE OTHER HALF. Splitting
+    /// only reaches a packet whose keys arrive from an EARLIER packet in the SAME datagram. A
+    /// Handshake packet that arrives in an earlier DATAGRAM than the Initial one carrying its
+    /// keys has no later packet in its own datagram for any split to find, so it used to be
+    /// discarded permanently and the handshake ran out its deadline. s5.7: "Due to reordering
+    /// and loss, protected packets might be received by an endpoint before the final TLS
+    /// handshake messages are received." <see cref="TlsQuicPacketReceiver"/> now retains such a
+    /// packet and the REPLAY ROUNDS in the walk below hand it back once this walk installs the
+    /// keys for it. The bound on that retention is
+    /// <see cref="TlsQuicConnectionSpec.RetainedPacketBufferBytes"/>.</para>
     /// <para>SPLITTING FORFEITS s12.2's CONNECTION ID CLAUSE UNLESS THE CALLER RE-ADDS IT,
     /// AND THIS CALLER RE-ADDS IT. "Receivers SHOULD ignore any subsequent packets with a
     /// different Destination Connection ID than the first packet in the datagram." That check
@@ -2398,8 +2438,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 // last thing that happens.
                 ThrowIfIntegrityLimitReached();
 
-                var outcome = _receiver.Receive(
-                    packet,
+                // NAMED RATHER THAN PASSED INLINE, because RFC 9001 s5.7's replay below hands
+                // the SAME delegate to the receiver a second time. "Frames from a replayed
+                // packet reach the same handler as a live one" is the property that keeps a
+                // retained packet indistinguishable from one that arrived when its keys were
+                // present, and one delegate is how it is guaranteed rather than reviewed.
+                TlsQuicFrameHandler handler =
                     (in TlsQuicFrame frame, in TlsQuicReceivedPacket source) =>
                     {
                         acknowledgeable = source;
@@ -2678,228 +2722,291 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                                 // stream's direction and s19.12, carrying no stream id, cannot.
                                 break;
                         }
-                    });
+                    };
+
+                var outcome = _receiver.Receive(packet, handler);
 
                 ThrowIfIntegrityLimitReached();
 
-                AccountForPacket(outcome);
-
-                if (outcome.Processed > 0)
+                // RFC 9001 s5.7's REPLAY ROUNDS. Round one is the packet that just arrived;
+                // every later round is a packet that arrived EARLIER, met no read keys at its
+                // level, was retained by the receiver, and has just been unlocked by keys this
+                // walk installed. s5.7: "Received packets protected with 1-RTT keys MAY be
+                // stored and later decrypted and used once the handshake is complete."
+                //
+                // THE ROUNDS ARE HERE AND NOT INSIDE InstallReadKeys, WHICH IS WHERE THE KEYS
+                // ACTUALLY ARRIVE. Installing them happens inside the chunk loop below, which
+                // is iterating `chunks` while the handler above is still the thing that appends
+                // to it; a replay driven from there would dispatch frames into accumulators
+                // mid-iteration and would overwrite `acknowledgeable` for a packet not yet
+                // acknowledged. So key installation only ARMS a replay and this loop drains it,
+                // at the one point in the pump where no handler is live.
+                //
+                // ONE PACKET PER ROUND, for RFC 9000 s13.1: "A packet MUST NOT be acknowledged
+                // until packet protection has been successfully removed and all frames
+                // contained in the packet have been processed." The accumulators below hold one
+                // packet's worth, so two replayed packets in one round would acknowledge the
+                // second and lose the first.
+                //
+                // TERMINATION. ReplayOneRetainedPacket removes the entry before processing it,
+                // and the receiver only retains a packet whose level has NO keys - which this
+                // one's has, or it would not have been selected - so a replayed packet cannot
+                // re-enter the buffer and every round strictly shrinks it. New entries come only
+                // from a live Receive of a NEW datagram, which is outside this loop. The loop
+                // therefore runs at most as many extra rounds as there are retained packets, and
+                // TlsQuicConnectionSpec.RetainedPacketBufferBytes bounds that.
+                while (true)
                 {
-                    // RFC 9000 s17.2.5.2's "After the client has received and processed an
-                    // Initial or Retry packet from the server, it MUST discard any subsequent
-                    // Retry packets that it receives", and the same word in
-                    // TlsQuicVersionNegotiation's contract: a Version Negotiation packet "MUST
-                    // be ignored once a packet for the connection has been successfully
-                    // processed". PROCESSED IS THE AEAD'S VERDICT, not the parser's, which is
-                    // what stops an off-path sender arming either rule with a forgery.
-                    _processedServerPacket = true;
+                    AccountForPacket(outcome);
 
-                    // RFC 9000 s10.1: "An endpoint restarts its idle timer when a packet from
-                    // its peer is received and processed successfully."
-                    _idleSince = now;
-                    _sentAckElicitingSinceReceive = false;
-                }
-
-                if (peerClosed)
-                {
-                    // s10.2.2: "While otherwise identical to the closing state, an endpoint in
-                    // the draining state MUST NOT send any packets." Set before the send below
-                    // rather than after it, which is the whole content of the MUST here.
-                    _draining = true;
-                }
-
-                if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
-                {
-                    // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
-                    // why this sits after the AEAD. A Source Connection ID taken off
-                    // unauthenticated input would let an off-path sender choose the value every
-                    // later packet is measured against, which is the influence s7.3's last
-                    // paragraph exists to deny.
-                    _validatedServerSourceConnectionId ??= validated;
-
-                    // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
-                    // FINDING 7. "Upon first receiving an Initial or Retry packet from the
-                    // server, the client uses the Source Connection ID supplied by the server
-                    // as the Destination Connection ID for subsequent packets." This used to
-                    // run in AcceptedUnderSection122, before _receiver.Receive and therefore
-                    // before any AEAD, so one injected long header - the client's Initial
-                    // Destination Connection ID is in the clear, so it is guessable or simply
-                    // observable - permanently redirected this endpoint. See the note left at
-                    // the old site for the whole argument.
-                    //
-                    // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
-                    // optimisation: "A client MUST change the Destination Connection ID it uses
-                    // for sending packets in response to only the first received Initial or
-                    // Retry packet." The flag below is that MUST, and it is witnessed rather
-                    // than assumed - deleting it used to leave the whole gate green.
-                    //
-                    // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
-                    // the Destination Connection ID of the client's FIRST Initial packet, which
-                    // is OriginalDestinationConnectionId and is not touched here. Adoption
-                    // changes what we ADDRESS, not what we key with. (Retry is the one thing
-                    // that moves both, and HandleRetryAsync owns it under its own flag.)
-                    //
-                    // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
-                    // runs to completion before any answer is built, so the datagram that
-                    // replies to this packet already carries the server's chosen value.
-                    if (!_adoptedServerConnectionId)
+                    if (outcome.Processed > 0)
                     {
-                        _destinationConnectionId = validated;
-                        _adoptedServerConnectionId = true;
+                        // RFC 9000 s17.2.5.2's "After the client has received and processed an
+                        // Initial or Retry packet from the server, it MUST discard any subsequent
+                        // Retry packets that it receives", and the same word in
+                        // TlsQuicVersionNegotiation's contract: a Version Negotiation packet "MUST
+                        // be ignored once a packet for the connection has been successfully
+                        // processed". PROCESSED IS THE AEAD'S VERDICT, not the parser's, which is
+                        // what stops an off-path sender arming either rule with a forgery.
+                        _processedServerPacket = true;
+
+                        // RFC 9000 s10.1: "An endpoint restarts its idle timer when a packet from
+                        // its peer is received and processed successfully."
+                        _idleSince = now;
+                        _sentAckElicitingSinceReceive = false;
                     }
-                }
 
-                // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
-                //
-                // BELOW s7.2's ADOPTION, AND THAT POSITION IS THE ADDRESS ON THE CLOSE. These
-                // four used to sit above it, which was correct until finding 7 moved the
-                // adoption behind the AEAD and left them running first: a violation found in
-                // the server's FIRST authenticated Initial then sent its CONNECTION_CLOSE to
-                // the client's own original Destination Connection ID - the value s7.2 says
-                // must already have changed, because "Upon first receiving an Initial or Retry
-                // packet from the server, the client uses the Source Connection ID supplied by
-                // the server as the Destination Connection ID for subsequent packets", and a
-                // close is a subsequent packet. Servers route handshake Initials by the
-                // original value, so the practical cost was small; the rule is not conditional
-                // on that. The packet that taught us the address is the same packet that
-                // raised the failure, so the close is addressed with what it taught us.
-                //
-                // ARGUED RATHER THAN WITNESSED, AND THE REASON IS THE HARNESS. Separating the
-                // two addresses needs a server that both picks its own Source Connection ID and
-                // commits a violation in the same authenticated packet. LoopbackQuicPeer.ForServer
-                // cannot: its Source Connection ID is "the client-chosen Destination Connection
-                // ID it learned from the wire", so the adoption is value-neutral against it, and
-                // the scripted transport that CAN choose a Source Connection ID builds only
-                // conforming replies. A witness would be new harness plumbing rather than a new
-                // assertion; the ordering is stated here so a later reader does not restore it.
-                //
-                // AND BELOW `peerClosed`, WHICH IS A SECOND RULE RATHER THAN A SIDE EFFECT.
-                // s10.2.2: "While otherwise identical to the closing state, an endpoint in the
-                // draining state MUST NOT send any packets." A datagram that carries both the
-                // peer's CONNECTION_CLOSE and a violation now sends nothing and only throws -
-                // CloseCoreAsync's own draining guard sees the flag - which is what that MUST
-                // asks for.
-                //
-                // STILL ABOVE ProcessCryptoDataAsync, unchanged: a datagram that violates the
-                // protocol must not advance the TLS handshake first.
-                //
-                // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
-                // can be used after the handshake is complete or during the handshake ... An
-                // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
-                // connection immediately." All three used to throw locally with the right s20.1
-                // code spelled into the message text and no frame on the wire at all, which
-                // left the peer to discover the failure by idle timeout - s10.1's period rather
-                // than one datagram. ProtocolFailureCode was assigned and never read; it is now
-                // what the close carries.
-                //
-                // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
-                // paragraph is why both happen rather than one: "An immediate close ... causes
-                // all streams to become immediately closed; open streams can be assumed to be
-                // implicitly reset." The local exception is how this endpoint learns; the frame
-                // is how the peer does, and a peer told nothing waits out s10.1's idle period.
-                //
-                // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
-                // without sending when the connection is already draining or was never started,
-                // and BuildCloseDatagram returns 0 rather than throwing when no level has write
-                // keys or the code will not encode - so every "cannot tell the peer" case still
-                // ends in s10.2's closing state and still reaches the throw below. What is
-                // deliberately NOT swallowed is a transport failure out of the send: that is
-                // the IOException any other send raises, and hiding it behind the protocol
-                // error would lose the one fact that says the socket rather than the peer is
-                // the problem.
-                // UNREACHABLE THROUGH THE WIRE, AND THAT IS MEASURED RATHER THAN ASSUMED - so
-                // this arm is deliberately unwitnessed while its three siblings below are not.
-                // frameError is set only by TlsQuicAckTracker.ProcessAckFrame returning false,
-                // which happens only when TlsQuicAckFrames.TryGetRanges does, which is
-                // TryWalkRanges over frame.AckRanges - the identical walk, with the identical
-                // s19.3.1 underflow rules, that TryReadAck already ran over the identical bytes
-                // before this frame became a TlsQuicFrame at all. So a chain this rejects was
-                // rejected one layer down and arrived as the receiver's CloseError instead;
-                // AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrameEncodingError is
-                // what witnesses that route. Mutation-ledger rows 133 and 134 recorded the same
-                // equivalence from the other side.
-                //
-                // THE ARM STAYS FOR THE REJECTION THAT IS SEMANTIC RATHER THAN STRUCTURAL:
-                // s13.1's "if a packet number was never issued" is a question about what this
-                // endpoint sent, which no parser can ask, and on the day the tracker asks it
-                // this is the line that turns the answer into a close instead of a bare throw.
-                if (frameError is { } malformed)
-                {
-                    var message = $"The peer sent a malformed ACK frame: {malformed}.";
-                    await CloseAsync(malformed, message, cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(message);
-                }
+                    if (peerClosed)
+                    {
+                        // s10.2.2: "While otherwise identical to the closing state, an endpoint in
+                        // the draining state MUST NOT send any packets." Set before the send below
+                        // rather than after it, which is the whole content of the MUST here.
+                        _draining = true;
+                    }
 
-                // The same connection-level failure, for the same reason, one frame type
-                // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
-                // the message chose it - and StreamFailureCode is how it travels here.
-                if (streamFailure is { } badStream)
-                {
-                    await CloseAsync(
-                            StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
-                            badStream,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(badStream);
-                }
+                    if (outcome.Processed > 0 && packetSourceConnectionId is { } validated)
+                    {
+                        // RFC 9000 s7.2's "a valid Initial packet from the server", and VALID is
+                        // why this sits after the AEAD. A Source Connection ID taken off
+                        // unauthenticated input would let an off-path sender choose the value every
+                        // later packet is measured against, which is the influence s7.3's last
+                        // paragraph exists to deny.
+                        _validatedServerSourceConnectionId ??= validated;
 
-                // And once more for the frames whose rule is not about a stream at all. Kept
-                // separate from streamFailure rather than folded into it because the two carry
-                // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
-                // immediate close above is what needed them told apart.
-                if (protocolFailure is { } violation)
-                {
-                    await CloseAsync(
-                            ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
-                            violation,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(violation);
-                }
+                        // AND s7.2's ADOPTION, WHICH IS THE SAME WORD ABOUT THE SAME VALUE - AUDIT
+                        // FINDING 7. "Upon first receiving an Initial or Retry packet from the
+                        // server, the client uses the Source Connection ID supplied by the server
+                        // as the Destination Connection ID for subsequent packets." This used to
+                        // run in AcceptedUnderSection122, before _receiver.Receive and therefore
+                        // before any AEAD, so one injected long header - the client's Initial
+                        // Destination Connection ID is in the clear, so it is guessable or simply
+                        // observable - permanently redirected this endpoint. See the note left at
+                        // the old site for the whole argument.
+                        //
+                        // ONLY THE FIRST, AND THAT IS ITS OWN SENTENCE OF s7.2 rather than an
+                        // optimisation: "A client MUST change the Destination Connection ID it uses
+                        // for sending packets in response to only the first received Initial or
+                        // Retry packet." The flag below is that MUST, and it is witnessed rather
+                        // than assumed - deleting it used to leave the whole gate green.
+                        //
+                        // ONLY THE INITIAL KEYS' INPUT STAYS PUT. RFC 9001 s5.2 derives them from
+                        // the Destination Connection ID of the client's FIRST Initial packet, which
+                        // is OriginalDestinationConnectionId and is not touched here. Adoption
+                        // changes what we ADDRESS, not what we key with. (Retry is the one thing
+                        // that moves both, and HandleRetryAsync owns it under its own flag.)
+                        //
+                        // AHEAD OF SendAnswerAsync, WHICH IS THE POSITION'S OTHER HALF: this walk
+                        // runs to completion before any answer is built, so the datagram that
+                        // replies to this packet already carries the server's chosen value.
+                        if (!_adoptedServerConnectionId)
+                        {
+                            _destinationConnectionId = validated;
+                            _adoptedServerConnectionId = true;
+                        }
+                    }
 
-                // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
-                // AccountForPacket. Hoisted out of that method rather than made async there,
-                // because everything else it does is counters and s10.2's close is not one.
-                // AUTHENTICATED, which is what makes ending the attempt on it safe: per
-                // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
-                // AEAD-opened packet, so no off-path sender can reach this line. That is the
-                // whole of the distinction AccountForPacket's own remarks draw between this and
-                // a failed decrypt.
-                if (outcome.CloseError is { } closeError)
-                {
-                    var message =
-                        $"The peer's packet requires the connection to close with {closeError}: "
-                        + $"{outcome.CloseReason}";
-                    await CloseAsync(closeError, message, cancellationToken)
-                        .ConfigureAwait(false);
-                    throw new InvalidOperationException(message);
-                }
+                    // A CONNECTION-LEVEL FAILURE, AND IT NOW REACHES THE PEER - AUDIT FINDING 9.
+                    //
+                    // BELOW s7.2's ADOPTION, AND THAT POSITION IS THE ADDRESS ON THE CLOSE. These
+                    // four used to sit above it, which was correct until finding 7 moved the
+                    // adoption behind the AEAD and left them running first: a violation found in
+                    // the server's FIRST authenticated Initial then sent its CONNECTION_CLOSE to
+                    // the client's own original Destination Connection ID - the value s7.2 says
+                    // must already have changed, because "Upon first receiving an Initial or Retry
+                    // packet from the server, the client uses the Source Connection ID supplied by
+                    // the server as the Destination Connection ID for subsequent packets", and a
+                    // close is a subsequent packet. Servers route handshake Initials by the
+                    // original value, so the practical cost was small; the rule is not conditional
+                    // on that. The packet that taught us the address is the same packet that
+                    // raised the failure, so the close is addressed with what it taught us.
+                    //
+                    // ARGUED RATHER THAN WITNESSED, AND THE REASON IS THE HARNESS. Separating the
+                    // two addresses needs a server that both picks its own Source Connection ID and
+                    // commits a violation in the same authenticated packet. LoopbackQuicPeer.ForServer
+                    // cannot: its Source Connection ID is "the client-chosen Destination Connection
+                    // ID it learned from the wire", so the adoption is value-neutral against it, and
+                    // the scripted transport that CAN choose a Source Connection ID builds only
+                    // conforming replies. A witness would be new harness plumbing rather than a new
+                    // assertion; the ordering is stated here so a later reader does not restore it.
+                    //
+                    // AND BELOW `peerClosed`, WHICH IS A SECOND RULE RATHER THAN A SIDE EFFECT.
+                    // s10.2.2: "While otherwise identical to the closing state, an endpoint in the
+                    // draining state MUST NOT send any packets." A datagram that carries both the
+                    // peer's CONNECTION_CLOSE and a violation now sends nothing and only throws -
+                    // CloseCoreAsync's own draining guard sees the flag - which is what that MUST
+                    // asks for.
+                    //
+                    // STILL ABOVE ProcessCryptoDataAsync, unchanged: a datagram that violates the
+                    // protocol must not advance the TLS handshake first.
+                    //
+                    // RFC 9000 s10.2's immediate close is what these three are: "An immediate close
+                    // can be used after the handshake is complete or during the handshake ... An
+                    // endpoint sends a CONNECTION_CLOSE frame (Section 19.19) to terminate the
+                    // connection immediately." All three used to throw locally with the right s20.1
+                    // code spelled into the message text and no frame on the wire at all, which
+                    // left the peer to discover the failure by idle timeout - s10.1's period rather
+                    // than one datagram. ProtocolFailureCode was assigned and never read; it is now
+                    // what the close carries.
+                    //
+                    // THE FRAME FIRST AND THE THROW SECOND, at all four sites. s10.2's next
+                    // paragraph is why both happen rather than one: "An immediate close ... causes
+                    // all streams to become immediately closed; open streams can be assumed to be
+                    // implicitly reset." The local exception is how this endpoint learns; the frame
+                    // is how the peer does, and a peer told nothing waits out s10.1's idle period.
+                    //
+                    // BEST-EFFORT BY CONSTRUCTION AND NOT BY A CATCH. CloseCoreAsync returns
+                    // without sending when the connection is already draining or was never started,
+                    // and BuildCloseDatagram returns 0 rather than throwing when no level has write
+                    // keys or the code will not encode - so every "cannot tell the peer" case still
+                    // ends in s10.2's closing state and still reaches the throw below. What is
+                    // deliberately NOT swallowed is a transport failure out of the send: that is
+                    // the IOException any other send raises, and hiding it behind the protocol
+                    // error would lose the one fact that says the socket rather than the peer is
+                    // the problem.
+                    // UNREACHABLE THROUGH THE WIRE, AND THAT IS MEASURED RATHER THAN ASSUMED - so
+                    // this arm is deliberately unwitnessed while its three siblings below are not.
+                    // frameError is set only by TlsQuicAckTracker.ProcessAckFrame returning false,
+                    // which happens only when TlsQuicAckFrames.TryGetRanges does, which is
+                    // TryWalkRanges over frame.AckRanges - the identical walk, with the identical
+                    // s19.3.1 underflow rules, that TryReadAck already ran over the identical bytes
+                    // before this frame became a TlsQuicFrame at all. So a chain this rejects was
+                    // rejected one layer down and arrived as the receiver's CloseError instead;
+                    // AMaximumStreamsFrameAboveTheStreamCountBoundClosesWithFrameEncodingError is
+                    // what witnesses that route. Mutation-ledger rows 133 and 134 recorded the same
+                    // equivalence from the other side.
+                    //
+                    // THE ARM STAYS FOR THE REJECTION THAT IS SEMANTIC RATHER THAN STRUCTURAL:
+                    // s13.1's "if a packet number was never issued" is a question about what this
+                    // endpoint sent, which no parser can ask, and on the day the tracker asks it
+                    // this is the line that turns the answer into a close instead of a bare throw.
+                    if (frameError is { } malformed)
+                    {
+                        var message = $"The peer sent a malformed ACK frame: {malformed}.";
+                        await CloseAsync(malformed, message, cancellationToken)
+                            .ConfigureAwait(false);
+                        throw new InvalidOperationException(message);
+                    }
 
-                foreach (var chunk in chunks)
-                {
-                    var result = await _client!
-                        .ProcessCryptoDataAsync(
-                            chunk.Level, chunk.Offset, chunk.Data, cancellationToken)
-                        .ConfigureAwait(false);
-                    results.Add(result);
-                    DeliveredCryptoChunks++;
+                    // The same connection-level failure, for the same reason, one frame type
+                    // along. Task 14e. Its code is TlsQuicStreamSet's - the refusal that produced
+                    // the message chose it - and StreamFailureCode is how it travels here.
+                    if (streamFailure is { } badStream)
+                    {
+                        await CloseAsync(
+                                StreamFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                                badStream,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        throw new InvalidOperationException(badStream);
+                    }
 
-                    // BEFORE THE NEXT PACKET OF THIS DATAGRAM IS OPENED, not after the whole
-                    // datagram is done - the Handshake packet coalesced behind ServerHello is
-                    // protected with keys this very result carries.
-                    InstallSecrets(result);
-                    await ApplyPeerTransportParametersAsync(result, cancellationToken)
-                        .ConfigureAwait(false);
-                }
+                    // And once more for the frames whose rule is not about a stream at all. Kept
+                    // separate from streamFailure rather than folded into it because the two carry
+                    // different s20.1 codes - STREAM_STATE_ERROR and PROTOCOL_VIOLATION - and the
+                    // immediate close above is what needed them told apart.
+                    if (protocolFailure is { } violation)
+                    {
+                        await CloseAsync(
+                                ProtocolFailureCode ?? TlsQuicTransportError.ProtocolViolation,
+                                violation,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        throw new InvalidOperationException(violation);
+                    }
 
-                if (acknowledgeable is { } source2)
-                {
-                    // s13.1's ordering: after every frame of the packet has been processed,
-                    // which for CRYPTO means after the awaits above.
-                    _acks.OnPacketReceived(
-                        source2.Level, source2.PacketNumber, TypeOnlyFrames(frameTypes), now);
+                    // THE FOURTH OF FINDING 9's FOUR, AND THE ONE THAT USED TO THROW FROM INSIDE
+                    // AccountForPacket. Hoisted out of that method rather than made async there,
+                    // because everything else it does is counters and s10.2's close is not one.
+                    // AUTHENTICATED, which is what makes ending the attempt on it safe: per
+                    // TlsQuicPacketReceiver, CloseError is set only by a check that ran on an
+                    // AEAD-opened packet, so no off-path sender can reach this line. That is the
+                    // whole of the distinction AccountForPacket's own remarks draw between this and
+                    // a failed decrypt.
+                    if (outcome.CloseError is { } closeError)
+                    {
+                        var message =
+                            $"The peer's packet requires the connection to close with {closeError}: "
+                            + $"{outcome.CloseReason}";
+                        await CloseAsync(closeError, message, cancellationToken)
+                            .ConfigureAwait(false);
+                        throw new InvalidOperationException(message);
+                    }
+
+                    foreach (var chunk in chunks)
+                    {
+                        var result = await _client!
+                            .ProcessCryptoDataAsync(
+                                chunk.Level, chunk.Offset, chunk.Data, cancellationToken)
+                            .ConfigureAwait(false);
+                        results.Add(result);
+                        DeliveredCryptoChunks++;
+
+                        // BEFORE THE NEXT PACKET OF THIS DATAGRAM IS OPENED, not after the whole
+                        // datagram is done - the Handshake packet coalesced behind ServerHello is
+                        // protected with keys this very result carries.
+                        InstallSecrets(result);
+                        await ApplyPeerTransportParametersAsync(result, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (acknowledgeable is { } source2)
+                    {
+                        // s13.1's ordering: after every frame of the packet has been processed,
+                        // which for CRYPTO means after the awaits above.
+                        _acks.OnPacketReceived(
+                            source2.Level, source2.PacketNumber, TypeOnlyFrames(frameTypes), now);
+                    }
+
+                    if (!_receiver.HasReplayablePacket)
+                    {
+                        break;
+                    }
+
+                    // The per-packet accumulators, back to their initial state for the next
+                    // round. The four FAILURE locals are deliberately NOT reset: every one of
+                    // them is first-failure-wins across this datagram and each already ends the
+                    // attempt with a throw above, so a round can only be reached with all four
+                    // still clear.
+                    chunks.Clear();
+                    frameTypes.Clear();
+                    acknowledgeable = null;
+
+                    // AND s7.2's SOURCE CONNECTION ID DOES NOT SURVIVE INTO A REPLAY ROUND.
+                    // "Upon first receiving an Initial or Retry packet from the server, the
+                    // client uses the Source Connection ID supplied by the server as the
+                    // Destination Connection ID for subsequent packets" - the value in hand
+                    // belongs to the LIVE packet parsed at the top of this walk, and attributing
+                    // it to a replayed packet would let a packet that arrived earlier adopt a
+                    // connection ID it never carried. Nulling it costs nothing real: s7.2 names
+                    // Initial and Retry packets only, Initial read keys exist from before the
+                    // first flight goes out and are thereafter only ever discarded - never
+                    // absent-then-installed - so no Initial packet is ever retained and
+                    // replayed, and a Retry packet never reaches the receiver at all.
+                    packetSourceConnectionId = null;
+
+                    ThrowIfIntegrityLimitReached();
+                    outcome = _receiver.ReplayOneRetainedPacket(handler);
+                    ThrowIfIntegrityLimitReached();
                 }
             }
 
@@ -5039,8 +5146,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             + $"keys), {UnprocessedPackets} unprocessed, "
             + $"{IgnoredForConnectionIdMismatch} ignored for a Destination Connection ID "
             + $"mismatch, {DiscardedForSourceConnectionIdChange} for a changed Source "
-            + "Connection ID. A non-zero want-of-keys count is the coalescing stall "
-            + "PumpOnceAsync's remarks describe. "
+            + $"Connection ID; {RetainedForLaterKeys} retained under RFC 9001 s5.7 and "
+            + $"{ReplayedAfterKeysArrived} replayed once their keys arrived. "
+            + "READ THE WANT-OF-KEYS COUNT AGAINST THE RETAINED ONE: rising together is "
+            + "ordinary reordering that retention absorbed, and says nothing about this "
+            + "failure. Want-of-keys rising while retained does not is a packet nothing could "
+            + "hold - its level's keys were already discarded (RFC 9001 s4.9) or the "
+            + "TlsQuicConnectionSpec.RetainedPacketBufferBytes ceiling was full - and that is "
+            + "the stall. Retained far above replayed means the keys never came, so the "
+            + "handshake failed before the buffer could be drained. "
             + "THIS IS A TIMEOUT, NOT A RETRANSMISSION: A3 is deferred, so nothing here "
             + "resents a lost packet and there is nothing to resend - recovering from one "
             + "means starting a new attempt at the process level.");

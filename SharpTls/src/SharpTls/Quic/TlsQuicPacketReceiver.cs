@@ -65,6 +65,19 @@ internal readonly struct TlsQuicReceiveResult
     // and is fixed by nothing. Discarded alone cannot tell them apart, and the shape
     // that matters - Processed=1, Discarded=1 - is indistinguishable from a healthy
     // datagram with one stray packet appended.
+    //
+    // WHAT A NON-ZERO VALUE MEANS SINCE RFC 9001 s5.7 RETENTION LANDED, and it is no
+    // longer "the connection is stalled". A packet counted here is counted for THIS
+    // PASS, in which it really was not processed; most of them are now also RETAINED and
+    // replayed a moment later out of <see cref="TlsQuicPacketReceiver.ReplayOneRetainedPacket"/>,
+    // where they land in a later pass's Processed. So:
+    //   - non-zero here with PacketsRetainedForKeys rising in step is ORDINARY
+    //     REORDERING that the retention buffer absorbed - the number a proxied path
+    //     produces and recovers from;
+    //   - non-zero here with PacketsRetainedForKeys NOT rising is a packet that could
+    //     not be retained at all: the level's keys were already discarded under s4.9, or
+    //     the retention ceiling was full. That is the shape that still ends in a stall.
+    // The pair is what the deadline message reports; neither number alone says which.
     internal int DiscardedForMissingKeys { get; init; }
 
     internal TlsQuicUnprocessedPacket Unprocessed { get; init; }
@@ -95,6 +108,41 @@ internal readonly struct TlsQuicReceiveResult
 // discard or a reported close, never an exception. The one thing that can propagate
 // is a throw from the caller's own handler, which is caller code, not input. The
 // constructor is the one exception and it is not input - see its own note.
+//
+// RETENTION - RFC 9001 s5.7, AND WHAT IT DOES NOT FIX.
+//
+// A packet that meets no read keys at its level is retained and replayed once
+// InstallReadKeys supplies them. s5.7's own reason is the diagnosis: "Due to reordering
+// and loss, protected packets might be received by an endpoint before the final TLS
+// handshake messages are received", and its permission is "Received packets protected
+// with 1-RTT keys MAY be stored and later decrypted and used once the handshake is
+// complete." The section grants the server-side mirror in the same words - "The server
+// MAY retain these packets for later decryption in anticipation of receiving a
+// ClientHello" - so the retain branch is written per level rather than per role.
+//
+// THIS IS THE CROSS-DATAGRAM CASE AND NOTHING ELSE. The IN-datagram case - a Handshake
+// packet coalesced behind the Initial packet that carries its keys - is the caller's, is
+// already solved by splitting, and is what the COALESCING note in Receive's remarks is
+// about. Retention is for the case splitting CANNOT reach: the Handshake packet arrives
+// in an EARLIER datagram than the Initial one, so at the moment it is walked there is no
+// later packet in its datagram and no amount of splitting produces one. A relay that
+// re-emits each datagram on its own path makes that reordering ordinary rather than rare,
+// which is why the symptom shows up proxied and not direct.
+//
+// THE ENTRY POINTS ARE Retain (private, from ProcessPacket's keys-are-null branch) and
+// ReplayOneRetainedPacket (internal, drained by the caller). Read the latter's remarks
+// for the termination argument and for why the exactly-once accounting of s6.6's
+// integrity limit, s12.3's duplicate window and s17.1's largest-received is a consequence
+// of WHERE the retain branch sits rather than of bookkeeping.
+//
+// WITNESSED AT BOTH LEVELS. At this class's own seam by
+// TlsQuicPacketReceiverTests.AHandshakePacketThatArrivedBeforeItsKeysIsReplayedOnceThose
+// KeysArrive, and end to end - a real flight from a real peer, split so the Handshake
+// packet arrives in the earlier datagram - by
+// TlsQuicConnectionTests.AHandshakePacketDeliveredBeforeItsInitialStillCompletesTheHandshake.
+// The bug itself is kept reproducible rather than described, by
+// TlsQuicConnectionTests.TheSameReorderingEndsOnTheHandshakeDeadlineWhenRetentionIsTurnedOff,
+// which is the same exchange with the ceiling set to zero.
 //
 // NOT THREAD-SAFE, and that is a requirement on the caller rather than a note on the
 // implementation. _keys, _largestReceived and _scratch are unsynchronised mutable
@@ -174,6 +222,40 @@ internal readonly struct TlsQuicReceiveResult
 //      ZERO of LoopbackQuicPeerTests, which is the measurement behind that sentence: the
 //      harness splits, so the clause is already not running for it.
 // 9 + 1 = 10.
+//
+// RFC 9001 s5.7's RETENTION appended five more, all killed, against the 3165-test suite
+// (3126 passing before these tests existed, 3134 after; the three known failures -
+// UntrustedRootIsRejected, PlatformSslStreamClientAuthenticatesSharpTlsServerAndExchanges
+// Traffic(Tls13) and AFullRequestAndResponseCompleteAgainstSystemNetQuic - are unrelated and
+// present in every row below):
+//  11. Retain never retains (its ceiling test rewritten to `packet.Length > 0 - _retainedBytes`,
+//      which is always true) - the whole feature deleted, with the API left in place so the
+//      verdict measures the suite and not the compiler
+//      -> 6 tests: AHandshakePacketThatArrivedBeforeItsKeysIsReplayedOnceThoseKeysArrive,
+//         TheRetentionCeilingRefusesThePacketThatWouldCrossItAndKeepsWhatIsAlreadyHeld,
+//         DiscardingALevelsKeysDropsThePacketsRetainedAtThatLevel,
+//         AReplayedPacketEntersTheDuplicateWindowExactlyOnce,
+//         ARetainedPacketsNumberIsDecodedAgainstTheLargestReceivedAtReplayTime (all
+//         TlsQuicPacketReceiverTests) and
+//         TlsQuicConnectionTests.AHandshakePacketDeliveredBeforeItsInitialStillCompletesTheHandshake.
+//         The two retention-OFF rows stayed green, which is the check that they are asserting
+//         the absence of retention rather than passing for its own reasons.
+//  12. DiscardReadKeys keeps the level's retained packets (its `Level != level` test forced true)
+//      -> ONLY TlsQuicPacketReceiverTests.DiscardingALevelsKeysDropsThePacketsRetainedAtThatLevel
+//  13. the ceiling is ignored (`packet.Length > int.MaxValue`)
+//      -> 3 tests: TheRetentionCeilingRefusesThePacketThatWouldCrossItAndKeepsWhatIsAlreadyHeld,
+//         RetentionIsOffWhenTheCeilingIsZero, and
+//         TlsQuicConnectionTests.TheSameReorderingEndsOnTheHandshakeDeadlineWhenRetentionIsTurnedOff
+//  14. the post-s4.9 refill bar deleted (`false && _keysDiscarded[...]`)
+//      -> ONLY TlsQuicPacketReceiverTests.DiscardingALevelsKeysDropsThePacketsRetainedAtThatLevel,
+//         which is why that test re-offers an Initial packet AFTER the discard instead of
+//         stopping at the drop
+//  15. TlsQuicConnection's drain loop never runs a second round (`HasReplayablePacket || true`)
+//      -> ONLY TlsQuicConnectionTests.AHandshakePacketDeliveredBeforeItsInitialStillCompletes
+//         TheHandshake. The receiver rows all stayed green, which is the measurement behind
+//         "the trigger is the caller's": retention and replay are correct at this class's seam
+//         and still do nothing at all unless the pump drains them.
+// 14 + 1 = 15.
 internal sealed class TlsQuicPacketReceiver : IDisposable
 {
     // RFC 9000 s17.2, Reserved Bits: "Two bits (those with a mask of 0x0c) of byte 0
@@ -261,6 +343,36 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     private byte[] _scratch = [];
     private bool _disposed;
 
+    // RFC 9001 s5.7's retention, and the whole of its state. See the RETENTION block in
+    // this class's remarks for the design; what lives here is:
+    //
+    // ONE LIST IN ARRIVAL ORDER, NOT ONE PER LEVEL. Replay walks it front to back and
+    // takes the first entry whose level now has keys, so a level's own packets come back
+    // in the order they arrived AND a Handshake packet retained before a 1-RTT one is
+    // replayed before it. Per-level lists would keep the first property and lose the
+    // second, and s12.2's advice - coalescing "in order of increasing encryption levels
+    // ... makes it more likely that the receiver will be able to process all the packets
+    // in a single pass" - is about exactly that ordering.
+    //
+    // THE BYTES ARE THE PROTECTED ONES, COPIED BEFORE ANY UNMASKING. The retain branch
+    // in ProcessPacket runs before TlsQuicHeaderProtection.TryRemove, so the copy is the
+    // packet as it came off the wire and the replay re-runs the whole of ProcessPacket
+    // over it - header protection removal, packet number decoding, the AEAD, the s12.3
+    // duplicate window - exactly once, at replay time. That is what keeps every counter
+    // in this class exactly-once rather than nearly-once; see ReplayOneRetainedPacket.
+    private readonly int _retainedPacketBufferBytes;
+    private readonly List<RetainedPacket> _retained = [];
+    private int _retainedBytes;
+
+    // RFC 9001 s4.9's other half, per level. Set by DiscardReadKeys and cleared by
+    // InstallReadKeys, so that a level whose keys are gone stops ACCEPTING retentions as
+    // well as losing the ones it had. Without it the buffer refills forever after
+    // s4.9.1's "a client MUST discard Initial keys when it first sends a Handshake
+    // packet": every stray or replayed Initial packet the network still carries would be
+    // retained against keys that can never come back, and would crowd out the Handshake
+    // and 1-RTT packets retention exists for.
+    private readonly bool[] _keysDiscarded = new bool[4];
+
     /// <summary>
     /// Whether a packet whose QUIC Bit is 0 is accepted rather than discarded.
     /// </summary>
@@ -291,7 +403,37 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// imitated client, so it is a parameter here and never a layout constant.
     /// </param>
     internal TlsQuicPacketReceiver(uint version, int destinationConnectionIdLength)
+        : this(
+            version,
+            destinationConnectionIdLength,
+            TlsQuicConnectionSpec.DefaultRetainedPacketBufferBytes)
     {
+    }
+
+    /// <param name="version">The connection's QUIC version; see the two-argument
+    /// overload.</param>
+    /// <param name="destinationConnectionIdLength">The length of OUR connection ID; see
+    /// the two-argument overload.</param>
+    /// <param name="retainedPacketBufferBytes">
+    /// The RFC 9001 s5.7 retention ceiling, in bytes of protected packet held at once
+    /// across every level. <c>0</c> disables retention entirely, which is exactly this
+    /// receiver's behaviour before s5.7 landed: a packet that meets no keys is discarded
+    /// and nothing is ever replayed. The knob and its default are
+    /// <see cref="TlsQuicConnectionSpec.RetainedPacketBufferBytes"/>; read that property's
+    /// remarks for why the bound is bytes rather than a packet count.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="retainedPacketBufferBytes"/> is negative. Same reasoning as the
+    /// connection ID bound below: this is a caller's configuration value and never a byte
+    /// off the wire, so a wrong one is surfaced loudly.
+    /// </exception>
+    internal TlsQuicPacketReceiver(
+        uint version, int destinationConnectionIdLength, int retainedPacketBufferBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(
+            retainedPacketBufferBytes, nameof(retainedPacketBufferBytes));
+        _retainedPacketBufferBytes = retainedPacketBufferBytes;
+
         // This THROWS where TlsQuicPacketHeader.TryReadShortHeader returns false at the
         // identical bound, and both are right for their seam. That one judges ATTACKER
         // bytes mid-walk, where the only sound rejection is a discard. This one judges a
@@ -405,10 +547,150 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             KeyPhase = keyPhase,
         };
 
+        // RFC 9001 s4.9's flag, lifted: this level has keys again, so it may retain again.
+        // In practice only the Application level ever reaches this line twice - Initial
+        // and Handshake keys are installed once and then discarded for good - but the
+        // pairing is written both ways so that neither half has to know which.
+        _keysDiscarded[(int)level] = false;
+
         if (level == TlsQuicEncryptionLevel.Application)
         {
             ResetKeyUpdateState();
         }
+    }
+
+    /// <summary>Gets how many packets have been retained under RFC 9001 s5.7 because their
+    /// level's read keys had not arrived.</summary>
+    /// <remarks>A RUNNING TOTAL ACROSS THE CONNECTION, and it is the companion number to
+    /// <see cref="TlsQuicReceiveResult.DiscardedForMissingKeys"/> - see that member's own
+    /// remarks for how the pair tells ordinary reordering apart from a real stall. A retained
+    /// packet is still counted as discarded for the pass that could not open it; retention is
+    /// a second chance, not a reclassification.</remarks>
+    internal int PacketsRetainedForKeys { get; private set; }
+
+    /// <summary>Gets how many retained packets have been replayed through the frame handler
+    /// once their level's read keys arrived.</summary>
+    /// <remarks>Always &lt;= <see cref="PacketsRetainedForKeys"/>. The difference is packets
+    /// still waiting plus packets dropped by <see cref="DiscardReadKeys"/> under RFC 9001
+    /// s4.9. Replayed is not the same as opened: a replayed packet still has to pass the AEAD,
+    /// and one that does not lands in <see cref="AuthenticationFailures"/> exactly as it would
+    /// have on the live path.</remarks>
+    internal int PacketsReplayed { get; private set; }
+
+    /// <summary>Gets how many packets are retained right now, waiting for keys.</summary>
+    internal int RetainedPacketCount => _retained.Count;
+
+    /// <summary>Gets whether at least one retained packet's level now has read keys, so that
+    /// <see cref="ReplayOneRetainedPacket"/> would do something.</summary>
+    /// <remarks>A LINEAR SCAN, deliberately. The list is bounded by the retention ceiling in
+    /// bytes and this is consulted once per replay round, so the worst case is the ceiling
+    /// divided by the smallest packet that can reach the retain branch - a few hundred entries
+    /// against a 16 KiB default - and an index keyed by level would be four more fields to keep
+    /// in step with two mutation sites.</remarks>
+    internal bool HasReplayablePacket => IndexOfReplayable() >= 0;
+
+    /// <summary>
+    /// Replays ONE retained packet whose level now has read keys - RFC 9001 s5.7's "Received
+    /// packets protected with 1-RTT keys MAY be stored and later decrypted and used once the
+    /// handshake is complete", applied at whichever level was missing keys.
+    /// </summary>
+    /// <remarks>
+    /// <para>ONE PER CALL, AND THAT IS THE CALLER'S ACK CORRECTNESS RATHER THAN A STYLE
+    /// CHOICE. RFC 9000 s13.1: "A packet MUST NOT be acknowledged until packet protection has
+    /// been successfully removed and all frames contained in the packet have been processed."
+    /// <c>TlsQuicConnection.PumpOnceAsync</c> accumulates one packet's frames, awaits the TLS
+    /// engine on them and only then tells the ACK tracker which packet it just finished; a call
+    /// that replayed several packets into that one set of accumulators would acknowledge the
+    /// last and silently lose the rest.</para>
+    /// <para>NOT CALLED FROM <see cref="InstallReadKeys"/>, WHICH IS WHERE THE TRIGGER IS.
+    /// Installing keys happens deep inside the caller's own frame walk - the Handshake keys
+    /// come out of a CRYPTO frame that is still being processed - so replaying from there would
+    /// re-enter a handler whose accumulators are mid-iteration. The keys therefore only ARM the
+    /// replay and the caller drains it at a point where no handler is live.</para>
+    /// <para>TERMINATION. The entry is removed from the buffer BEFORE it is processed, and
+    /// ProcessPacket only ever retains a packet whose level has no keys - which this one's has,
+    /// or it would not have been selected. So a replayed packet cannot re-enter the buffer, and
+    /// each call strictly decreases <see cref="RetainedPacketCount"/> by one. A replayed
+    /// packet's frames may install further keys and make OTHER retained entries replayable, but
+    /// those entries were already in the buffer and are already counted; nothing but a live
+    /// <see cref="Receive"/> of a new datagram can add one. A drain loop therefore runs at most
+    /// <see cref="RetainedPacketCount"/> times, which the retention ceiling bounds.</para>
+    /// <para>EXACTLY-ONCE ACCOUNTING FALLS OUT OF WHERE THE RETAIN BRANCH SITS rather than out
+    /// of bookkeeping here. That branch is the first thing in ProcessPacket, before header
+    /// protection is removed, before RFC 9000 A.3's packet number decode, before the AEAD and
+    /// before s12.3's duplicate window - so a retained packet has touched none of them and the
+    /// replay is its FIRST pass through all four. <see cref="AuthenticationFailures"/> (RFC
+    /// 9001 s6.6's integrity limit) and <see cref="DuplicatesSuppressed"/> are therefore
+    /// incremented at most once, and <c>_largestReceived</c> is both READ and WRITTEN at replay
+    /// time - so A.3's largest_pn is the value in force when the packet is actually opened,
+    /// which is the only value s17.1 lets it be: "the largest packet number received in a
+    /// successfully authenticated packet". Decoding at arrival and re-checking here would have
+    /// been the bug the RFC names, because the number was not yet authenticated then.
+    /// Witnessed by
+    /// TlsQuicPacketReceiverTests.AReplayedPacketEntersTheDuplicateWindowExactlyOnce for s12.3
+    /// and s6.6, and by
+    /// TlsQuicPacketReceiverTests.ARetainedPacketsNumberIsDecodedAgainstTheLargestReceivedAt
+    /// ReplayTime for s17.1 - which builds a truncated number that resolves to 44 against a
+    /// largest of 0 and to 300 against the largest actually in force, and lets the AEAD say
+    /// which one the receiver used.</para>
+    /// <para>Returns a result whose <c>Processed</c>/<c>Discarded</c> describe the one packet.
+    /// When nothing is replayable it returns the empty result and does no work, so a caller may
+    /// use it without consulting <see cref="HasReplayablePacket"/> first.</para>
+    /// </remarks>
+    internal TlsQuicReceiveResult ReplayOneRetainedPacket(TlsQuicFrameHandler handler)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(handler);
+
+        var index = IndexOfReplayable();
+        if (index < 0)
+        {
+            return default;
+        }
+
+        var retained = _retained[index];
+        _retained.RemoveAt(index);
+        _retainedBytes -= retained.Packet.Length;
+        PacketsReplayed++;
+
+        // The same sizing rule Receive uses, and the same reason it zeroes first: the
+        // outgoing array still holds the previous pass's decrypted payload.
+        if (_scratch.Length < retained.Packet.Length)
+        {
+            CryptographicOperations.ZeroMemory(_scratch);
+            _scratch = new byte[retained.Packet.Length];
+        }
+
+        var processed = 0;
+        var discarded = 0;
+        var discardedForMissingKeys = 0;
+
+        // s12.2's connection ID clause is NOT re-applied here, and that is not an omission.
+        // "Receivers SHOULD ignore any subsequent packets with a different Destination
+        // Connection ID than the first packet in the datagram" is a rule about one datagram,
+        // and this packet's datagram was walked and judged when it arrived - by Receive if the
+        // caller handed it whole datagrams, and by the caller itself if it splits, which
+        // TlsQuicConnection.PumpOnceAsync does. Re-running it against whatever datagram happens
+        // to be in flight now would compare a packet against a "first packet" it never shared a
+        // datagram with.
+        var outcome = ProcessPacket(
+            retained.Packet,
+            retained.PacketNumberOffset,
+            retained.Level,
+            retained.IsShortHeader,
+            handler,
+            ref processed,
+            ref discarded,
+            ref discardedForMissingKeys);
+
+        return outcome is not null
+            ? Close(outcome.Value, processed, discarded, discardedForMissingKeys)
+            : new TlsQuicReceiveResult
+            {
+                Processed = processed,
+                Discarded = discarded,
+                DiscardedForMissingKeys = discardedForMissingKeys,
+            };
     }
 
     /// <summary>Arms RFC 9001 s6.3's "next" set of Application read keys - generation n+1,
@@ -484,10 +766,31 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// level are discarded exactly like packets whose keys never arrived - RFC 9000
     /// s12.2's "the keys are not available" case.
     /// </summary>
+    /// <remarks>
+    /// AND THE LEVEL'S RETAINED PACKETS GO WITH THE KEYS. RFC 9001 s4.9.1 states the
+    /// consequence for the level this matters most at: "This results in abandoning loss
+    /// recovery state for the Initial encryption level and ignoring any outstanding Initial
+    /// packets." A packet retained under s5.7 is an outstanding packet at that level and there
+    /// will never again be a key to open it, so retaining it past this point is memory held
+    /// against an event that cannot happen. The level is also barred from retaining anything
+    /// further; see <c>_keysDiscarded</c>.
+    /// </remarks>
     internal void DiscardReadKeys(TlsQuicEncryptionLevel level)
     {
         _keys[(int)level]?.Dispose();
         _keys[(int)level] = null;
+        _keysDiscarded[(int)level] = true;
+
+        for (var i = _retained.Count - 1; i >= 0; i--)
+        {
+            if (_retained[i].Level != level)
+            {
+                continue;
+            }
+
+            _retainedBytes -= _retained[i].Packet.Length;
+            _retained.RemoveAt(i);
+        }
     }
 
     /// <summary>
@@ -793,6 +1096,12 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         // deleting this line was a surviving mutation until that test existed.
         CryptographicOperations.ZeroMemory(_scratch);
         _scratch = [];
+
+        // The RFC 9001 s5.7 buffer holds PROTECTED packets, so there is no plaintext here to
+        // zero - only memory to let go of. Every level's keys have just been disposed above,
+        // so nothing in it could be replayed even if a caller reached this object again.
+        _retained.Clear();
+        _retainedBytes = 0;
     }
 
     // Returns null when the packet was processed or discarded, and a close reason when
@@ -823,6 +1132,32 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             // waiting fixes. See TlsQuicReceiveResult.DiscardedForMissingKeys.
             discarded++;
             discardedForMissingKeys++;
+
+            // AND s12.2's OTHER OPTION IS TAKEN AS WELL AS THE DISCARD, WHICH IS NOT A
+            // CONTRADICTION: the packet is discarded from THIS pass - it contributes no
+            // frames, no acknowledgement and no processed count - and a copy is retained so
+            // that a later pass can open it. RFC 9001 s5.7 is the section that says why this
+            // is worth doing rather than merely allowed: "Due to reordering and loss,
+            // protected packets might be received by an endpoint before the final TLS
+            // handshake messages are received", and "Received packets protected with 1-RTT
+            // keys MAY be stored and later decrypted and used once the handshake is complete."
+            // The same section grants the mirror case a server sees - "The server MAY retain
+            // these packets for later decryption in anticipation of receiving a ClientHello" -
+            // so the permission is not 1-RTT-only in spirit and the retain branch is not
+            // level-specific.
+            //
+            // s5.7 ALSO MAKES THE DELAY MANDATORY IN ONE DIRECTION, and retaining is how this
+            // client obeys it rather than a way around it: "Even if it has 1-RTT secrets, a
+            // client MUST NOT process incoming 1-RTT protected packets before the TLS
+            // handshake is complete." Replay is driven by InstallReadKeys, and the Application
+            // read keys are installed when the handshake completes - so a 1-RTT packet that
+            // arrives early is held, not opened, which is the MUST NOT stated as a mechanism.
+            //
+            // BOUNDED, BECAUSE ANYONE WHO CAN SEND A DATAGRAM CAN FILL THIS. The ceiling is
+            // TlsQuicConnectionSpec.RetainedPacketBufferBytes and refusing is silent: an
+            // over-ceiling packet is simply the discard this branch already performed, which
+            // is s12.2's other option and needs no error of its own.
+            Retain(packet, packetNumberOffset, level, isShortHeader);
             return null;
         }
 
@@ -1181,6 +1516,82 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         _duplicateWindow[space] |= bit;
         return false;
     }
+
+    // RFC 9001 s5.7's retention, refused in two cases and silent in both.
+    //
+    // 1. THE LEVEL'S KEYS ARE GONE FOR GOOD (s4.9). Nothing will ever open this packet, so
+    //    holding it is memory spent on an impossible event - and worse, it is memory an
+    //    off-path sender chooses, because s4.9.1 discards Initial keys early and the Initial
+    //    header is entirely in the clear.
+    // 2. THE CEILING IS FULL. This buffer is filled by whoever can send this endpoint a
+    //    datagram and by nothing else, so an unbounded one is a remote memory-exhaustion
+    //    vector rather than a theoretical one. RFC 9001 s4.3 makes the same point about the
+    //    other place QUIC buffers unauthenticated peer input - buffering fragments "could
+    //    consume excessive resources if the client's address has not yet been validated" -
+    //    and the answer here is the same in kind: a stated bound, refused at the edge.
+    //
+    // BYTES AND NOT A PACKET COUNT, because bytes is the resource and a count is only a
+    // proxy for it: one knob that means what it protects cannot be set to a pair of values
+    // that disagree. The count is bounded as a consequence - every entry costs at least the
+    // smallest packet that reaches this branch, so the default ceiling admits a few hundred
+    // entries at worst - which is what makes the linear scans over this list affordable.
+    //
+    // OLDEST-WINS RATHER THAN EVICTING TO MAKE ROOM. The packets retention is for arrive in a
+    // burst, ahead of one key installation, so the first ones in are the ones the handshake
+    // is waiting on; evicting them to admit later arrivals would let a sender who floods
+    // after the real flight displace exactly the packets that matter.
+    //
+    // Both refusals are witnessed. The ceiling by
+    // TlsQuicPacketReceiverTests.TheRetentionCeilingRefusesThePacketThatWouldCrossItAndKeeps
+    // WhatIsAlreadyHeld and, for the ceiling of zero that turns retention off outright, by
+    // TlsQuicPacketReceiverTests.RetentionIsOffWhenTheCeilingIsZero; the discarded-level bar by
+    // TlsQuicPacketReceiverTests.DiscardingALevelsKeysDropsThePacketsRetainedAtThatLevel, whose
+    // second half re-offers an Initial packet after the discard and asserts nothing is held.
+    private void Retain(
+        ReadOnlySpan<byte> packet,
+        int packetNumberOffset,
+        TlsQuicEncryptionLevel level,
+        bool isShortHeader)
+    {
+        if (_keysDiscarded[(int)level]
+            || packet.Length > _retainedPacketBufferBytes - _retainedBytes)
+        {
+            return;
+        }
+
+        _retained.Add(new RetainedPacket(
+            level, packetNumberOffset, isShortHeader, packet.ToArray()));
+        _retainedBytes += packet.Length;
+        PacketsRetainedForKeys++;
+    }
+
+    // Front to back, so arrival order is replay order; see the _retained field's note.
+    private int IndexOfReplayable()
+    {
+        for (var i = 0; i < _retained.Count; i++)
+        {
+            if (_keys[(int)_retained[i].Level] is not null)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    // One packet held under RFC 9001 s5.7, as it came off the wire. The two header facts are
+    // carried rather than re-parsed because ProcessPacket needs exactly them and the parse
+    // that produced them already ran, on these same bytes, in the pass that retained it.
+    //
+    // THE BYTES ARE STILL PROTECTED and are therefore not secret material: header protection
+    // has not been removed and the AEAD has not been opened, so unlike _scratch there is
+    // nothing here to zero. Replay removes the entry before processing it, so the in-place
+    // unmasking ProcessPacket performs can never be seen by a second replay.
+    private readonly record struct RetainedPacket(
+        TlsQuicEncryptionLevel Level,
+        int PacketNumberOffset,
+        bool IsShortHeader,
+        byte[] Packet);
 
     // RFC 9000 s12.2's receiver half: the first packet in the datagram sets the
     // Destination Connection ID, and every subsequent one must repeat it or be ignored.
