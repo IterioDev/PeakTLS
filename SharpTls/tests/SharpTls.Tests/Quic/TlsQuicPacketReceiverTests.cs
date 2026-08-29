@@ -1401,6 +1401,298 @@ public sealed class TlsQuicPacketReceiverTests
         Assert.Equal(0, forged.DiscardedForMissingKeys);
     }
 
+    // ------------------------------------ RFC 9001 s5.7, retention and replay
+
+    [Fact]
+    public void AHandshakePacketThatArrivedBeforeItsKeysIsReplayedOnceThoseKeysArrive()
+    {
+        // RFC 9001 s5.7: "Due to reordering and loss, protected packets might be received
+        // by an endpoint before the final TLS handshake messages are received", and
+        // "Received packets protected with 1-RTT keys MAY be stored and later decrypted
+        // and used once the handshake is complete."
+        //
+        // THE SAME SHAPE AS ACoalescedPacketWhoseKeysHaveNotArrivedIsCountedApartFromOne
+        // ThatSimplyDoesNotOpen, CONTINUED PAST THE DISCARD. That test pins what a
+        // keyless packet costs the pass it arrived in; this one pins that the cost is no
+        // longer permanent.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var handshake = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        var early = receiver.Receive(handshake, new Recorder(null).Handle);
+
+        // Still discarded FROM THIS PASS - no frame reached the handler and nothing was
+        // processed - and now also retained.
+        Assert.Equal(0, early.Processed);
+        Assert.Equal(1, early.Discarded);
+        Assert.Equal(1, early.DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.PacketsRetainedForKeys);
+        Assert.Equal(1, receiver.RetainedPacketCount);
+        Assert.Equal(0, receiver.PacketsReplayed);
+
+        // AND NOT YET REPLAYABLE, which is the half that says retention is not a way round
+        // s5.7's own MUST NOT: nothing is opened until the keys are actually there.
+        Assert.False(receiver.HasReplayablePacket);
+        Assert.Equal(0UL, receiver.LargestReceived(TlsQuicEncryptionLevel.Handshake));
+
+        InstallHandshake(receiver, keys);
+        Assert.True(receiver.HasReplayablePacket);
+
+        var recorder = new Recorder(null);
+        var replayed = receiver.ReplayOneRetainedPacket(recorder.Handle);
+
+        Assert.Equal(1, replayed.Processed);
+        Assert.Equal(0, replayed.Discarded);
+        Assert.Null(replayed.CloseError);
+        Assert.Equal(1, receiver.PacketsReplayed);
+        Assert.Equal(0, receiver.RetainedPacketCount);
+        Assert.False(receiver.HasReplayablePacket);
+
+        // THE FRAMES REACHED THE HANDLER, at the retained packet's own level and number -
+        // the property that makes a replayed packet indistinguishable from one that had
+        // arrived when its keys were present.
+        Assert.Equal(
+            [TlsQuicFrameType.Ping, TlsQuicFrameType.Padding, TlsQuicFrameType.Padding],
+            recorder.Frames.Select(f => f.Type));
+        Assert.All(recorder.Frames, f => Assert.Equal(TlsQuicEncryptionLevel.Handshake, f.Level));
+        Assert.All(recorder.Frames, f => Assert.Equal(0UL, f.PacketNumber));
+
+        // And a second call has nothing left: replay removes what it replays.
+        Assert.Equal(0, receiver.ReplayOneRetainedPacket(Ignore).Processed);
+        Assert.Equal(1, receiver.PacketsReplayed);
+    }
+
+    [Fact]
+    public void RetentionIsOffWhenTheCeilingIsZero()
+    {
+        // THE NEGATIVE CONTROL FOR THE KNOB, and the pre-s5.7 behaviour kept reachable:
+        // TlsQuicConnectionSpec.RetainedPacketBufferBytes = 0 discards for want of keys and
+        // retains nothing, exactly as this receiver did before retention existed. Without
+        // this row every test above would pass against a receiver that ignored the ceiling.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(
+            Version1, destinationConnectionIdLength: 0, retainedPacketBufferBytes: 0);
+        InstallInitial(receiver, keys);
+
+        var handshake = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        var early = receiver.Receive(handshake, Ignore);
+
+        Assert.Equal(1, early.DiscardedForMissingKeys);
+        Assert.Equal(0, receiver.PacketsRetainedForKeys);
+        Assert.Equal(0, receiver.RetainedPacketCount);
+
+        InstallHandshake(receiver, keys);
+        Assert.False(receiver.HasReplayablePacket);
+        Assert.Equal(0, receiver.ReplayOneRetainedPacket(Ignore).Processed);
+    }
+
+    [Fact]
+    public void TheRetentionCeilingRefusesThePacketThatWouldCrossItAndKeepsWhatIsAlreadyHeld()
+    {
+        // THE BOUND IS THE WHOLE SECURITY ARGUMENT FOR THIS FEATURE. Everything in the
+        // buffer is put there by whoever can send this endpoint a datagram, before any key
+        // has authenticated anything, so an unbounded one is a remote memory-exhaustion
+        // vector - the exact hazard RFC 9001 s4.3 names for QUIC's other buffer of
+        // unauthenticated peer input, which "could consume excessive resources if the
+        // client's address has not yet been validated".
+        //
+        // THE CEILING IS SET FROM THE PACKET RATHER THAN FROM A LITERAL, so the test says
+        // "room for exactly one" and cannot drift when the packet layout changes.
+        using var keys = ServerInitialKeys();
+
+        var first = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+            plaintext: [0x01, 0x00, 0x00], keys);
+        var second = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 1, truncatedPacketNumber: [0x01],
+            plaintext: [0x01, 0x00, 0x00], keys);
+        Assert.Equal(first.Length, second.Length);
+
+        using var receiver = new TlsQuicPacketReceiver(
+            Version1, destinationConnectionIdLength: 0, retainedPacketBufferBytes: first.Length);
+        InstallInitial(receiver, keys);
+
+        Assert.Equal(1, receiver.Receive(first, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.RetainedPacketCount);
+
+        // OVER THE CEILING, AND THE REFUSAL IS SILENT: an over-ceiling packet is simply the
+        // discard RFC 9000 s12.2 already permits, so it needs no error of its own. The
+        // want-of-keys count still rises and the retained count does not, which is the pair
+        // TlsQuicConnection.DeadlineExceeded reports so a stall can be told from reordering.
+        Assert.Equal(1, receiver.Receive(second, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.RetainedPacketCount);
+        Assert.Equal(1, receiver.PacketsRetainedForKeys);
+
+        // OLDEST-WINS: the packet already held is the one that survives, not the one that
+        // arrived last. A buffer that evicted to make room would let a sender who floods
+        // after the real flight displace exactly the packets the handshake is waiting on.
+        InstallHandshake(receiver, keys);
+        var recorder = new Recorder(null);
+        Assert.Equal(1, receiver.ReplayOneRetainedPacket(recorder.Handle).Processed);
+        Assert.All(recorder.Frames, f => Assert.Equal(0UL, f.PacketNumber));
+        Assert.False(receiver.HasReplayablePacket);
+    }
+
+    [Fact]
+    public void DiscardingALevelsKeysDropsThePacketsRetainedAtThatLevel()
+    {
+        // RFC 9001 s4.9.1 states the consequence for the level it matters most at: "This
+        // results in abandoning loss recovery state for the Initial encryption level and
+        // ignoring any outstanding Initial packets." A packet retained under s5.7 is an
+        // outstanding packet, and after the discard there will never be a key to open it.
+        //
+        // TWO LEVELS, so the drop is shown to be SCOPED. A single-level version would pass
+        // against a mutant that cleared the whole buffer.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+
+        var handshake = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+            plaintext: [0x01, 0x00, 0x00], keys);
+        var initial = BuildLongPacket(
+            TlsQuicLongPacketType.Initial, Version1, [], [], [],
+            fullPacketNumber: 0, truncatedPacketNumber: [0x00],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        // NO KEYS AT EITHER LEVEL, so both are retained. Initial keys are deliberately not
+        // installed here: this is the state an endpoint is in after s4.9.1's discard.
+        Assert.Equal(1, receiver.Receive(handshake, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.Receive(initial, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(2, receiver.RetainedPacketCount);
+
+        receiver.DiscardReadKeys(TlsQuicEncryptionLevel.Initial);
+        Assert.Equal(1, receiver.RetainedPacketCount);
+
+        // AND THE LEVEL STOPS ACCEPTING NEW ONES. Without this the buffer refills forever
+        // after s4.9.1 - an Initial header is entirely in the clear, so an off-path sender
+        // chooses what fills it - and crowds out the levels retention exists for.
+        Assert.Equal(1, receiver.Receive(initial, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.RetainedPacketCount);
+        Assert.Equal(2, receiver.PacketsRetainedForKeys);
+
+        // The Handshake packet was untouched by the Initial level's discard.
+        InstallHandshake(receiver, keys);
+        Assert.True(receiver.HasReplayablePacket);
+        Assert.Equal(1, receiver.ReplayOneRetainedPacket(Ignore).Processed);
+
+        // And a discard AFTER retention takes the retained packet with it, which is the
+        // same rule read from the other end.
+        Assert.Equal(1, receiver.Receive(handshake, Ignore).Discarded);
+        receiver.DiscardReadKeys(TlsQuicEncryptionLevel.Handshake);
+        Assert.Equal(0, receiver.RetainedPacketCount);
+    }
+
+    [Fact]
+    public void AReplayedPacketEntersTheDuplicateWindowExactlyOnce()
+    {
+        // RFC 9000 s12.3: "A receiver MUST discard a newly unprotected packet unless it is
+        // certain that it has not processed another packet with the same packet number from
+        // the same packet number space."
+        //
+        // A RETAINED PACKET MUST TOUCH THAT WINDOW ONCE AND AT THE RIGHT MOMENT. Registering
+        // it when it was retained would make the replay itself look like a duplicate and the
+        // packet would be lost a second way; never registering it would let the real
+        // duplicate through. Both mutants are killed by the same three assertions below.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var handshake = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 4, truncatedPacketNumber: [0x04],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        Assert.Equal(1, receiver.Receive(handshake, Ignore).DiscardedForMissingKeys);
+
+        // NOTHING WAS RECORDED AT ARRIVAL. s12.3's window is fed after the AEAD - "Duplicate
+        // suppression MUST happen after removing packet protection" - and a retained packet
+        // has not reached the AEAD at all.
+        Assert.Equal(0, receiver.DuplicatesSuppressed);
+        Assert.Equal(0L, receiver.AuthenticationFailures);
+
+        InstallHandshake(receiver, keys);
+        Assert.Equal(1, receiver.ReplayOneRetainedPacket(Ignore).Processed);
+        Assert.Equal(0, receiver.DuplicatesSuppressed);
+
+        // THE SAME PACKET AGAIN, NOW LIVE. The window has it, so it is suppressed - which is
+        // only true if the replay put it there, once.
+        var again = receiver.Receive(handshake, Ignore);
+        Assert.Equal(0, again.Processed);
+        Assert.Equal(1, again.Discarded);
+        Assert.Equal(0, again.DiscardedForMissingKeys);
+        Assert.Equal(1, receiver.DuplicatesSuppressed);
+
+        // AND s6.6's INTEGRITY LIMIT SAW NOTHING. Neither the retention nor the replay is an
+        // authentication failure, and the duplicate is not one either - it opened.
+        Assert.Equal(0L, receiver.AuthenticationFailures);
+    }
+
+    [Fact]
+    public void ARetainedPacketsNumberIsDecodedAgainstTheLargestReceivedAtReplayTime()
+    {
+        // RFC 9000 s17.1: "The full packet number is then reconstructed based on the number
+        // of significant bits present, the value of those bits, and the largest packet
+        // number received in a successfully authenticated packet." A retained packet's
+        // truncated number is therefore ambiguous until it is opened, and the value it must
+        // be resolved against is the one in force AT REPLAY, not the one that happened to be
+        // current when the bytes arrived.
+        //
+        // THE TWO ANSWERS ARE MADE TO DIFFER ON PURPOSE. The retained packet's Packet Number
+        // field is the single byte 0x2C. RFC 9000 A.3 against largest_pn = 0 resolves that to
+        // 44; against largest_pn = 299 it resolves to 300, because the candidates congruent
+        // to 44 modulo 256 are 44, 300 and 556 and 300 is nearest to the expected 300. The
+        // packet is SEALED at 300, and RFC 9001 s5.3 builds the AEAD nonce from the decoded
+        // number - so a receiver that had decoded at arrival would open nothing here and the
+        // packet would land in AuthenticationFailures instead of Processed. The AEAD is the
+        // oracle; nothing in this test asserts the number directly.
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        var retained = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 300, truncatedPacketNumber: [0x2C],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        Assert.Equal(1, receiver.Receive(retained, Ignore).DiscardedForMissingKeys);
+        Assert.Equal(0UL, receiver.LargestReceived(TlsQuicEncryptionLevel.Handshake));
+
+        InstallHandshake(receiver, keys);
+
+        // A LIVE PACKET FIRST, WHICH IS WHAT MOVES largest_pn. Two bytes, so it decodes to
+        // 299 against a largest of 0 with no ambiguity of its own.
+        var live = BuildLongPacket(
+            TlsQuicLongPacketType.Handshake, Version1, [], [], null,
+            fullPacketNumber: 299, truncatedPacketNumber: [0x01, 0x2B],
+            plaintext: [0x01, 0x00, 0x00], keys);
+
+        Assert.Equal(1, receiver.Receive(live, Ignore).Processed);
+        Assert.Equal(299UL, receiver.LargestReceived(TlsQuicEncryptionLevel.Handshake));
+
+        var recorder = new Recorder(null);
+        var replayed = receiver.ReplayOneRetainedPacket(recorder.Handle);
+
+        Assert.Equal(1, replayed.Processed);
+        Assert.Equal(0L, receiver.AuthenticationFailures);
+        Assert.All(recorder.Frames, f => Assert.Equal(300UL, f.PacketNumber));
+
+        // s17.1's own words, applied to a packet that authenticated on the replay: the
+        // largest received moves to 300 now, and not when the bytes first arrived.
+        Assert.Equal(300UL, receiver.LargestReceived(TlsQuicEncryptionLevel.Handshake));
+    }
+
     // Reaches the receiver's scratch the only way a caller ever can, and with no
     // test-only accessor on the production type: a dispatched frame's ReadOnlyMemory IS
     // a window onto that buffer - which is exactly what
