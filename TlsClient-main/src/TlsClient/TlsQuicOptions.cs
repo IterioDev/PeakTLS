@@ -236,6 +236,13 @@ public sealed class TlsQuicOptions
     // parameter of Snapshot.
     private static readonly string AssociationWaitParameter = nameof(AssociationWaitTimeout);
 
+    // Same reason again: these two rejections belong to their properties, not to Snapshot.
+    private static readonly string AssociationLivenessParameter =
+        nameof(AssociationLivenessDeadline);
+
+    private static readonly string AssociationAttemptsParameter =
+        nameof(MaximumAssociationAttempts);
+
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
     // already declares both. That is four silent drift hazards: change TlsQuicConnectionSpec's
@@ -300,6 +307,55 @@ public sealed class TlsQuicOptions
     /// </remarks>
     public TimeSpan AssociationWaitTimeout { get; set; } =
         Socks5AssociationGate.DefaultWaitTimeout;
+
+    /// <summary>
+    /// Gets or sets how long a fresh RFC 1928 section 7 UDP association has to relay its first
+    /// inbound datagram before it is judged dead and re-established. The default is two
+    /// seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>THIS IS A LIVENESS PROBE, NOT A HANDSHAKE BUDGET. Six to eight per cent of fresh
+    /// ASSOCIATEs succeed at the protocol level and then relay nothing at all, forever; the
+    /// discriminator against every other failure is that a WORKING association answers within
+    /// one round trip and a dead one never answers at all. Two seconds is roughly an order of
+    /// magnitude more than a bad round trip through a proxy, so it is generous against a
+    /// healthy path while turning a stall from a full handshake timeout into a couple of
+    /// seconds and a re-dial.</para>
+    /// <para>IT ONLY EVER SHORTENS THE FIRST ATTEMPTS. The moment any datagram comes back —
+    /// including one the <see cref="TlsQuicSocks5RelaySource"/> policy discards — this stops
+    /// applying and the dial gets the whole handshake budget it always had. The LAST attempt
+    /// is not probed at all: it runs on the full handshake timeout, so a genuinely slow path
+    /// whose round trip exceeds this value still connects rather than being re-dialled to
+    /// exhaustion.</para>
+    /// <para>DIRECT DIALS IGNORE IT ENTIRELY. There is no association to be dead without a
+    /// proxy, so this value is never read on that path.</para>
+    /// </remarks>
+    public TimeSpan AssociationLivenessDeadline { get; set; } =
+        Http3Connection.DefaultAssociationLivenessDeadline;
+
+    /// <summary>
+    /// Gets or sets how many RFC 1928 section 7 UDP associations one proxied HTTP/3 dial may
+    /// open before giving up. The default is three; one disables re-association.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE ARITHMETIC IS WHY IT IS THREE. At the observed six to eight per cent
+    /// per-association failure rate, one attempt leaves that same 6-8% of dials failing, two
+    /// leaves about 0.5%, and three about 0.04%. One in two hundred requests is still a
+    /// user-visible defect at any volume; one in twenty-five hundred is noise.</para>
+    /// <para>WHAT IT COSTS IS BOUNDED AND SMALL. Only a dead association is retried, and it is
+    /// abandoned after <see cref="AssociationLivenessDeadline"/> rather than after the
+    /// handshake timeout, so the worst case a GENUINE network failure pays is two extra
+    /// liveness deadlines — about four seconds — before the same failure is reported. Against
+    /// the ten-second handshake timeout those dials were already spending, and against six per
+    /// cent of dials dropping from a ten-second failure to a two-second retry, that is a large
+    /// net win.</para>
+    /// <para>A FAILED OR REFUSED ASSOCIATE IS NOT RETRIED HERE. This counts associations that
+    /// were ESTABLISHED and then proved dead. A refused RFC 1928 section 6 reply, a rejected
+    /// RFC 1929 authentication or an unreachable proxy is a named, immediate failure and is
+    /// reported as one.</para>
+    /// </remarks>
+    public int MaximumAssociationAttempts { get; set; } =
+        Http3Connection.DefaultMaximumAssociationAttempts;
 
     /// <summary>
     /// Gets or sets what this client writes into RFC 9000 section 17.4's latency spin bit on
@@ -546,6 +602,32 @@ public sealed class TlsQuicOptions
                 $"{nameof(Timeout)}.{nameof(Timeout.InfiniteTimeSpan)} to wait indefinitely.");
         }
 
+        // A NON-POSITIVE LIVENESS DEADLINE WOULD DECLARE EVERY ASSOCIATION DEAD ON ARRIVAL and
+        // burn the whole attempt budget before a single datagram could physically arrive, so it
+        // is refused here rather than discovered as a session that cannot dial through a proxy
+        // at all. Unlike the wait timeout there is no infinite case: "wait forever for the first
+        // datagram" is spelled by setting MaximumAssociationAttempts to 1, which switches the
+        // probe off and leaves the handshake timeout as the only bound.
+        if (AssociationLivenessDeadline <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                AssociationLivenessParameter,
+                AssociationLivenessDeadline,
+                $"{AssociationLivenessParameter} must be positive. Set " +
+                $"{AssociationAttemptsParameter} to 1 to disable re-association instead.");
+        }
+
+        // ZERO OR NEGATIVE ATTEMPTS WOULD DIAL NOTHING AT ALL. One is the meaningful floor and
+        // means "associate once, never retry", which is the behaviour that predates this knob.
+        if (MaximumAssociationAttempts < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                AssociationAttemptsParameter,
+                MaximumAssociationAttempts,
+                $"{AssociationAttemptsParameter} must be at least 1; 1 disables " +
+                "re-association.");
+        }
+
         var connectionSpec = new TlsQuicConnectionSpec
         {
             SourceConnectionIdLength = SourceConnectionIdLength,
@@ -587,7 +669,9 @@ public sealed class TlsQuicOptions
             configureClientHello,
             ConfigureTls,
             HandshakeDeadline,
-            AssociationWaitTimeout);
+            AssociationWaitTimeout,
+            AssociationLivenessDeadline,
+            MaximumAssociationAttempts);
     }
 }
 
@@ -603,4 +687,6 @@ internal sealed record TlsQuicConfiguration(
     Action<ClientHelloBuilder> ConfigureClientHello,
     Action<CustomTlsQuicClientOptions>? ConfigureTls,
     TimeSpan? HandshakeDeadline,
-    TimeSpan AssociationWaitTimeout);
+    TimeSpan AssociationWaitTimeout,
+    TimeSpan AssociationLivenessDeadline,
+    int MaximumAssociationAttempts);

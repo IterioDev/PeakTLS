@@ -58,6 +58,37 @@ public enum TlsConnectEventKind
     /// reports nothing.</para>
     /// </remarks>
     Socks5AssociationGateEntered,
+
+    /// <summary>
+    /// A proxied HTTP/3 dial abandoned an RFC 1928 section 7 UDP association that had been
+    /// established but never relayed a single inbound datagram, and is opening a fresh one.
+    /// </summary>
+    /// <remarks>
+    /// <para>WHAT IT MEANS: the ASSOCIATE succeeded — control connection up, section 6 reply
+    /// well-formed, a routable BND returned — and then nothing whatsoever came back within
+    /// <see cref="TlsQuicOptions.AssociationLivenessDeadline"/>. Six to eight per cent of fresh
+    /// associations behave this way, independent of load, so this firing occasionally is the
+    /// system working rather than a fault.</para>
+    /// <para>THREE OUTCOMES, AND THIS EVENT SEPARATES ALL OF THEM when read alongside the
+    /// dial's own result, which is what makes the fix measurable at all:</para>
+    /// <list type="bullet">
+    /// <item>NEVER NEEDED TO RETRY — the dial returned a connection and emitted no event with
+    /// this kind for its <see cref="TlsConnectEvent.ConnectionId"/>.</item>
+    /// <item>RETRIED AND SUCCEEDED — the dial returned a connection and emitted one or more.
+    /// <see cref="TlsConnectEvent.AddressCount"/> carries the number of the attempt being
+    /// abandoned, so the highest one plus one is the attempt that worked.</item>
+    /// <item>RETRIED AND STILL FAILED — the dial threw, having emitted
+    /// <see cref="TlsQuicOptions.MaximumAssociationAttempts"/> minus one of these. The
+    /// exception says so in words rather than reporting a bare timeout.</item>
+    /// </list>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> is how long the abandoned association was
+    /// given, and <see cref="TlsConnectEvent.Exception"/> is the failure that ended it — kept
+    /// because a dead association and a genuinely broken path are told apart by this event
+    /// being present, never by the exception, which looks the same either way.</para>
+    /// <para>Emitted only for a proxied HTTP/3 dial. A direct UDP dial has no association to be
+    /// dead and never reports this.</para>
+    /// </remarks>
+    Socks5AssociationRetried,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

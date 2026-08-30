@@ -272,6 +272,13 @@ public sealed class Socks5AssociationGateTests
             ConnectObserver = observer,
         };
         options.Quic.AssociationWaitTimeout = TimeSpan.FromSeconds(5);
+
+        // ONE ASSOCIATION PER DIAL, BECAUSE THIS FILE COUNTS ASSOCIATIONS. The double's relay
+        // is a black hole, which is precisely the dead association Http3Connection now
+        // re-establishes, so with the default of three attempts every dial here would open
+        // three ASSOCIATEs and every count below would read triple. Re-association has its own
+        // file; what is measured here is the gate.
+        options.Quic.MaximumAssociationAttempts = 1;
         var configuration = options.Snapshot();
 
         await Http3Connection.CreateAsync(
@@ -305,25 +312,37 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
 {
     private readonly TcpListener _listener;
     private readonly Socket _blackHole;
+    private readonly Socket _echo;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ConcurrentBag<Socket> _controlConnections = [];
     private readonly TaskCompletionSource _release =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly bool _holdAssociates;
+    private readonly int _relayFromAssociate;
     private readonly Task _accept;
+    private readonly Task _echoLoop;
     private int _refusalsRemaining;
     private int _pending;
     private int _maximumPending;
     private int _associates;
 
-    private Socks5SetupServer(TcpListener listener, Socket blackHole, bool hold, int refusals)
+    private Socks5SetupServer(
+        TcpListener listener,
+        Socket blackHole,
+        Socket echo,
+        bool hold,
+        int refusals,
+        int relayFromAssociate)
     {
         _listener = listener;
         _blackHole = blackHole;
+        _echo = echo;
         _holdAssociates = hold;
         _refusalsRemaining = refusals;
+        _relayFromAssociate = relayFromAssociate;
         ProxyEndPoint = (IPEndPoint)listener.LocalEndpoint;
         _accept = Task.Run(() => AcceptLoopAsync(_lifetime.Token));
+        _echoLoop = Task.Run(() => EchoLoopAsync(_lifetime.Token));
     }
 
     public IPEndPoint ProxyEndPoint { get; }
@@ -334,9 +353,16 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
 
     public int AssociateCount => Volatile.Read(ref _associates);
 
+    /// <param name="relayFromAssociate">The one-based ASSOCIATE from which the advertised
+    /// relay actually carries traffic, or <see langword="null"/> for a server whose relay is
+    /// always a black hole. This is what distinguishes an association that is DEAD from one
+    /// that merely leads nowhere useful, which is the only distinction the re-association
+    /// logic is allowed to act on: 2 makes the first association dead and the second alive,
+    /// which is the shape the field failure takes.</param>
     public static Socks5SetupServer Start(
         bool holdAssociates = false,
-        bool refuseFirstAssociate = false)
+        bool refuseFirstAssociate = false,
+        int? relayFromAssociate = null)
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -346,7 +372,22 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
         var blackHole = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         blackHole.Bind(new IPEndPoint(IPAddress.Loopback, 0));
 
-        return new Socks5SetupServer(listener, blackHole, holdAssociates, refuseFirstAssociate ? 1 : 0);
+        // THE LIVE RELAY, AND ECHOING IS ENOUGH TO BE ONE. What proves an association carries
+        // traffic is that SOMETHING comes back through it, not that the something is useful:
+        // the client's own datagram bounced back already carries the RFC 1928 section 7 header
+        // it sent, so it decapsulates cleanly and reaches the QUIC layer, which discards it as
+        // an unknown connection ID. That is exactly the state the re-association logic must
+        // treat as alive.
+        var echo = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        echo.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+
+        return new Socks5SetupServer(
+            listener,
+            blackHole,
+            echo,
+            holdAssociates,
+            refuseFirstAssociate ? 1 : 0,
+            relayFromAssociate ?? int.MaxValue);
     }
 
     /// <summary>The proxy for one sticky session. The username is what makes it one: it is
@@ -379,19 +420,47 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
         await _lifetime.CancelAsync();
         _listener.Stop();
         _blackHole.Dispose();
+        _echo.Dispose();
         foreach (var socket in _controlConnections)
         {
             socket.Dispose();
         }
         try
         {
-            await _accept;
+            await Task.WhenAll(_accept, _echoLoop);
         }
         catch (Exception)
         {
             // Shutdown races are not findings.
         }
         _lifetime.Dispose();
+    }
+
+    /// <summary>Bounces every datagram straight back to whoever sent it.</summary>
+    /// <remarks>Runs whether or not any test advertises this socket as BND; an unadvertised
+    /// echo socket simply never receives anything. Starting it unconditionally keeps the
+    /// server's shutdown path identical in both modes.</remarks>
+    private async Task EchoLoopAsync(CancellationToken cancellationToken)
+    {
+        var buffer = new byte[64 * 1024];
+        var from = new IPEndPoint(IPAddress.Any, 0);
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var received = await _echo.ReceiveFromAsync(
+                    buffer, SocketFlags.None, from, cancellationToken);
+                await _echo.SendToAsync(
+                    buffer.AsMemory(0, received.ReceivedBytes),
+                    SocketFlags.None,
+                    received.RemoteEndPoint,
+                    cancellationToken);
+            }
+        }
+        catch (Exception)
+        {
+            // Every end of this loop is a test tearing the server down.
+        }
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
@@ -448,7 +517,7 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
             };
             _ = await ReadExactAsync(socket, addressLength + 2, cancellationToken);
 
-            Interlocked.Increment(ref _associates);
+            var ordinal = Interlocked.Increment(ref _associates);
             var pending = Interlocked.Increment(ref _pending);
             InterlockedMaximum(ref _maximumPending, pending);
             try
@@ -458,9 +527,16 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
                     await _release.Task.WaitAsync(cancellationToken);
                 }
 
-                // RFC 1928 section 6: VER | REP | RSV | ATYP | BND.ADDR | BND.PORT.
+                // RFC 1928 section 6: VER | REP | RSV | ATYP | BND.ADDR | BND.PORT. Which
+                // socket is named here is what makes an association dead or alive, and the
+                // reply is identical either way — which is the whole difficulty the client
+                // faces: a successful ASSOCIATE says nothing about whether anything will be
+                // relayed.
                 var refuse = Interlocked.Decrement(ref _refusalsRemaining) >= 0;
-                var address = ((IPEndPoint)_blackHole.LocalEndPoint!).Address.GetAddressBytes();
+                var bnd = (IPEndPoint)(ordinal >= _relayFromAssociate
+                    ? _echo.LocalEndPoint!
+                    : _blackHole.LocalEndPoint!);
+                var address = bnd.Address.GetAddressBytes();
                 var reply = new byte[4 + address.Length + 2];
                 reply[0] = 0x05;
                 reply[1] = refuse ? (byte)0x01 : (byte)0x00; // X'01' general SOCKS server failure.
@@ -468,7 +544,7 @@ internal sealed class Socks5SetupServer : IAsyncDisposable
                 address.CopyTo(reply, 4);
                 BinaryPrimitives.WriteUInt16BigEndian(
                     reply.AsSpan(4 + address.Length),
-                    (ushort)((IPEndPoint)_blackHole.LocalEndPoint!).Port);
+                    (ushort)bnd.Port);
                 await socket.SendAsync(reply, cancellationToken);
             }
             finally

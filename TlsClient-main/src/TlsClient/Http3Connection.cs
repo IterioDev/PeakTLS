@@ -48,6 +48,31 @@ internal sealed class Http3Connection : IHttpConnection
     /// bound on its own once that lifetime is minutes long.</summary>
     private static readonly TimeSpan DefaultHandshakeTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How long a fresh RFC 1928 section 7 UDP association has to relay its first inbound
+    /// datagram before it is judged dead: two seconds.
+    /// </summary>
+    /// <remarks>A WORKING ASSOCIATION ANSWERS WITHIN A ROUND TRIP AND A DEAD ONE NEVER ANSWERS,
+    /// which is what makes so short a bound safe. Two seconds is roughly ten to twenty times a
+    /// bad round trip through a proxy to an origin, so a healthy dial is never near it, while a
+    /// stall costs two seconds and a re-association instead of the whole handshake timeout.
+    /// <c>TlsQuicOptions.AssociationLivenessDeadline</c> widens it for a path where that
+    /// headroom is not enough.</remarks>
+    internal static readonly TimeSpan DefaultAssociationLivenessDeadline =
+        TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// How many RFC 1928 section 7 UDP associations one proxied dial may open before giving up:
+    /// three.
+    /// </summary>
+    /// <remarks>SIX TO EIGHT PER CENT OF FRESH ASSOCIATIONS NEVER RELAY, independently of load,
+    /// so the residual failure rate is that figure raised to the number of attempts: about 0.5%
+    /// at two and 0.04% at three. One in two hundred requests failing is still a user-visible
+    /// defect; one in twenty-five hundred is not. The price is paid only by a dial that is
+    /// genuinely broken, and it is two extra liveness deadlines - about four seconds - before
+    /// the same failure is reported.</remarks>
+    internal const int DefaultMaximumAssociationAttempts = 3;
+
     private readonly ITlsQuicDatagramTransport _transport;
     private readonly TlsQuicConnection _connection;
     private readonly TlsQuicHttp3Connection _http3;
@@ -217,110 +242,225 @@ internal sealed class Http3Connection : IHttpConnection
         Debug.Assert(
             proxy is null || proxy.Type == TlsProxyType.Socks5,
             "HttpConnectionFactory must reject non-SOCKS5 proxies before reaching here.");
-        var transport = proxy is null
-            ? TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily)
-            : await AssociateAsync(
-                origin,
-                proxy,
-                configuration,
-                associationGate,
-                connectionId,
-                cancellationToken).ConfigureAwait(false);
-        TlsQuicConnection? connection = null;
-        CustomTlsQuicClient? tlsClient = null;
-        try
-        {
-            connection = new TlsQuicConnection(
-                new TlsQuicConnectionOptions(transport, endPoint, spec)
-                {
-                    // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
-                    // how long a healthy connection may be REUSED from the pool - minutes -
-                    // and handing it to a handshake deadline SharpTls defaults to ten seconds
-                    // meant the deadline could never fire: the real bound was the outer
-                    // HandshakeTimeout CTS below, and this line was dead configuration wearing
-                    // a misleading name. TlsQuicOptions.HandshakeDeadline is the knob for it;
-                    // null leaves SharpTls's own default in place.
-                    HandshakeDeadline = configuration.Quic.HandshakeDeadline
-                        ?? SharpTlsHandshakeDeadline,
-                    IdleTimeout = Bounded(
-                        configuration.PooledConnectionIdleTimeout,
-                        DefaultIdleTimeout),
-                },
-                source => tlsClient = CreateTlsClient(
-                    origin, configuration, factory, tls13SessionCache, source));
 
-            using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken);
-            handshake.CancelAfter(HandshakeTimeout(configuration));
+        // ONLY A PROXIED DIAL HAS AN ASSOCIATION THAT CAN BE DEAD. A direct dial is pinned to
+        // one attempt, is never wrapped, and never pays a liveness probe - there is no RFC 1928
+        // relay between this socket and the origin for a re-dial to replace, so retrying would
+        // simply be retrying the network, which is not this method's job.
+        var attempts = proxy is null ? 1 : configuration.Quic.MaximumAssociationAttempts;
+        for (var attempt = 1; ; attempt++)
+        {
+            // From before the ASSOCIATE, so a retry reports what the whole abandoned attempt
+            // cost - its queue at the gate, its setup exchange and its dead liveness window -
+            // rather than only the part after the association was open. That total is what a
+            // latency budget is spent from.
+            var attemptStartedAt = Stopwatch.GetTimestamp();
+
+            // A FRESH ASSOCIATE PER ATTEMPT, WHICH IS THE ENTIRE POINT: the previous one proved
+            // it does not relay, and it is the association that is broken rather than anything
+            // above it. AssociateAsync takes and releases the per-session gate inside itself, so
+            // each attempt queues for its turn like any other dial and none of them is holding a
+            // slot while this loop waits - see its remarks for why that boundary is load-bearing.
+            var relay = proxy is null
+                ? null
+                : new Socks5LivenessTransport(
+                    await AssociateAsync(
+                        origin,
+                        proxy,
+                        configuration,
+                        associationGate,
+                        connectionId,
+                        cancellationToken).ConfigureAwait(false));
+            ITlsQuicDatagramTransport transport =
+                relay ?? TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily);
+            TlsQuicConnection? connection = null;
+            CustomTlsQuicClient? tlsClient = null;
             try
             {
-                await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (
-                handshake.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new HttpRequestException(
-                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
-                    $"within {HandshakeTimeout(configuration)}.");
-            }
-            catch (Exception exception) when (
-                exception is TimeoutException or InvalidOperationException)
-            {
-                throw new HttpRequestException(
-                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
-                    exception);
-            }
+                connection = new TlsQuicConnection(
+                    new TlsQuicConnectionOptions(transport, endPoint, spec)
+                    {
+                        // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
+                        // how long a healthy connection may be REUSED from the pool - minutes -
+                        // and handing it to a handshake deadline SharpTls defaults to ten
+                        // seconds meant the deadline could never fire: the real bound was the
+                        // outer HandshakeTimeout CTS below, and this line was dead configuration
+                        // wearing a misleading name. TlsQuicOptions.HandshakeDeadline is the
+                        // knob for it; null leaves SharpTls's own default in place.
+                        HandshakeDeadline = configuration.Quic.HandshakeDeadline
+                            ?? SharpTlsHandshakeDeadline,
+                        IdleTimeout = Bounded(
+                            configuration.PooledConnectionIdleTimeout,
+                            DefaultIdleTimeout),
+                    },
+                    source => tlsClient = CreateTlsClient(
+                        origin, configuration, factory, tls13SessionCache, source));
 
-            if (tlsClient?.NegotiatedApplicationProtocol !=
-                TlsQuicClientHelloProfileFactory.Http3AlpnToken)
-            {
-                throw new HttpRequestException(
-                    "The peer did not select ALPN 'h3', so this connection cannot carry " +
-                    $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
-            }
+                var handshakeTimeout = HandshakeTimeout(configuration);
 
-            // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
-            // constructor refuses unless the ClientHello also advertised a non-zero
-            // max_datagram_frame_size. The default transport parameter preset does, so the
-            // pair agrees by construction — a narrowed preset that drops 0x20 would be told
-            // here rather than by a peer's H3_SETTINGS_ERROR.
-            var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
-            http3.OpenLocalStreams();
-            if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
-            {
-                throw new HttpRequestException(
-                    "The HTTP/3 control stream could not be opened: the QUIC connection had " +
-                    "nothing to send.");
-            }
+                // THE LIVENESS PROBE ONLY SHORTENS ATTEMPTS THAT CAN STILL BE RETRIED. A dead
+                // association never answers, so waiting the full handshake timeout on one buys
+                // nothing but the timeout; cutting it at a second or two costs a retry instead.
+                // The LAST attempt is deliberately not probed and runs on the whole budget, so a
+                // path that is merely slow - a round trip longer than the liveness deadline -
+                // still connects rather than being re-dialled to exhaustion, and the failure
+                // finally reported is the one the network actually produced.
+                var probing = relay is not null && attempt < attempts;
+                var deadline = probing
+                    ? Shorter(configuration.Quic.AssociationLivenessDeadline, handshakeTimeout)
+                    : handshakeTimeout;
 
-            var allowance = (int)Math.Min(
-                connection.PeerFlowControl.InitialMaxStreamsBidi,
-                int.MaxValue);
-            var idleBudget = connection.EffectiveIdleTimeout() is { } effective
-                ? TimeSpan.FromTicks(effective.Ticks / 2)
-                : (TimeSpan?)null;
-            var result = new Http3Connection(
-                transport,
-                connection,
-                http3,
-                BuildTlsInfo(configuration, tlsClient),
-                allowance,
-                idleBudget);
-            // Started here rather than in the constructor so that the loop cannot observe a
-            // half-built connection, and only once everything above succeeded — a connection
-            // that failed the handshake is disposed by the catch below, which has no loop to
-            // stop.
-            result._multiplexer.Start();
-            return result;
-        }
-        catch
-        {
-            if (connection is not null)
-            {
-                await connection.DisposeAsync().ConfigureAwait(false);
+                using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+                var startedAt = Stopwatch.GetTimestamp();
+                if (probing)
+                {
+                    // ONE DATAGRAM ENDS THE PROBE. Its arrival is proof that the association
+                    // relays, which is the only thing being asked; everything after that is an
+                    // ordinary handshake and gets the ordinary budget back. Measured from this
+                    // dial's start rather than from now, so a live connection is bounded exactly
+                    // as it was before the probe existed and never more generously.
+                    relay!.OnFirstInboundDatagram = () =>
+                    {
+                        try
+                        {
+                            var remaining =
+                                handshakeTimeout - Stopwatch.GetElapsedTime(startedAt);
+                            handshake.CancelAfter(
+                                remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // The handshake already finished and disposed the source underneath
+                            // the receive loop that called this. There is nothing left to
+                            // extend, and instrumentation must never fail a connection.
+                        }
+                    };
+                }
+                handshake.CancelAfter(deadline);
+                try
+                {
+                    await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (
+                    handshake.IsCancellationRequested &&
+                    !cancellationToken.IsCancellationRequested)
+                {
+                    throw new HttpRequestException(
+                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
+                        $"within {deadline}.");
+                }
+                catch (Exception exception) when (
+                    exception is TimeoutException or InvalidOperationException)
+                {
+                    throw new HttpRequestException(
+                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
+                        exception);
+                }
+
+                if (tlsClient?.NegotiatedApplicationProtocol !=
+                    TlsQuicClientHelloProfileFactory.Http3AlpnToken)
+                {
+                    throw new HttpRequestException(
+                        "The peer did not select ALPN 'h3', so this connection cannot carry " +
+                        $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
+                }
+
+                // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
+                // constructor refuses unless the ClientHello also advertised a non-zero
+                // max_datagram_frame_size. The default transport parameter preset does, so the
+                // pair agrees by construction — a narrowed preset that drops 0x20 would be told
+                // here rather than by a peer's H3_SETTINGS_ERROR.
+                var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
+                http3.OpenLocalStreams();
+                if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    throw new HttpRequestException(
+                        "The HTTP/3 control stream could not be opened: the QUIC connection had " +
+                        "nothing to send.");
+                }
+
+                var allowance = (int)Math.Min(
+                    connection.PeerFlowControl.InitialMaxStreamsBidi,
+                    int.MaxValue);
+                var idleBudget = connection.EffectiveIdleTimeout() is { } effective
+                    ? TimeSpan.FromTicks(effective.Ticks / 2)
+                    : (TimeSpan?)null;
+                var result = new Http3Connection(
+                    transport,
+                    connection,
+                    http3,
+                    BuildTlsInfo(configuration, tlsClient),
+                    allowance,
+                    idleBudget);
+                // Started here rather than in the constructor so that the loop cannot observe a
+                // half-built connection, and only once everything above succeeded — a connection
+                // that failed the handshake is disposed by the catch below, which has no loop to
+                // stop.
+                result._multiplexer.Start();
+                return result;
             }
-            await transport.DisposeAsync().ConfigureAwait(false);
-            throw;
+            catch (Exception exception)
+            {
+                if (connection is not null)
+                {
+                    await connection.DisposeAsync().ConfigureAwait(false);
+                }
+                await transport.DisposeAsync().ConfigureAwait(false);
+
+                // THE DISCRIMINATOR, AND IT IS DELIBERATELY NARROW. Only an association that
+                // relayed NOTHING is re-dialled. If a single datagram came back — even one the
+                // relay-source policy or the RFC 1928 section 7 header parser threw away — the
+                // association demonstrably works and whatever failed, failed above it: a
+                // rejected ClientHello, a peer that will not speak h3, replies arriving from an
+                // address the policy is discarding. Retrying THOSE would hide a real defect
+                // behind a re-dial, which is exactly how the last several bugs in this stack
+                // stayed hidden. A caller who cancelled is never retried either; their intent
+                // outranks any recovery of ours.
+                if (relay is null ||
+                    !relay.RelayedNothing ||
+                    cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                if (attempt >= attempts)
+                {
+                    // NAMES THE CAUSE RATHER THAN REPORTING A BARE TIMEOUT. "The handshake timed
+                    // out" is what this looked like for three rounds of investigation and it
+                    // pointed at the QUIC layer, which was innocent every time. DropSummary is
+                    // spliced in because its all-zero form is the positive statement that
+                    // nothing reached the socket, which is the finding.
+                    throw new HttpRequestException(
+                        $"The SOCKS5 UDP association to '{origin.IdnHost}' through " +
+                        $"'{proxy!.Address.IdnHost}' was established {attempts} time(s) and " +
+                        $"relayed no inbound datagram at all. Each RFC 1928 section 7 UDP " +
+                        $"ASSOCIATE succeeded and returned a relay endpoint, and nothing ever " +
+                        $"came back from it, so the association is dead rather than the origin " +
+                        $"unreachable. Raise " +
+                        $"{nameof(TlsQuicOptions)}." +
+                        $"{nameof(TlsQuicOptions.MaximumAssociationAttempts)} to re-associate " +
+                        $"more often, or " +
+                        $"{nameof(TlsQuicOptions.AssociationLivenessDeadline)} (currently " +
+                        $"{configuration.Quic.AssociationLivenessDeadline}) if the path is " +
+                        $"merely slow. {relay.DropSummary}",
+                        exception);
+                }
+
+                // Reported only once the decision to retry is final, and carrying the failure
+                // that ended the dead association, so a run's re-association count is readable
+                // straight off the observer. AddressCount is the attempt being abandoned:
+                // its absence for a connection means the first association worked.
+                TlsConnectTelemetry.Emit(
+                    configuration.ConnectObserver,
+                    connectionId,
+                    TlsConnectEventKind.Socks5AssociationRetried,
+                    origin.IdnHost,
+                    origin.Port,
+                    addressCount: attempt,
+                    elapsed: Stopwatch.GetElapsedTime(attemptStartedAt),
+                    exception: exception);
+            }
         }
     }
 
@@ -346,7 +486,12 @@ internal sealed class Http3Connection : IHttpConnection
     /// <c>try</c> at all: <see cref="Socks5AssociationGate.EnterAsync"/> throws without taking
     /// the slot, so there is nothing owed and nothing to release.</para>
     /// </remarks>
-    private static async ValueTask<ITlsQuicDatagramTransport> AssociateAsync(
+    /// <returns>The concrete relay rather than the interface, which is what
+    /// <c>TlsQuicSocks5Transport.ConnectAsync</c> hands back and deliberately so: the caller
+    /// needs its drop counters and its <c>DropSummary</c> to tell a dead association apart from
+    /// a live one whose replies are being discarded, and the interface exposes neither.
+    /// </returns>
+    private static async ValueTask<TlsQuicSocks5Transport> AssociateAsync(
         Uri origin,
         TlsProxy proxy,
         TlsSessionConfiguration configuration,
@@ -991,4 +1136,12 @@ internal sealed class Http3Connection : IHttpConnection
     /// not a legal QUIC deadline, so it falls back rather than throwing.</remarks>
     private static TimeSpan Bounded(TimeSpan configured, TimeSpan fallback) =>
         configured > TimeSpan.Zero && configured < TimeSpan.MaxValue ? configured : fallback;
+
+    /// <summary>The smaller of two deadlines.</summary>
+    /// <remarks>THE LIVENESS PROBE MUST NEVER LENGTHEN A HANDSHAKE. A session with a short
+    /// <c>Timeout</c> - half a second, say - would otherwise have its dial stretched to the
+    /// two-second liveness default by a feature whose entire purpose is to make failures
+    /// faster.</remarks>
+    private static TimeSpan Shorter(TimeSpan left, TimeSpan right) =>
+        left < right ? left : right;
 }
