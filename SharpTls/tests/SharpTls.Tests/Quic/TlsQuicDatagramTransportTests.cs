@@ -563,4 +563,155 @@ public sealed class TlsQuicDatagramTransportTests
             transport.MaxDatagramPayloadSize);
         Assert.Null(relay.BackgroundException);
     }
+
+    /// <summary>
+    /// A pooled relay that answers from an ephemeral port other than the BND.PORT it advertised
+    /// is still this association's traffic. RFC 1928 section 7 constrains BND in one direction
+    /// only — "In the reply to a UDP ASSOCIATE request, the BND.PORT and BND.ADDR fields
+    /// indicate the port number/address where the client MUST send UDP request messages to be
+    /// relayed" — and says of the reply only that the relay "MUST encapsulate that datagram
+    /// using the above UDP request header". Section 6 already warns the two need not match:
+    /// "The supplied BND.ADDR is often different from the IP address that the client uses to
+    /// reach the SOCKS server, since such servers are often multi-homed."
+    /// </summary>
+    /// <remarks>
+    /// Before the fix this test hangs and the assertion reads:
+    /// "System.TimeoutException : The operation has timed out." — because the receive loop's
+    /// `_relayEndPoint.Equals(result.RemoteEndPoint)` discarded the reply and went back to
+    /// waiting, which is exactly the field symptom: no handshake response, no error, and every
+    /// QUIC-level counter reading zero because the datagram never reached the QUIC layer.
+    /// </remarks>
+    [Fact]
+    public async Task ARelayReplyingFromAnotherPortIsAcceptedByDefault()
+    {
+        await using var relay = FakeSocks5Relay.Start(replyFromDifferentPort: true);
+        await using var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options { ProxyEndPoint = relay.ProxyEndPoint },
+            CancellationToken.None);
+
+        // The premise the whole test rests on: the relay really does answer from somewhere
+        // other than what it advertised, so a passing round trip below is the loosened check
+        // and not a relay that quietly behaved itself.
+        Assert.NotEqual(relay.UdpEndPoint.Port, relay.ReplyEndPoint.Port);
+
+        var origin = new IPEndPoint(IPAddress.Parse("203.0.113.9"), 443);
+        await transport.SendAsync(origin, new byte[] { 4, 2 }, CancellationToken.None);
+
+        var buffer = new byte[64];
+        var result = await transport.ReceiveAsync(buffer, CancellationToken.None)
+            .AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, result.Length);
+        Assert.Equal(new byte[] { 4, 2 }, buffer[..2]);
+        Assert.Equal(origin, result.RemoteEndPoint);
+
+        // Accepted, so nothing was dropped for it.
+        Assert.Equal(0, transport.DatagramsFromUnexpectedSource);
+        Assert.Null(transport.LastUnexpectedSource);
+        Assert.Null(relay.BackgroundException);
+    }
+
+    /// <summary>
+    /// The strict setting is still available and still rejects — but no longer silently. The
+    /// counter says a datagram was dropped for its source and LastUnexpectedSource says which
+    /// source, which together are the difference between "nothing arrived" and "the relay is
+    /// answering from 127.0.0.1:51413 and this policy is throwing it away".
+    /// </summary>
+    [Fact]
+    public async Task AnExactRelaySourceDropsAReplyFromAnotherPortAndNamesIt()
+    {
+        await using var relay = FakeSocks5Relay.Start(replyFromDifferentPort: true);
+        await using var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options
+            {
+                ProxyEndPoint = relay.ProxyEndPoint,
+                RelaySource = TlsQuicSocks5RelaySource.Exact,
+            },
+            CancellationToken.None);
+
+        var origin = new IPEndPoint(IPAddress.Parse("203.0.113.9"), 443);
+        await transport.SendAsync(origin, new byte[] { 1 }, CancellationToken.None);
+
+        // The echo is already queued on this socket by the time the receive runs, so the drop
+        // happens promptly and only the wait for the SECOND datagram — which never comes —
+        // burns the token.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await transport.ReceiveAsync(new byte[64], cts.Token));
+
+        Assert.Equal(1, transport.DatagramsFromUnexpectedSource);
+        Assert.Equal(relay.ReplyEndPoint, transport.LastUnexpectedSource);
+
+        // The other two drop reasons are untouched, so the summary points at one cause rather
+        // than at "something went wrong somewhere in the receive loop".
+        Assert.Equal(0, transport.MalformedRelayHeaders);
+        Assert.Equal(0, transport.OversizedRelayPayloads);
+        Assert.Contains(relay.ReplyEndPoint.ToString(), transport.DropSummary);
+        Assert.Null(relay.BackgroundException);
+    }
+
+    /// <summary>
+    /// The other two silent drops, counted. MalformedRelayedDatagramsAreDroppedNotFatal already
+    /// pins that neither kills the connection; what was missing is that a caller could not tell
+    /// afterwards that either had happened at all.
+    /// </summary>
+    /// <remarks>
+    /// THE DESTINATION HOST IS LOAD-BEARING, not decoration. The receive scratch buffer is
+    /// sized at the transport's own header size plus the caller's buffer, so with the IPv4 form
+    /// on both sides a payload too big for the caller is also too big for the scratch and
+    /// Winsock refuses it with WSAEMSGSIZE before the length check is ever reached. A domain
+    /// destination opens the gap that makes the branch live and that a real relay opens by
+    /// itself: this transport sends the 32-byte domain form and the relay re-encapsulates its
+    /// reply with the remote host's literal address, a 10-byte header — so 22 bytes of scratch
+    /// are free for a payload the caller cannot take.
+    /// </remarks>
+    [Fact]
+    public async Task DroppedRelayedDatagramsAreCountedByReason()
+    {
+        await using var relay = FakeSocks5Relay.Start();
+        await using var transport = await TlsQuicSocks5Transport.ConnectAsync(
+            new TlsQuicSocks5Options
+            {
+                ProxyEndPoint = relay.ProxyEndPoint,
+                DestinationHost = "gew1-spclient.spotify.com",
+            },
+            CancellationToken.None);
+
+        var origin = new IPEndPoint(IPAddress.Parse("203.0.113.9"), 443);
+        var buffer = new byte[8];
+
+        // Prime the relay so it learns the client's UDP address. The echo carries the domain
+        // header back, which RFC 1928 section 7 permits and TryReadUdpHeader accepts.
+        await transport.SendAsync(origin, new byte[] { 5 }, CancellationToken.None);
+        _ = await transport.ReceiveAsync(buffer, CancellationToken.None)
+            .AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        // A header with a non-zero RSV, which section 7 fixes at X'0000'.
+        relay.SendRaw([0x00, 0x01, 0x00, 0x01, 203, 0, 113, 9, 0x01, 0xBB, 0xAA]);
+
+        // A well-formed IPv4-form datagram whose 20-byte payload does not fit the 8-byte
+        // buffer above, but whose 30 bytes total do fit the 40-byte scratch.
+        var oversized = new byte[10 + 20];
+        oversized[3] = 0x01; // ATYP: IPv4
+        oversized[4] = 203;
+        oversized[6] = 113;
+        oversized[7] = 9;
+        oversized[8] = 0x01;
+        oversized[9] = 0xBB; // DST.PORT 443
+        relay.SendRaw(oversized);
+
+        // Then a datagram that is fine, which is what unblocks the receive and proves the loop
+        // carried on past both.
+        await transport.SendAsync(origin, new byte[] { 6 }, CancellationToken.None);
+
+        var result = await transport.ReceiveAsync(buffer, CancellationToken.None)
+            .AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, result.Length);
+        Assert.Equal(6, buffer[0]);
+        Assert.Equal(1, transport.MalformedRelayHeaders);
+        Assert.Equal(1, transport.OversizedRelayPayloads);
+        Assert.Equal(0, transport.DatagramsFromUnexpectedSource);
+        Assert.Null(relay.BackgroundException);
+    }
 }

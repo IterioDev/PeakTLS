@@ -622,17 +622,27 @@ T: public enum SharpTls.Quic.TlsQuicSecretDirection : System.Int32
   F: public const SharpTls.Quic.TlsQuicSecretDirection Write = SharpTls.Quic.TlsQuicSecretDirection.Write
 T: public sealed class SharpTls.Quic.TlsQuicSocks5Options
   C: public SharpTls.Quic.TlsQuicSocks5Options()
+  P: public SharpTls.Quic.TlsQuicSocks5RelaySource RelaySource { get; init; }
   P: public System.Net.EndPoint ProxyEndPoint { get; init; }
   P: public System.String? DestinationHost { get; init; }
   P: public System.String? Password { get; init; }
   P: public System.String? Username { get; init; }
+T: public enum SharpTls.Quic.TlsQuicSocks5RelaySource : System.Int32
+  F: public const SharpTls.Quic.TlsQuicSocks5RelaySource AddressOnly = SharpTls.Quic.TlsQuicSocks5RelaySource.AddressOnly
+  F: public const SharpTls.Quic.TlsQuicSocks5RelaySource Any = SharpTls.Quic.TlsQuicSocks5RelaySource.Any
+  F: public const SharpTls.Quic.TlsQuicSocks5RelaySource Exact = SharpTls.Quic.TlsQuicSocks5RelaySource.Exact
 T: public sealed class SharpTls.Quic.TlsQuicSocks5Transport : SharpTls.Quic.ITlsQuicDatagramTransport, System.IAsyncDisposable
   M: public System.Threading.Tasks.ValueTask DisposeAsync()
   M: public System.Threading.Tasks.ValueTask SendAsync(System.Net.IPEndPoint destination, System.ReadOnlyMemory<System.Byte> payload, System.Threading.CancellationToken cancellationToken)
   M: public System.Threading.Tasks.ValueTask<SharpTls.Quic.TlsQuicDatagramReceiveResult> ReceiveAsync(System.Memory<System.Byte> buffer, System.Threading.CancellationToken cancellationToken)
-  M: public static System.Threading.Tasks.Task<SharpTls.Quic.ITlsQuicDatagramTransport> ConnectAsync(SharpTls.Quic.TlsQuicSocks5Options options, System.Threading.CancellationToken cancellationToken)
+  M: public static System.Threading.Tasks.Task<SharpTls.Quic.TlsQuicSocks5Transport> ConnectAsync(SharpTls.Quic.TlsQuicSocks5Options options, System.Threading.CancellationToken cancellationToken)
   P: public System.Int32 DatagramOverhead { get; }
+  P: public System.Int32 DatagramsFromUnexpectedSource { get; }
+  P: public System.Int32 MalformedRelayHeaders { get; }
   P: public System.Int32 MaxDatagramPayloadSize { get; }
+  P: public System.Int32 OversizedRelayPayloads { get; }
+  P: public System.Net.IPEndPoint? LastUnexpectedSource { get; }
+  P: public System.String DropSummary { get; }
 T: public enum SharpTls.Quic.TlsQuicSpinBitPolicy : System.Int32
   F: public const SharpTls.Quic.TlsQuicSpinBitPolicy RandomPerConnection = SharpTls.Quic.TlsQuicSpinBitPolicy.RandomPerConnection
   F: public const SharpTls.Quic.TlsQuicSpinBitPolicy RandomPerPacket = SharpTls.Quic.TlsQuicSpinBitPolicy.RandomPerPacket

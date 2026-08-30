@@ -17,17 +17,23 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
     private readonly IPEndPoint _receiveTemplate;
     private readonly int _headerSize;
     private readonly string? _destinationHost;
+    private readonly TlsQuicSocks5RelaySource _relaySource;
     private readonly CancellationTokenSource _terminationCts = new();
     private readonly Task _controlWatcher;
     private volatile bool _disposed;
 
     private TlsQuicSocks5Transport(
-        Socket control, Socket udp, IPEndPoint relayEndPoint, string? destinationHost)
+        Socket control,
+        Socket udp,
+        IPEndPoint relayEndPoint,
+        string? destinationHost,
+        TlsQuicSocks5RelaySource relaySource)
     {
         _control = control;
         _udp = udp;
         _relayEndPoint = relayEndPoint;
         _destinationHost = destinationHost;
+        _relaySource = relaySource;
 
         // The domain form is the longer header, so sizing from it keeps MaxDatagramPayloadSize
         // honest: QUIC's path MTU accounting reads that number and a datagram built against a
@@ -63,6 +69,85 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
     /// SocketError.MessageSize.</remarks>
     public int DatagramOverhead => _headerSize;
 
+    // WHY THESE COUNTERS EXIST AT ALL, AND WHY NOWHERE ELSE COULD CARRY THEM.
+    //
+    // Every drop in ReceiveAsync's loop used to be a bare `continue`. A datagram that arrived
+    // and was discarded here therefore looked, from every vantage point above this class,
+    // exactly like a datagram that never arrived: the QUIC layer counts what it is handed, so
+    // TlsQuicConnection.DiscardedPackets, DiscardedForMissingKeys, RetainedForLaterKeys and
+    // ReplayedAfterKeysArrived all read zero either way. A field report of "no handshake
+    // response, every QUIC counter zero" is consistent with BOTH, and picking between them is
+    // the first thing anyone debugging a relayed stall needs to do.
+    //
+    // THEY ARE READ OFF THIS TYPE BY THE CALLER THAT CONSTRUCTED IT, deliberately, and
+    // ITlsQuicDatagramTransport is not widened to carry them. The interface is what
+    // TlsQuicConnection holds, and a connection cannot act on these numbers - they describe
+    // one particular encapsulation that most transports do not perform. So ConnectAsync
+    // returns TlsQuicSocks5Transport rather than the interface, and a caller whose handshake
+    // threw TimeoutException reads DropSummary off the transport it already owns and appends
+    // it to what TlsQuicConnection.DeadlineExceeded said. That is the honest shape: an
+    // optional diagnostic interface with exactly one implementation would be the same coupling
+    // with a layer of ceremony on top.
+    //
+    // NOT SYNCHRONISED, matching the interface's "one concurrent send and one concurrent
+    // receive" contract: only the receive loop writes them. A caller reading them from another
+    // thread after a failed handshake sees an int and a reference, both of which this platform
+    // reads atomically - it may see a value one datagram stale, which no diagnosis turns on.
+
+    /// <summary>Gets how many relayed datagrams were dropped because their source did not
+    /// satisfy <see cref="TlsQuicSocks5Options.RelaySource"/>.</summary>
+    /// <remarks>NON-ZERO WITH A SILENT HANDSHAKE IS THE POOLED-RELAY DIAGNOSIS: traffic is
+    /// coming back, and this transport is throwing it away before QUIC ever sees it. Read
+    /// <see cref="LastUnexpectedSource"/> next to find out from where, and loosen the policy to
+    /// match. Under <see cref="TlsQuicSocks5RelaySource.Any"/> nothing can fail the check, so
+    /// this stays zero by construction.</remarks>
+    public int DatagramsFromUnexpectedSource { get; private set; }
+
+    /// <summary>Gets the source of the most recent datagram
+    /// <see cref="DatagramsFromUnexpectedSource"/> counted, or <see langword="null"/> if none
+    /// has been dropped.</summary>
+    /// <remarks>THE COUNTER ALONE CANNOT CLOSE THE INVESTIGATION. "Something arrived from the
+    /// wrong place" and "the relay at 203.0.113.7:1080 replied from 203.0.113.7:51413" lead to
+    /// different next actions, and only the second says which
+    /// <see cref="TlsQuicSocks5RelaySource"/> setting would carry the traffic. Compare it
+    /// against the BND.ADDR:BND.PORT the ASSOCIATE reply carried: a differing port alone is the
+    /// ordinary pooled case, a differing address means the pool answers from a sibling
+    /// host.</remarks>
+    public IPEndPoint? LastUnexpectedSource { get; private set; }
+
+    /// <summary>Gets how many relayed datagrams were dropped because their RFC 1928 section 7
+    /// UDP request header did not parse - a non-zero RSV, a FRAG this transport does not
+    /// reassemble, an unknown ATYP, or a header running past the end of the datagram.</summary>
+    /// <remarks>Section 7's "Implementation of fragmentation is optional; an implementation
+    /// that does not support fragmentation MUST drop any datagram whose FRAG field is other
+    /// than X'00'" is one of the ways to land here, and against a relay that fragments it would
+    /// be the whole explanation for a stall.</remarks>
+    public int MalformedRelayHeaders { get; private set; }
+
+    /// <summary>Gets how many relayed datagrams were dropped because the payload left after
+    /// the RFC 1928 section 7 header would not fit the buffer the caller passed to
+    /// <see cref="ReceiveAsync"/>.</summary>
+    /// <remarks>QUIC sizes its own receive buffer, so this rising means the peer is sending
+    /// datagrams larger than this connection is prepared to read rather than anything the relay
+    /// did wrong.</remarks>
+    public int OversizedRelayPayloads { get; private set; }
+
+    /// <summary>Gets a one-line summary of every datagram this transport dropped, for splicing
+    /// into whatever a failed handshake reports.</summary>
+    /// <remarks>The counters are individually readable above; this exists so the caller that
+    /// catches a <see cref="TimeoutException"/> out of a QUIC handshake can say what happened
+    /// BELOW the layer that threw it without hand-formatting four numbers. All zeros really
+    /// does mean nothing reached this socket.</remarks>
+    public string DropSummary =>
+        $"SOCKS5 relay drops: {DatagramsFromUnexpectedSource} from an unexpected source"
+            + (LastUnexpectedSource is null ? string.Empty : $" (last {LastUnexpectedSource})")
+            + $" under {_relaySource} against BND {_relayEndPoint}, "
+            + $"{MalformedRelayHeaders} with an unparseable RFC 1928 s7 header, "
+            + $"{OversizedRelayPayloads} too large for the caller's buffer. "
+            + "ALL ZERO MEANS NOTHING ARRIVED AT THIS SOCKET AT ALL; a non-zero unexpected-source "
+            + "count means the relay is answering from somewhere other than BND and "
+            + "TlsQuicSocks5Options.RelaySource is discarding it.";
+
     /// <summary>Connects to a SOCKS5 proxy and establishes a UDP association for relaying
     /// QUIC datagrams.</summary>
     /// <exception cref="ArgumentException"><see cref="TlsQuicSocks5Options.Username"/> and
@@ -70,7 +155,11 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
     /// omitted.</exception>
     /// <exception cref="TlsQuicProxyException">The proxy rejected the negotiation, the
     /// authentication, or the UDP ASSOCIATE request.</exception>
-    public static async Task<ITlsQuicDatagramTransport> ConnectAsync(
+    /// <remarks>RETURNS THE CONCRETE TYPE, not <see cref="ITlsQuicDatagramTransport"/>, so the
+    /// caller keeps a handle on <see cref="DropSummary"/> and the counters behind it. A QUIC
+    /// connection takes the interface and is unaffected; what a relayed datagram dropped for a
+    /// SOCKS5 reason needs is a reader on this side of the abstraction.</remarks>
+    public static async Task<TlsQuicSocks5Transport> ConnectAsync(
         TlsQuicSocks5Options options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -104,7 +193,7 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
             var relayEndPoint = await AssociateAsync(control, proxy, cancellationToken).ConfigureAwait(false);
 
             var transport = new TlsQuicSocks5Transport(
-                control, udp, relayEndPoint, options.DestinationHost);
+                control, udp, relayEndPoint, options.DestinationHost, options.RelaySource);
             control = null;
             udp = null;
             return transport;
@@ -382,6 +471,47 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
         }
     }
 
+    // WHETHER A REPLY'S SOURCE IS CLOSE ENOUGH TO BND TO BE THIS ASSOCIATION'S TRAFFIC.
+    //
+    // THIS USED TO BE `_relayEndPoint.Equals(result.RemoteEndPoint)` AND THAT IS STRICTER THAN
+    // RFC 1928 ASKS FOR. Section 7 constrains BND in one direction only - "In the reply to a
+    // UDP ASSOCIATE request, the BND.PORT and BND.ADDR fields indicate the port number/address
+    // where the client MUST send UDP request messages to be relayed" - and says of the return
+    // direction merely that the relay "MUST encapsulate that datagram using the above UDP
+    // request header". Nothing anywhere in RFC 1928 says the reply's source will be, or must
+    // be, BND. Section 6 goes out of its way in the other direction: "The supplied BND.ADDR is
+    // often different from the IP address that the client uses to reach the SOCKS server, since
+    // such servers are often multi-homed."
+    //
+    // SO EQUALITY WAS AN ASSUMPTION WEARING A SPEC CITATION, and a pooled or load-balanced
+    // relay that answers from another ephemeral port on the same host - which is ordinary
+    // behaviour, not a violation - had every reply discarded here, invisibly, and the handshake
+    // simply timed out.
+    //
+    // WHAT THE DEFAULT IS ANCHORED TO INSTEAD is the one source test section 7 does mandate,
+    // pointed back at the relay: "The UDP relay server MUST acquire from the SOCKS server the
+    // expected IP address of the client ... It MUST drop any datagrams arriving from any source
+    // IP address other than the one recorded for the particular association." An IP address,
+    // with no port. TlsQuicSocks5RelaySource.AddressOnly is that, and it holds the line that
+    // matters: this socket is bound to a wildcard address and any host that can route to it can
+    // send to it, so a forged datagram must at minimum come from the relay's own address before
+    // the QUIC layer will look at it.
+    //
+    // TlsQuicDatagramTransportTests.ARelayReplyingFromAnotherPortIsAccepted
+    // ByDefault pins the loosening, and TlsQuicDatagramTransportTests.AnExact
+    // RelaySourceDropsAReplyFromAnotherPortAndNamesIt pins that the strict setting still
+    // rejects and, unlike the code this replaced, says what it rejected.
+    private bool IsFromRelay(EndPoint source) => _relaySource switch
+    {
+        TlsQuicSocks5RelaySource.Any => true,
+        TlsQuicSocks5RelaySource.AddressOnly =>
+            source is IPEndPoint endPoint && _relayEndPoint.Address.Equals(endPoint.Address),
+
+        // Exact, and anything a future value forgets to handle: the pre-existing behaviour,
+        // which is the safe direction to fail in.
+        _ => _relayEndPoint.Equals(source),
+    };
+
     /// <inheritdoc />
     public async ValueTask<TlsQuicDatagramReceiveResult> ReceiveAsync(
         Memory<byte> buffer, CancellationToken cancellationToken)
@@ -444,20 +574,32 @@ public sealed class TlsQuicSocks5Transport : ITlsQuicDatagramTransport
                 // RFC 9000 s14: a datagram that fails validation is dropped and the receive
                 // loop keeps waiting — never fatal, or any host reaching this UDP port could
                 // kill the connection with one junk packet.
-                if (!_relayEndPoint.Equals(result.RemoteEndPoint))
+                //
+                // EACH OF THE THREE DROPS BELOW IS COUNTED BEFORE IT CONTINUES. They were bare
+                // `continue`s, and a bare `continue` here is indistinguishable from silence on
+                // the wire to everything above this class - see the counters' own remarks.
+                if (!IsFromRelay(result.RemoteEndPoint))
                 {
+                    DatagramsFromUnexpectedSource++;
+
+                    // The receive template is not reused: ReceiveFromAsync creates a fresh
+                    // EndPoint from the address it actually read, so retaining it does not
+                    // capture something the next receive will overwrite.
+                    LastUnexpectedSource = result.RemoteEndPoint as IPEndPoint;
                     continue;
                 }
 
                 if (!TlsQuicSocks5Protocol.TryReadUdpHeader(
                         rented.AsSpan(0, result.ReceivedBytes), out var origin, out var headerLength))
                 {
+                    MalformedRelayHeaders++;
                     continue;
                 }
 
                 var payloadLength = result.ReceivedBytes - headerLength;
                 if (payloadLength > buffer.Length)
                 {
+                    OversizedRelayPayloads++;
                     continue;
                 }
 

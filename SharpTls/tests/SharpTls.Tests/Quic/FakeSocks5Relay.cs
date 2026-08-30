@@ -13,6 +13,7 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
 {
     private readonly TcpListener _controlListener;
     private readonly Socket _udpSocket;
+    private readonly Socket? _replySocket;
     private readonly string? _username;
     private readonly string? _password;
     private readonly bool _wildcardBoundAddress;
@@ -27,17 +28,20 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
     private FakeSocks5Relay(
         TcpListener controlListener,
         Socket udpSocket,
+        Socket? replySocket,
         string? username,
         string? password,
         bool wildcardBoundAddress)
     {
         _controlListener = controlListener;
         _udpSocket = udpSocket;
+        _replySocket = replySocket;
         _username = username;
         _password = password;
         _wildcardBoundAddress = wildcardBoundAddress;
         ProxyEndPoint = (IPEndPoint)controlListener.LocalEndpoint;
         UdpEndPoint = (IPEndPoint)udpSocket.LocalEndPoint!;
+        ReplyEndPoint = (IPEndPoint)(replySocket ?? udpSocket).LocalEndPoint!;
 
         // ponytail: one connection, one relay socket, no pooling — this is a test double,
         // not a real proxy. Add multi-connection support if a future test needs it.
@@ -46,10 +50,18 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
     }
 
     /// <summary>Starts a relay bound to loopback ephemeral ports.</summary>
+    /// <param name="replyFromDifferentPort">Echo replies from a SECOND UDP socket rather than
+    /// from the one BND.PORT advertised. This is what a pooled or load-balanced commercial
+    /// relay does, and RFC 1928 permits it: section 7 pins BND only as "the port
+    /// number/address where the client MUST send UDP request messages to be relayed" and says
+    /// nothing at all about the source of the reply it encapsulates back. The relay still
+    /// RECEIVES on UdpEndPoint, so the client's own sends are unaffected - only the return
+    /// path moves.</param>
     internal static FakeSocks5Relay Start(
         string? username = null,
         string? password = null,
-        bool wildcardBoundAddress = false)
+        bool wildcardBoundAddress = false,
+        bool replyFromDifferentPort = false)
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -57,14 +69,28 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
         var udpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         udpSocket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
 
-        return new FakeSocks5Relay(listener, udpSocket, username, password, wildcardBoundAddress);
+        Socket? replySocket = null;
+        if (replyFromDifferentPort)
+        {
+            replySocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            replySocket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        }
+
+        return new FakeSocks5Relay(
+            listener, udpSocket, replySocket, username, password, wildcardBoundAddress);
     }
 
     /// <summary>Gets the TCP control listener's endpoint.</summary>
     internal IPEndPoint ProxyEndPoint { get; }
 
-    /// <summary>Gets the UDP relay socket's endpoint.</summary>
+    /// <summary>Gets the UDP relay socket's endpoint — what the ASSOCIATE reply advertises as
+    /// BND.ADDR:BND.PORT, and where the client sends.</summary>
     internal IPEndPoint UdpEndPoint { get; }
+
+    /// <summary>Gets the endpoint replies are actually sent from. Equal to
+    /// <see cref="UdpEndPoint"/> unless the relay was started with
+    /// <c>replyFromDifferentPort</c>.</summary>
+    internal IPEndPoint ReplyEndPoint { get; }
 
     /// <summary>Gets an exception captured from a background loop, if one occurred outside
     /// an expected shutdown path. Tests can assert this stays null. The first failure wins
@@ -246,7 +272,7 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
 
                 // Echo the datagram back verbatim, header included: the client can then
                 // decapsulate it and see the destination it sent to, proving round trip.
-                await _udpSocket
+                await (_replySocket ?? _udpSocket)
                     .SendToAsync(
                         buffer.AsMemory(0, result.ReceivedBytes),
                         SocketFlags.None,
@@ -284,6 +310,7 @@ internal sealed class FakeSocks5Relay : IAsyncDisposable
         _controlListener.Stop();
         _controlSocket?.Dispose();
         _udpSocket.Dispose();
+        _replySocket?.Dispose();
 
         await Task.WhenAll(_acceptTask, _udpTask).ConfigureAwait(false);
         _cts.Dispose();
