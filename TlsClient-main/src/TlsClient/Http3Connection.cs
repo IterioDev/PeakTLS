@@ -168,12 +168,14 @@ internal sealed class Http3Connection : IHttpConnection
         TlsSessionConfiguration configuration,
         Tls13SessionCache tls13SessionCache,
         DnsEndpointResolver dnsResolver,
+        Socks5AssociationGate associationGate,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(origin);
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(tls13SessionCache);
         ArgumentNullException.ThrowIfNull(dnsResolver);
+        ArgumentNullException.ThrowIfNull(associationGate);
 
         var connectionId = Guid.NewGuid();
         var addresses = await dnsResolver.ResolveAsync(
@@ -217,22 +219,12 @@ internal sealed class Http3Connection : IHttpConnection
             "HttpConnectionFactory must reject non-SOCKS5 proxies before reaching here.");
         var transport = proxy is null
             ? TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily)
-            : await TlsQuicSocks5Transport.ConnectAsync(
-                new TlsQuicSocks5Options
-                {
-                    ProxyEndPoint = new DnsEndPoint(proxy.Address.IdnHost, proxy.EffectivePort),
-                    Username = proxy.GetCredentials()?.UserName,
-                    Password = proxy.GetCredentials()?.Password,
-
-                    // The origin travels as a NAME, so the proxy resolves it rather than this
-                    // host. A literal-address datagram header is refused outright by proxies
-                    // whose ruleset forbids IP destinations - they close the control connection
-                    // on the first datagram, which surfaces as the association ending. Sending
-                    // the name is the only form such a proxy accepts, and it moves DNS to the
-                    // proxy's vantage point, which is usually what a caller proxying to hide
-                    // their location wanted anyway.
-                    DestinationHost = origin.IdnHost,
-                },
+            : await AssociateAsync(
+                origin,
+                proxy,
+                configuration,
+                associationGate,
+                connectionId,
                 cancellationToken).ConfigureAwait(false);
         TlsQuicConnection? connection = null;
         CustomTlsQuicClient? tlsClient = null;
@@ -329,6 +321,80 @@ internal sealed class Http3Connection : IHttpConnection
             }
             await transport.DisposeAsync().ConfigureAwait(false);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Opens one RFC 1928 section 7 UDP association, waiting its turn behind any other dial
+    /// setting one up through the same proxy session.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE GATE COVERS THIS METHOD AND NOTHING MORE. It is taken immediately before
+    /// <c>TlsQuicSocks5Transport.ConnectAsync</c> and released in the <c>finally</c> below, so
+    /// the QUIC handshake that follows in the caller runs unserialised. That boundary is the
+    /// design: three concurrent dials that all stall would otherwise become three SEQUENTIAL
+    /// handshake timeouts, turning a ten-second failure into a thirty-second one in exactly
+    /// the case this was built to investigate. See <see cref="Socks5AssociationGate"/> for why
+    /// setup is serialised at all.</para>
+    /// <para>THE <c>finally</c> IS WHAT KEEPS A FAILURE FROM WEDGING THE SESSION. A refused TCP
+    /// connect to the proxy, a rejected RFC 1928 section 3 authentication, a section 6 reply
+    /// carrying a non-zero REP - each throws from inside the gate, and every one of them must
+    /// still release it or one bad dial silently costs every later dial through that session
+    /// its full <see cref="TlsQuicOptions.AssociationWaitTimeout"/>. The caller's own failure
+    /// path, which disposes the transport, runs strictly after this method has returned and so
+    /// never holds the gate either. A caller cancelled while QUEUED never entered the
+    /// <c>try</c> at all: <see cref="Socks5AssociationGate.EnterAsync"/> throws without taking
+    /// the slot, so there is nothing owed and nothing to release.</para>
+    /// </remarks>
+    private static async ValueTask<ITlsQuicDatagramTransport> AssociateAsync(
+        Uri origin,
+        TlsProxy proxy,
+        TlsSessionConfiguration configuration,
+        Socks5AssociationGate associationGate,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        var waited = await associationGate.EnterAsync(
+            proxy,
+            configuration.Quic.AssociationWaitTimeout,
+            cancellationToken).ConfigureAwait(false);
+
+        // Reported BEFORE the association is attempted, so a dial that queues and then fails
+        // still leaves its queue time on the record. A run that serialises without stalls
+        // vanishing is only interpretable against these: they are the evidence that dials
+        // actually contended, which is what separates "serialising did not help" from
+        // "nothing ever queued".
+        TlsConnectTelemetry.Emit(
+            configuration.ConnectObserver,
+            connectionId,
+            TlsConnectEventKind.Socks5AssociationGateEntered,
+            origin.IdnHost,
+            origin.Port,
+            elapsed: waited);
+
+        try
+        {
+            return await TlsQuicSocks5Transport.ConnectAsync(
+                new TlsQuicSocks5Options
+                {
+                    ProxyEndPoint = new DnsEndPoint(proxy.Address.IdnHost, proxy.EffectivePort),
+                    Username = proxy.GetCredentials()?.UserName,
+                    Password = proxy.GetCredentials()?.Password,
+
+                    // The origin travels as a NAME, so the proxy resolves it rather than this
+                    // host. A literal-address datagram header is refused outright by proxies
+                    // whose ruleset forbids IP destinations - they close the control connection
+                    // on the first datagram, which surfaces as the association ending. Sending
+                    // the name is the only form such a proxy accepts, and it moves DNS to the
+                    // proxy's vantage point, which is usually what a caller proxying to hide
+                    // their location wanted anyway.
+                    DestinationHost = origin.IdnHost,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            associationGate.Exit(proxy);
         }
     }
 

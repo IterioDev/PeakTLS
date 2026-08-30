@@ -11,6 +11,7 @@ internal static class HttpConnectionFactory
         TlsSessionConfiguration configuration,
         Tls13SessionCache tls13SessionCache,
         DnsEndpointResolver dnsResolver,
+        Socks5AssociationGate associationGate,
         CancellationToken cancellationToken)
     {
         // HTTP/3 forks before the TCP transport is dialled: QUIC opens its own UDP socket
@@ -40,6 +41,7 @@ internal static class HttpConnectionFactory
                 configuration,
                 tls13SessionCache,
                 dnsResolver,
+                associationGate,
                 cancellationToken).ConfigureAwait(false);
         }
 

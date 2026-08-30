@@ -182,6 +182,7 @@ public sealed class Http3EvaluationTests
                 configuration,
                 new Tls13SessionCache(),
                 new DnsEndpointResolver(configuration),
+                new Socks5AssociationGate(),
                 CancellationToken.None).AsTask());
 
         Assert.Contains("HTTP/3 cannot be tunnelled", exception.Message, StringComparison.Ordinal);

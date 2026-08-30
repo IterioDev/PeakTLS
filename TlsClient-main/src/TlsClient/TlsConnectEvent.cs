@@ -43,6 +43,21 @@ public enum TlsConnectEventKind
 
     /// <summary>The SharpTls handshake failed.</summary>
     TlsHandshakeFailed,
+
+    /// <summary>
+    /// An HTTP/3 dial was admitted by the per-proxy-session gate that serialises RFC 1928
+    /// section 7 UDP ASSOCIATE setup, and is about to open its association.
+    /// </summary>
+    /// <remarks>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> IS THE WHOLE POINT: it is how long this dial
+    /// queued behind another dial's ASSOCIATE through the same proxy session. Zero means the
+    /// gate was free. A run whose stalls persist despite serialised setup is only interpretable
+    /// if these show that dials genuinely queued — otherwise "we serialised and it did not
+    /// help" cannot be told apart from "we never actually serialised anything".</para>
+    /// <para>Emitted only for a proxied HTTP/3 dial. A direct UDP dial takes no gate and
+    /// reports nothing.</para>
+    /// </remarks>
+    Socks5AssociationGateEntered,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

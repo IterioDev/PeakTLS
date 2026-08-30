@@ -14,6 +14,7 @@ TlsClient.Http2ErrorCode.ProtocolError = 1 -> TlsClient.Http2ErrorCode
 TlsClient.Http2ErrorCode.RefusedStream = 7 -> TlsClient.Http2ErrorCode
 TlsClient.Http2ErrorCode.SettingsTimeout = 4 -> TlsClient.Http2ErrorCode
 TlsClient.Http2ErrorCode.StreamClosed = 5 -> TlsClient.Http2ErrorCode
+TlsClient.TlsConnectEventKind.Socks5AssociationGateEntered = 13 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Always = 2 -> TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Never = 3 -> TlsClient.TlsHpackHuffman
@@ -279,6 +280,8 @@ TlsClient.TlsQuicOptions.AckRangeLimit.get -> int
 TlsClient.TlsQuicOptions.AckRangeLimit.set -> void
 TlsClient.TlsQuicOptions.AlpnProtocols.get -> System.Collections.Generic.IList<string!>!
 TlsClient.TlsQuicOptions.AlpnProtocols.set -> void
+TlsClient.TlsQuicOptions.AssociationWaitTimeout.get -> System.TimeSpan
+TlsClient.TlsQuicOptions.AssociationWaitTimeout.set -> void
 TlsClient.TlsQuicOptions.BasePathMtu.get -> int
 TlsClient.TlsQuicOptions.BasePathMtu.set -> void
 TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.get -> bool

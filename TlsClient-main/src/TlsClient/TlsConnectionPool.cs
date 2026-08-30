@@ -27,6 +27,13 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
     private readonly TlsSessionConfiguration _configuration;
     private readonly Tls13SessionCache _tls13SessionCache = new();
     private readonly DnsEndpointResolver _dnsResolver;
+
+    // SCOPED HERE FOR THE SAME REASON _tls13SessionCache AND _dnsResolver ARE: it is state one
+    // session's dials share, and the session is where "the same proxy session" is decidable.
+    // The gate itself keys on TlsProxy.PoolKey - the same key ConnectionKey already uses to
+    // keep two proxies' pooled connections apart - so per-request proxy overrides, which this
+    // pool supports, take their own slot and never wait on each other.
+    private readonly Socks5AssociationGate _associationGate = new();
     private readonly HttpConnectAsync _connect;
     private readonly SemaphoreSlim _poolGate = new(1, 1);
     private readonly SemaphoreSlim _poolChanged = new(0, int.MaxValue);
@@ -56,6 +63,7 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
             _configuration,
             _tls13SessionCache,
             _dnsResolver,
+            _associationGate,
             cancellationToken);
 
     public int Tls13SessionCount => _tls13SessionCache.Count;

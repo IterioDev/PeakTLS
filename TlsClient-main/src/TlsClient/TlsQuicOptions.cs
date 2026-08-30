@@ -232,6 +232,10 @@ public sealed class TlsQuicOptions
     // throwing method, and this rejection belongs to the AlpnProtocols property.
     private static readonly string AlpnParameter = nameof(AlpnProtocols);
 
+    // Same reason as AlpnParameter above: the rejection belongs to the property, not to a
+    // parameter of Snapshot.
+    private static readonly string AssociationWaitParameter = nameof(AssociationWaitTimeout);
+
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
     // already declares both. That is four silent drift hazards: change TlsQuicConnectionSpec's
@@ -272,6 +276,30 @@ public sealed class TlsQuicOptions
     /// otherwise.
     /// </remarks>
     public TimeSpan? HandshakeDeadline { get; set; }
+
+    /// <summary>
+    /// Gets or sets how long a proxied HTTP/3 dial may wait for another dial's RFC 1928
+    /// section 7 UDP ASSOCIATE through the SAME proxy session to finish. The default is thirty
+    /// seconds; <see cref="Timeout.InfiniteTimeSpan"/> waits forever.
+    /// </summary>
+    /// <remarks>
+    /// <para>SETUP IS SERIALISED PER PROXY SESSION, AND THIS BOUNDS THE QUEUE. Association
+    /// setup runs one at a time for connections sharing a proxy identity — see
+    /// <see cref="Socks5AssociationGate"/> for the field evidence that made it necessary — so
+    /// without a bound a single hung ASSOCIATE would convert into a hung session rather than
+    /// one failed dial. Exceeding it throws <see cref="HttpRequestException"/> naming this
+    /// property.</para>
+    /// <para>IT BOUNDS THE WAIT, NOT THE ASSOCIATE. The dial holding the gate is bounded by
+    /// its own caller's cancellation and by the session timeout, exactly as before; this only
+    /// decides how long the ones behind it are prepared to queue. Thirty seconds is generous
+    /// against a healthy ASSOCIATE — a TCP connect, a greeting, an authentication exchange and
+    /// one request/reply, all well under a second — so it firing is a signal rather than
+    /// routine backpressure.</para>
+    /// <para>DIRECT DIALS IGNORE IT ENTIRELY. Nothing is serialised without a proxy, so this
+    /// value is never read on that path.</para>
+    /// </remarks>
+    public TimeSpan AssociationWaitTimeout { get; set; } =
+        Socks5AssociationGate.DefaultWaitTimeout;
 
     /// <summary>
     /// Gets or sets what this client writes into RFC 9000 section 17.4's latency spin bit on
@@ -504,6 +532,20 @@ public sealed class TlsQuicOptions
                 AlpnParameter);
         }
 
+        // ZERO OR NEGATIVE WOULD FAIL EVERY PROXIED DIAL THE MOMENT A SECOND ONE OVERLAPS,
+        // with an exception naming a wait that never happened, so it is refused here where the
+        // caller can still see which property they set. Infinite is a legitimate answer - "I
+        // would rather queue than fail" - and SemaphoreSlim.WaitAsync accepts it natively.
+        if (AssociationWaitTimeout <= TimeSpan.Zero &&
+            AssociationWaitTimeout != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(
+                AssociationWaitParameter,
+                AssociationWaitTimeout,
+                $"{AssociationWaitParameter} must be positive, or " +
+                $"{nameof(Timeout)}.{nameof(Timeout.InfiniteTimeSpan)} to wait indefinitely.");
+        }
+
         var connectionSpec = new TlsQuicConnectionSpec
         {
             SourceConnectionIdLength = SourceConnectionIdLength,
@@ -544,7 +586,8 @@ public sealed class TlsQuicOptions
             alpn,
             configureClientHello,
             ConfigureTls,
-            HandshakeDeadline);
+            HandshakeDeadline,
+            AssociationWaitTimeout);
     }
 }
 
@@ -559,4 +602,5 @@ internal sealed record TlsQuicConfiguration(
     string[] AlpnProtocols,
     Action<ClientHelloBuilder> ConfigureClientHello,
     Action<CustomTlsQuicClientOptions>? ConfigureTls,
-    TimeSpan? HandshakeDeadline);
+    TimeSpan? HandshakeDeadline,
+    TimeSpan AssociationWaitTimeout);

@@ -49,6 +49,7 @@ public sealed class Http3LiveTests
             configuration,
             new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
+            new Socks5AssociationGate(),
             CancellationToken.None);
 
     [Fact]
@@ -159,6 +160,7 @@ public sealed class Http3LiveTests
             configuration,
             new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
+            new Socks5AssociationGate(),
             CancellationToken.None);
 
         Assert.Equal("h3", connection.TlsInfo.ApplicationProtocol);
@@ -328,6 +330,7 @@ public sealed class Http3LiveTests
             configuration,
             new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
+            new Socks5AssociationGate(),
             CancellationToken.None);
 
         var response = await connection.SendAsync(
