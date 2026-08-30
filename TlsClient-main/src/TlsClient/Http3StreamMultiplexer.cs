@@ -48,7 +48,7 @@ internal readonly record struct Http3StreamSnapshot(
 /// <c>PumpOnceAsync</c> answers <see langword="false"/> with an RFC 9114 section 8.1 code, which
 /// is SharpTls's contract and is preserved rather than re-wrapped.</para>
 /// </remarks>
-internal interface IHttp3Streams
+internal interface IHttp3Streams : IAsyncDisposable
 {
     /// <summary>Gets the RFC 9114 section 8.1 code this connection took, or 0.</summary>
     ulong ConnectionErrorCode { get; }
@@ -82,6 +82,16 @@ internal interface IHttp3Streams
     Exception Describe(
         TlsQuicHttp3RequestRefusal refusal,
         TlsQuicHttp3RequestError malformed);
+
+    /// <summary>Sends RFC 9114 section 5.2's application CONNECTION_CLOSE.</summary>
+    /// <remarks>HERE RATHER THAN ON THE CONCRETE TYPE SO THAT <c>Http3Connection</c> HOLDS ONE
+    /// SEAM AND NOT THREE. It used to keep the <c>TlsQuicConnection</c> and the
+    /// <c>TlsQuicHttp3Connection</c> as fields of its own purely for teardown, which meant a
+    /// connection could not be assembled without a completed QUIC handshake and so nothing
+    /// about its REQUEST path — the silence guard included — was checkable offline. This member
+    /// and <see cref="IAsyncDisposable.DisposeAsync"/> are the whole of what those two fields
+    /// were for.</remarks>
+    ValueTask CloseWithCurrentErrorAsync();
 }
 
 /// <summary>What one request thread has not yet consumed of its stream.</summary>

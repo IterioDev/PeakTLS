@@ -243,6 +243,11 @@ public sealed class TlsQuicOptions
     private static readonly string AssociationAttemptsParameter =
         nameof(MaximumAssociationAttempts);
 
+    // Same reason again.
+    private static readonly string AssociationSilenceParameter =
+        nameof(AssociationSilenceDeadline);
+
+
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
     // already declares both. That is four silent drift hazards: change TlsQuicConnectionSpec's
@@ -356,6 +361,36 @@ public sealed class TlsQuicOptions
     /// </remarks>
     public int MaximumAssociationAttempts { get; set; } =
         Http3Connection.DefaultMaximumAssociationAttempts;
+
+    /// <summary>
+    /// Gets or sets how long a request on a proxied HTTP/3 connection may wait while its RFC
+    /// 1928 section 7 UDP association relays nothing at all, before the association is judged
+    /// reaped and the connection retired. The default is two seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE TWIN OF <see cref="AssociationLivenessDeadline"/>, ONE PHASE LATER. That one
+    /// asks whether a fresh association EVER relays; this one asks whether an association that
+    /// already relayed a whole QUIC handshake is still relaying. They are different failures:
+    /// re-association fires zero times against this one, because every association that fails
+    /// this way carried the handshake first.</para>
+    /// <para>SILENCE IS NOT SLOWNESS, AND THE DIFFERENCE IS WHAT MAKES SO SHORT A BOUND SAFE.
+    /// The measurement is not "the response is late" but "not one datagram of any kind has come
+    /// back since the handshake" — including datagrams the
+    /// <see cref="TlsQuicSocks5RelaySource"/> policy or the section 7 header parser discard. RFC
+    /// 9000 section 13.2.1 obliges a peer to acknowledge an ack-eliciting packet within its
+    /// advertised <c>max_ack_delay</c>, tens of milliseconds, so a live path answers a request
+    /// long before this expires however slow the response itself is. One datagram clears the
+    /// condition for the life of the connection.</para>
+    /// <para>KEEP IT UNDER <see cref="HandshakeDeadline"/>, which despite its name bounds every
+    /// receive on the connection and not only the handshake. If this is the larger of the two,
+    /// a silent association is reported as that deadline expiring — an accurate but unnamed
+    /// timeout — instead of as the reaped association it is.</para>
+    /// <para>DIRECT DIALS IGNORE IT ENTIRELY. There is no association to be reaped without a
+    /// proxy, and a direct connection's request wait is left unbounded by this exactly as it
+    /// always was.</para>
+    /// </remarks>
+    public TimeSpan AssociationSilenceDeadline { get; set; } =
+        Http3Connection.DefaultAssociationSilenceDeadline;
 
     /// <summary>
     /// Gets or sets what this client writes into RFC 9000 section 17.4's latency spin bit on
@@ -628,6 +663,30 @@ public sealed class TlsQuicOptions
                 "re-association.");
         }
 
+        // A NON-POSITIVE SILENCE DEADLINE WOULD FAIL EVERY PROXIED REQUEST the instant it
+        // waited at all, since a request that has not yet been answered is by definition one
+        // whose association has relayed nothing since the handshake. Infinite IS meaningful
+        // here, unlike for the liveness deadline: it says "never judge an association reaped",
+        // which is the behaviour that predates this knob, and Task.WaitAsync accepts it
+        // natively as "no timer".
+        if (AssociationSilenceDeadline <= TimeSpan.Zero &&
+            AssociationSilenceDeadline != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(
+                AssociationSilenceParameter,
+                AssociationSilenceDeadline,
+                $"{AssociationSilenceParameter} must be positive, or " +
+                $"{nameof(Timeout)}.{nameof(Timeout.InfiniteTimeSpan)} to leave a silent " +
+                "association undetected.");
+        }
+
+        // A NON-POSITIVE SILENCE DEADLINE WOULD FAIL EVERY PROXIED REQUEST the instant it
+        // waited at all, since a request that has not yet been answered is by definition one
+        // whose association has relayed nothing since the handshake. Infinite IS meaningful
+        // here, unlike for the liveness deadline: it says "never judge an association reaped",
+        // which is the behaviour that predates this knob, and Task.WaitAsync accepts it
+        // natively as "no timer".
+
         var connectionSpec = new TlsQuicConnectionSpec
         {
             SourceConnectionIdLength = SourceConnectionIdLength,
@@ -671,7 +730,8 @@ public sealed class TlsQuicOptions
             HandshakeDeadline,
             AssociationWaitTimeout,
             AssociationLivenessDeadline,
-            MaximumAssociationAttempts);
+            MaximumAssociationAttempts,
+            AssociationSilenceDeadline);
     }
 }
 
@@ -689,4 +749,5 @@ internal sealed record TlsQuicConfiguration(
     TimeSpan? HandshakeDeadline,
     TimeSpan AssociationWaitTimeout,
     TimeSpan AssociationLivenessDeadline,
-    int MaximumAssociationAttempts);
+    int MaximumAssociationAttempts,
+    TimeSpan AssociationSilenceDeadline);

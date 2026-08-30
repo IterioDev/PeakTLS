@@ -89,6 +89,62 @@ public enum TlsConnectEventKind
     /// dead and never reports this.</para>
     /// </remarks>
     Socks5AssociationRetried,
+
+    /// <summary>
+    /// A proxied HTTP/3 connection opened its FIRST request stream, reporting how long its RFC
+    /// 1928 section 7 UDP association had been idle since the QUIC handshake completed.
+    /// </summary>
+    /// <remarks>
+    /// <para>THIS GAP WAS INVISIBLE AND MAY BE THE WHOLE ANSWER. Stalls over SOCKS5-UDP happen
+    /// only on the first request to a new host, after a handshake the association demonstrably
+    /// carried — so the suspect is the window between the two. A connection dialled, returned
+    /// to the pool and used later has spent that whole window silent, which is exactly what an
+    /// idle-reaping proxy needs to discard the association. Nothing else on the record shows
+    /// how long that window was.</para>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> is the window: the time from the handshake
+    /// completing to this request being built. <see cref="TlsConnectEvent.AddressCount"/> is
+    /// how many datagrams arrived DURING it, counting the ones the
+    /// <c>TlsQuicSocks5RelaySource</c> policy or the section 7 header parser threw away.
+    /// Zero is the ordinary value — nothing ack-eliciting is sent between requests, so a
+    /// healthy connection is also silent while idle (RFC 9000 section 10.1) — which is why the
+    /// gap and not the count is the interesting half.</para>
+    /// <para>Emitted once per connection, and only for a proxied HTTP/3 one. A direct UDP dial
+    /// has no association to be reaped and reports nothing.</para>
+    /// </remarks>
+    Socks5AssociationFirstRequest,
+
+    /// <summary>
+    /// A request on a proxied HTTP/3 connection was failed because its RFC 1928 section 7 UDP
+    /// association had relayed nothing whatsoever since the QUIC handshake.
+    /// </summary>
+    /// <remarks>
+    /// <para>WHAT IT MEANS: the association carried the handshake, the connection was handed
+    /// back healthy, and then this request waited
+    /// <see cref="TlsQuicOptions.AssociationSilenceDeadline"/> with not one datagram of any
+    /// kind coming back — so the association was reaped or blackholed rather than the origin
+    /// being slow. RFC 1928 section 7 lets an association end only with its control connection,
+    /// which is still open, so silence is the only symptom a proxy that does this produces.
+    /// </para>
+    /// <para>THREE OUTCOMES, AND THIS EVENT SEPARATES ALL OF THEM, which is what makes the fix
+    /// measurable:</para>
+    /// <list type="bullet">
+    /// <item>NEVER AFFECTED — no event of this kind for the run.</item>
+    /// <item>DETECTED AND RECOVERED — one of these, then a
+    /// <see cref="Socks5AssociationGateEntered"/> under a NEW
+    /// <see cref="TlsConnectEvent.ConnectionId"/> and a response. The failure is a
+    /// <c>StaleHttpConnectionException</c>, which the pool evicts on and
+    /// <c>TlsSession</c>'s retry policy re-dials, so a replayable idempotent request recovers
+    /// on a fresh association by itself.</item>
+    /// <item>DETECTED AND STILL FAILED — one of these per attempt the retry policy allowed, and
+    /// the caller sees the last of them. The exception says the association went silent rather
+    /// than reporting a bare timeout.</item>
+    /// </list>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> is how long the association had been silent
+    /// in total — from the handshake, not from the request — and
+    /// <see cref="TlsConnectEvent.Exception"/> is what the caller was given.</para>
+    /// <para>Emitted only for a proxied HTTP/3 connection.</para>
+    /// </remarks>
+    Socks5AssociationWentSilent,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

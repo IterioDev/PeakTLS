@@ -62,6 +62,28 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     public int InboundDatagrams => Volatile.Read(ref _inboundDatagrams);
 
     /// <summary>
+    /// Gets everything that has come back through this association since it was opened: what
+    /// was delivered to the QUIC layer, plus everything the relay-source policy or the section
+    /// 7 header parser threw away.
+    /// </summary>
+    /// <remarks>
+    /// <para>A RUNNING TOTAL RATHER THAN A BOOLEAN, BECAUSE THE SECOND QUESTION IS ABOUT A
+    /// WINDOW. Setup asks "has this association EVER relayed?", which
+    /// <see cref="RelayedNothing"/> answers; the request path asks "has it relayed anything
+    /// SINCE the handshake?", which only a number a caller can snapshot and compare against can
+    /// answer. Both are the same measurement read at different instants, so they must be the
+    /// same counter — two counters would be two things to keep in step, and this stack has
+    /// already paid for that mistake once.</para>
+    /// <para>MONOTONIC AND NEVER RESET. A caller that wants a window keeps its own baseline;
+    /// nothing here decides what a window is.</para>
+    /// </remarks>
+    public long RelayedTotal =>
+        InboundDatagrams +
+        _relay.DatagramsFromUnexpectedSource +
+        _relay.MalformedRelayHeaders +
+        _relay.OversizedRelayPayloads;
+
+    /// <summary>
     /// Gets whether nothing whatsoever has come back through this association — neither a
     /// delivered datagram nor one the relay-source policy or the section 7 header parser threw
     /// away.
@@ -69,11 +91,7 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     /// <remarks>TRUE IS THE ONE CONDITION THAT JUSTIFIES A RE-ASSOCIATE. False means the relay
     /// is carrying traffic and whatever went wrong went wrong above this layer, where a fresh
     /// association would fix nothing and hide something.</remarks>
-    public bool RelayedNothing =>
-        InboundDatagrams == 0 &&
-        _relay.DatagramsFromUnexpectedSource == 0 &&
-        _relay.MalformedRelayHeaders == 0 &&
-        _relay.OversizedRelayPayloads == 0;
+    public bool RelayedNothing => RelayedTotal == 0;
 
     /// <summary>Gets the inner transport's account of every datagram it dropped, for splicing
     /// into a failure message.</summary>

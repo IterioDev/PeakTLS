@@ -73,9 +73,24 @@ internal sealed class Http3Connection : IHttpConnection
     /// the same failure is reported.</remarks>
     internal const int DefaultMaximumAssociationAttempts = 3;
 
+    /// <summary>
+    /// How long a request may wait on a proxied connection that has relayed nothing at all
+    /// since its handshake before the association is judged reaped: two seconds.
+    /// </summary>
+    /// <remarks>THE SAME REASONING AS <see cref="DefaultAssociationLivenessDeadline"/>, APPLIED
+    /// ONE PHASE LATER. A live QUIC path answers a request within a round trip — RFC 9000
+    /// section 13.2.1 obliges the peer to acknowledge an ack-eliciting packet within its
+    /// advertised <c>max_ack_delay</c>, which is tens of milliseconds — so two seconds of
+    /// absolute silence on a path that was carrying datagrams a moment ago is not slowness. It
+    /// is a knob rather than a constant because the one thing that could make it wrong is a
+    /// path whose round trip really is seconds long, and only the operator of such a path can
+    /// know that.</remarks>
+    internal static readonly TimeSpan DefaultAssociationSilenceDeadline =
+        TimeSpan.FromSeconds(2);
+
     private readonly ITlsQuicDatagramTransport _transport;
-    private readonly TlsQuicConnection _connection;
-    private readonly TlsQuicHttp3Connection _http3;
+    private readonly IHttp3Streams _streams;
+    private readonly Socks5AssociationWatch? _association;
     private readonly Http3StreamMultiplexer _multiplexer;
     private readonly int _requestStreamAllowance;
     private readonly TimeSpan? _idleBudget;
@@ -84,24 +99,42 @@ internal sealed class Http3Connection : IHttpConnection
     private int _isReusable = 1;
     private int _disposed;
 
-    private Http3Connection(
+    /// <remarks>
+    /// <para>INTERNAL RATHER THAN PRIVATE, AND <see cref="IHttp3Streams"/> RATHER THAN THE TWO
+    /// SharpTls OBJECTS, FOR ONE REASON: a connection could not otherwise be assembled without
+    /// a completed QUIC handshake against a live peer, and this suite has no such peer. Every
+    /// claim about the REQUEST path — the silence guard below, the first-request gap it is
+    /// measured against, the exception shape the pool and the retry policy read — would then
+    /// rest on inference, which is exactly how the previous four rounds of this investigation
+    /// each reached a confident wrong answer. <see cref="CreateAsync"/> is still the only
+    /// production caller and hands in a <see cref="SharpTlsHttp3Streams"/>.</para>
+    /// <para><paramref name="association"/> is null for a direct dial and is what makes every
+    /// proxy-shaped behaviour below cost a null check and nothing else on that path.</para>
+    /// </remarks>
+    internal Http3Connection(
         ITlsQuicDatagramTransport transport,
-        TlsQuicConnection connection,
-        TlsQuicHttp3Connection http3,
+        IHttp3Streams streams,
+        Socks5AssociationWatch? association,
         TlsConnectionInfo tlsInfo,
         int requestStreamAllowance,
         TimeSpan? idleBudget)
     {
         _transport = transport;
-        _connection = connection;
-        _http3 = http3;
-        _multiplexer = new Http3StreamMultiplexer(
-            new SharpTlsHttp3Streams(connection, http3));
+        _streams = streams;
+        _association = association;
+        _multiplexer = new Http3StreamMultiplexer(streams);
         _requestStreamAllowance = requestStreamAllowance;
         _idleBudget = idleBudget;
         TlsInfo = tlsInfo;
         LastUsed = DateTimeOffset.UtcNow;
     }
+
+    /// <summary>Starts the background read loop.</summary>
+    /// <remarks>NOT IN THE CONSTRUCTOR, so that the loop cannot observe a half-built connection,
+    /// and called by <see cref="CreateAsync"/> only once everything else has succeeded — a
+    /// connection that failed its handshake is disposed by that method's catch, which has no
+    /// loop to stop.</remarks>
+    internal void Start() => _multiplexer.Start();
 
     public TlsConnectionInfo TlsInfo { get; }
 
@@ -139,7 +172,7 @@ internal sealed class Http3Connection : IHttpConnection
         !IsDisposed &&
         !_multiplexer.IsStopped &&
         RemainingRequestStreams > 0 &&
-        _http3.PeerGoawayStreamId is null &&
+        _streams.PeerGoawayStreamId is null &&
         (_idleBudget is not { } budget || DateTimeOffset.UtcNow - LastUsed < budget);
 
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
@@ -386,18 +419,26 @@ internal sealed class Http3Connection : IHttpConnection
                 var idleBudget = connection.EffectiveIdleTimeout() is { } effective
                     ? TimeSpan.FromTicks(effective.Ticks / 2)
                     : (TimeSpan?)null;
+                // TAKEN HERE, WHICH IS THE LAST INSTANT THAT STILL COUNTS AS "THE HANDSHAKE".
+                // Everything above has finished: ConnectAsync returned, ALPN was checked, the
+                // HTTP/3 unidirectional streams went out. So the relay's running total at this
+                // point is exactly what the handshake burst drew back, and anything the counter
+                // gains from now on is the association still working AFTER setup - which is the
+                // only question the request path asks it.
                 var result = new Http3Connection(
                     transport,
-                    connection,
-                    http3,
+                    new SharpTlsHttp3Streams(connection, http3),
+                    relay is null
+                        ? null
+                        : new Socks5AssociationWatch(
+                            relay,
+                            connectionId,
+                            origin.IdnHost,
+                            origin.Port),
                     BuildTlsInfo(configuration, tlsClient),
                     allowance,
                     idleBudget);
-                // Started here rather than in the constructor so that the loop cannot observe a
-                // half-built connection, and only once everything above succeeded — a connection
-                // that failed the handshake is disposed by the catch below, which has no loop to
-                // stop.
-                result._multiplexer.Start();
+                result.Start();
                 return result;
             }
             catch (Exception exception)
@@ -579,6 +620,11 @@ internal sealed class Http3Connection : IHttpConnection
                         : string.Empty),
                     _multiplexer.Fault);
             }
+
+            // THE GAP MEASUREMENT, AND IT MAY BE THE WHOLE ANSWER. Taken before the stream is
+            // opened, so what it reports is the idle window between the handshake and this
+            // request rather than anything the request itself costs. Null for a direct dial.
+            _association?.ReportFirstRequest(configuration.ConnectObserver);
 
             // NO CONNECTION-WIDE GATE AROUND THE REST OF THIS METHOD, WHICH IS THE CHANGE.
             // OpenAsync takes SharpTls exclusively for as long as it takes to encode and send
@@ -764,6 +810,9 @@ internal sealed class Http3Connection : IHttpConnection
         // Counted rather than measured off progress.Body, which a streaming request never gets:
         // its octets left in chunks and only their total survives for section 4.1.2's check.
         var streamedBytes = 0;
+        // For the silence guard's report only: how long THIS request has been waiting, which is
+        // the number a reader compares against the deadline that fired.
+        var waitingSince = Stopwatch.GetTimestamp();
         Http3StreamProgress progress;
         while (true)
         {
@@ -802,7 +851,49 @@ internal sealed class Http3Connection : IHttpConnection
             {
                 break;
             }
-            await pumped.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            // THE SILENCE GUARD, AND IT IS BOUNDED RATHER THAN POLLED BECAUSE THE WAIT IS
+            // WHERE THE EVIDENCE IS. A live path signals Pumped on every datagram the read loop
+            // receives, so this wait returning at all is proof that something arrived; a
+            // reaped RFC 1928 section 7 association leaves the loop parked in a UDP receive
+            // and nothing ever signals it. Timeout.InfiniteTimeSpan for a direct dial means
+            // Task.WaitAsync installs no timer and this path costs a null check.
+            //
+            // RE-ARMED EVERY ITERATION, WHICH IS WHAT KEEPS A MERELY SLOW REQUEST SAFE. The
+            // deadline expiring is not the finding; the finding is the deadline expiring while
+            // the association has relayed NOTHING since its handshake. If anything at all came
+            // back - an ACK, a datagram the relay-source policy discarded, a response for
+            // another stream - the check below is false for good and this loop simply waits
+            // again, exactly as it did before this guard existed.
+            //
+            // THE DEFAULT DEADLINE IS SHORTER THAN THE QUIC ONE ON PURPOSE (2s against
+            // TlsQuicConnectionOptions.HandshakeDeadline's 10s, which bounds every receive and
+            // not only the handshake). A connection whose first request follows its handshake
+            // closely - the shape the field failure takes - therefore reports THIS rather than
+            // the bare deadline the multiplexer would raise eight seconds later.
+            var silence = _association is null
+                ? Timeout.InfiniteTimeSpan
+                : configuration.Quic.AssociationSilenceDeadline;
+            try
+            {
+                await pumped.WaitAsync(silence, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                if (_association is { IsSilent: true } association)
+                {
+                    // Not retired here: SendAsync's own catch retires the connection for every
+                    // failure that is not an HttpRequestException or a stream-scoped protocol
+                    // fault, and this is neither. One place decides reuse.
+                    throw association.Reap(
+                        configuration.ConnectObserver,
+                        Stopwatch.GetElapsedTime(waitingSince),
+                        silence);
+                }
+
+                // Something has come back since the handshake, so the association is alive and
+                // this request is merely slow. Nothing to report and nothing to retire.
+            }
         }
 
         if (headers is null || status is null)
@@ -874,7 +965,7 @@ internal sealed class Http3Connection : IHttpConnection
         Volatile.Write(ref _isReusable, 0);
         await _multiplexer.DisposeAsync().ConfigureAwait(false);
         await TryCloseAsync().ConfigureAwait(false);
-        await _connection.DisposeAsync().ConfigureAwait(false);
+        await _streams.DisposeAsync().ConfigureAwait(false);
         await _transport.DisposeAsync().ConfigureAwait(false);
     }
 
@@ -888,7 +979,7 @@ internal sealed class Http3Connection : IHttpConnection
     {
         try
         {
-            await _http3.CloseWithCurrentErrorAsync().ConfigureAwait(false);
+            await _streams.CloseWithCurrentErrorAsync().ConfigureAwait(false);
         }
         catch (Exception)
         {

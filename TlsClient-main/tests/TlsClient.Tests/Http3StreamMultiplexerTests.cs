@@ -143,6 +143,26 @@ public sealed class Http3StreamMultiplexerTests
             TlsQuicHttp3RequestError malformed) =>
             new TlsHttpProtocolException($"refused: {refusal}");
 
+        /// <summary>Counts the teardown calls, which nothing in this file asserts on: the
+        /// multiplexer never closes or disposes the layer below it — <c>Http3Connection</c>
+        /// does, after the loop has stopped — so a non-zero count here would itself be a
+        /// finding.</summary>
+        internal int Closed;
+
+        internal int Disposed;
+
+        public ValueTask CloseWithCurrentErrorAsync()
+        {
+            Interlocked.Increment(ref Closed);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref Disposed);
+            return ValueTask.CompletedTask;
+        }
+
         /// <summary>Delivers one datagram.</summary>
         internal void Post(Action<FakeHttp3Streams> apply) => _wire.Writer.TryWrite(apply);
 

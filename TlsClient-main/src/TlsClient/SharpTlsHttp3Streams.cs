@@ -76,6 +76,15 @@ internal sealed class SharpTlsHttp3Streams(
             _connection.PeerFlowControl.RemainingConnectionData,
             _http3.ConnectionErrorCode);
 
+    public ValueTask CloseWithCurrentErrorAsync() => _http3.CloseWithCurrentErrorAsync();
+
+    /// <inheritdoc />
+    /// <remarks>THE QUIC CONNECTION AND NOTHING BELOW IT. The UDP socket - or the RFC 1928
+    /// section 7 relay standing in for one - is owned by <c>Http3Connection</c>, which disposes
+    /// it after this, so a transport is never torn down under a connection still using it.
+    /// </remarks>
+    public ValueTask DisposeAsync() => _connection.DisposeAsync();
+
     /// <summary>Gets whether the peer closed its half of one request stream.</summary>
     /// <remarks><c>TlsQuicHttp3Connection</c> exposes the readers but not the streams, so the
     /// FIN is read off the stream set that owns them. A stream the set does not know reads as

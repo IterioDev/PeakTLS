@@ -16,6 +16,8 @@ TlsClient.Http2ErrorCode.SettingsTimeout = 4 -> TlsClient.Http2ErrorCode
 TlsClient.Http2ErrorCode.StreamClosed = 5 -> TlsClient.Http2ErrorCode
 TlsClient.TlsConnectEventKind.Socks5AssociationGateEntered = 13 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsConnectEventKind.Socks5AssociationRetried = 14 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.Socks5AssociationFirstRequest = 15 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.Socks5AssociationWentSilent = 16 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Always = 2 -> TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Never = 3 -> TlsClient.TlsHpackHuffman
@@ -287,6 +289,8 @@ TlsClient.TlsQuicOptions.AssociationLivenessDeadline.get -> System.TimeSpan
 TlsClient.TlsQuicOptions.AssociationLivenessDeadline.set -> void
 TlsClient.TlsQuicOptions.MaximumAssociationAttempts.get -> int
 TlsClient.TlsQuicOptions.MaximumAssociationAttempts.set -> void
+TlsClient.TlsQuicOptions.AssociationSilenceDeadline.get -> System.TimeSpan
+TlsClient.TlsQuicOptions.AssociationSilenceDeadline.set -> void
 TlsClient.TlsQuicOptions.BasePathMtu.get -> int
 TlsClient.TlsQuicOptions.BasePathMtu.set -> void
 TlsClient.TlsQuicOptions.CoalesceAscendingByLevel.get -> bool
