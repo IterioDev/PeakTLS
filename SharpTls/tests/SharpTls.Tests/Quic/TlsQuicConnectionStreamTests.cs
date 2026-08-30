@@ -592,10 +592,27 @@ public sealed partial class TlsQuicConnectionTests
     public async Task ABodyThatIsNeverGrantedEndsOnTheDeadlineRatherThanHanging()
     {
         // NO DEADLOCK, PROVEN RATHER THAN ARGUED. The blocked queue holds bytes indefinitely
-        // BY DESIGN, so the question this test answers is what bounds the wait: the connection
-        // owns one deadline, set once at StartAsync, and a pump that receives nothing is
-        // bounded by it whether or not a stream is blocked. Nothing in the flow-control path
-        // adds a wait of its own, which is the property a second timer would have broken.
+        // BY DESIGN, so the question this test answers is what bounds the wait: a pump that
+        // receives nothing is bounded whether or not a stream is blocked, and nothing in the
+        // flow-control path adds a wait of its own - which is the property a second timer would
+        // have broken.
+        //
+        // AND WHICH BOUND IT IS HAS CHANGED, WHICH IS THE PART OF THIS TEST WORTH READING. It
+        // used to assert "did not confirm within" - the HANDSHAKE deadline - on a connection
+        // that ConfirmedHandshake had just confirmed, and that assertion was the bug written
+        // down as a specification: TlsQuicConnection re-read a deadline it set once at
+        // StartAsync for the whole life of the connection, so an established connection died at
+        // TlsQuicConnectionOptions.HandshakeDeadline and was told its handshake had not
+        // confirmed. What bounds a confirmed connection is RFC 9000 s10.1's idle timeout - "the
+        // connection is silently closed and its state is discarded when it remains idle" - and
+        // this peer says nothing at all, so this is s10.1's own case. The claim the test was
+        // written to make is untouched: something bounds the wait, and the loop below still
+        // proves it is not the test's own guard.
+        //
+        // THREE SECONDS OF EACH, so the deadline stays in place as the thing a regression would
+        // fall back to - a connection that started consulting it again would fail on the message
+        // rather than on a hang - and so the pump loop ends in three seconds instead of the
+        // thirty TlsQuicConnectionOptions.IdleTimeout defaults to.
         using var cancellation = new CancellationTokenSource(TestTimeout);
         using var pki = TestPki.Create();
         using var credential = Credential(pki);
@@ -605,6 +622,7 @@ public sealed partial class TlsQuicConnectionTests
                 clientTransport, serverTransport.LocalEndPoint, Spec(), TimeProvider.System)
             {
                 HandshakeDeadline = TimeSpan.FromSeconds(3),
+                IdleTimeout = TimeSpan.FromSeconds(3),
             },
             source => TlsClient(pki, source));
         await using var server = Server(
@@ -636,9 +654,14 @@ public sealed partial class TlsQuicConnectionTests
             }
         });
 
-        // THE CONNECTION'S OWN DEADLINE, BY NAME, and not the test's 60-second guard: a hang
-        // would have surfaced as the CancellationTokenSource firing instead.
-        Assert.Contains("did not confirm within", timeout.Message, StringComparison.Ordinal);
+        // THE CONNECTION'S OWN BOUND, BY NAME, and not the test's 60-second guard: a hang would
+        // have surfaced as the CancellationTokenSource firing instead. IdleTimedOut is the same
+        // statement read off the connection rather than out of a string, and a regression that
+        // brought the handshake deadline back would fail on both at once - the deadline is set
+        // to the same three seconds, so it is a live alternative here and not a straw one.
+        Assert.Contains(
+            "The QUIC connection was idle for longer", timeout.Message, StringComparison.Ordinal);
+        Assert.True(connection.IdleTimedOut);
         Assert.False(cancellation.IsCancellationRequested);
 
         // AND THE BYTES ARE STILL HELD RATHER THAN LOST OR DOUBLE-SENT.

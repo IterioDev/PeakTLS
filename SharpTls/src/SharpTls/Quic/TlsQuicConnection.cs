@@ -1091,6 +1091,17 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // TlsQuicPeerFlowControlBudget.cs for why absent reads as 0 once they HAVE arrived.
     private TlsQuicPeerFlowControlBudget? _peerFlowControl;
 
+    // THE HANDSHAKE DEADLINE, AND IT HAS TWO VALUES AND ONLY TWO. StartAsync sets it to
+    // `startedAt + TlsQuicConnectionOptions.HandshakeDeadline`, and ConfirmIfHandshakeDone
+    // Arrived retires it to DateTimeOffset.MaxValue the instant RFC 9001 s4.1.2's confirmation
+    // lands. It never takes any other value, and it never moves backwards.
+    //
+    // READ IT AS "the instant this ATTEMPT runs out of time", not as "the instant this
+    // CONNECTION does" - RFC 9000 s10.1's idle timeout is the second of those and IdleDeadline
+    // is where it lives. That distinction is the whole of the retirement above: a confirmed
+    // connection has no attempt left to run out of time, so this field states so rather than
+    // holding a passed instant that three separate readers would each have to know to skip.
+    // See ConfirmIfHandshakeDoneArrived for the failure that taught it.
     private DateTimeOffset _deadline;
     private DateTimeOffset _idleSince;
 
@@ -4156,6 +4167,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     private static int SpaceOf(TlsQuicEncryptionLevel level) => TlsQuicAckTracker.SpaceOf(level);
 
+    // NON-POSITIVE ONLY WHILE THE HANDSHAKE IS UNCONFIRMED, which is a property of `_deadline`
+    // and not of this expression - see the field. On a confirmed connection the subtraction is
+    // DateTimeOffset.MaxValue minus a clock reading, so every caller reads an enormous positive
+    // remaining and no caller can abandon on it.
     private TimeSpan RemainingBeforeDeadline() =>
         _deadline - _options.TimeProvider.GetUtcNow();
 
@@ -4203,6 +4218,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // a pacer that never releases, which is the second of the two ways this task could wedge a
     // connection. With it the release instant is raced like every other, and the minimum
     // argument above still holds: a fourth entry can only ever SHORTEN the wait.
+    //
+    // AND A MINIMUM CAN BE LENGTHENED BY REMOVING AN ENTRY, WHICH IS THE ONE DIRECTION THE
+    // ARGUMENT ABOVE NEVER HAD TO FACE UNTIL CONFIRMATION RETIRED THE HANDSHAKE DEADLINE. The
+    // first entry below is DateTimeOffset.MaxValue on every confirmed connection, so it drops
+    // out of the minimum in all but name and the wait is decided by what is left. What is left
+    // still ends every wait: RFC 9000 s10.1's idle deadline is unconditional - IdleDeadline is
+    // never null and EffectiveIdlePeriod is capped to a period a timer can be armed for - so
+    // this method returns a finite instant whether or not the other three entries exist. See
+    // ConfirmIfHandshakeDoneArrived for why the retirement is a value rather than a branch.
     private (DateTimeOffset At, TlsQuicDeadlineKind Kind) EarliestDeadline()
     {
         var at = _deadline;
@@ -5140,6 +5164,20 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // produce is this deadline, and a deadline that did not say how many packets went
     // unopened would leave the coalescing stall with no symptom of its own. See
     // AccountForPacket for what used to happen instead and why it was worse.
+    //
+    // "DID NOT CONFIRM WITHIN" IS NOW TRUE OF EVERY CONNECTION THIS CAN BE RAISED ON, WHICH IT
+    // WAS NOT BEFORE, AND THAT IS WHY THE WORDING IS UNTOUCHED. AbandonAsync reaches this only
+    // when RemainingBeforeDeadline() is the nearer of the two, and `_deadline` is
+    // DateTimeOffset.MaxValue from RFC 9001 s4.1.2's confirmation onwards - so a confirmed
+    // connection cannot arrive here at all and the sentence cannot be raised against a
+    // handshake that succeeded. It used to be: the deadline was re-read for the whole life of
+    // the connection, so an established connection carrying traffic was abandoned at
+    // HandshakeDeadline and told that its handshake had not confirmed. The message did not
+    // need correcting; the state it was reachable from did. See ConfirmIfHandshakeDoneArrived.
+    //
+    // SO EVERY COUNTER BELOW READS AS A HANDSHAKE DIAGNOSTIC AGAIN, which is the shape they
+    // were written in - the retention and want-of-keys pair is only interpretable about an
+    // attempt that never finished.
     private TimeoutException DeadlineExceeded() => new(
         $"The QUIC handshake did not confirm within {_options.HandshakeDeadline}. "
             + $"{DiscardedPackets} packet(s) discarded ({DiscardedForMissingKeys} for want of "
@@ -5164,10 +5202,18 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     {
         // THREE DEADLINES SINCE A3-5, AND THE EARLIEST ONE BOUNDS THE RECEIVE. Two of them are
         // ABANDONMENTS and are different failures from each other: the handshake deadline is
-        // local policy that never moves, and RFC 9000 s10.1's idle timeout restarts on every
-        // packet processed and on the first ack-eliciting packet sent after one. AbandonAsync
-        // decides which of those two fired and whether a frame is owed. The third is RFC 9002
-        // A.8's loss detection timer and is not a failure at all - see EarliestDeadline.
+        // local policy that bounds the ATTEMPT, and RFC 9000 s10.1's idle timeout restarts on
+        // every packet processed and on the first ack-eliciting packet sent after one.
+        // AbandonAsync decides which of those two fired and whether a frame is owed. The third
+        // is RFC 9002 A.8's loss detection timer and is not a failure at all - see
+        // EarliestDeadline.
+        //
+        // "NEVER MOVES" IS WHAT THIS USED TO SAY OF THE HANDSHAKE DEADLINE AND IT WAS THE BUG
+        // WRITTEN DOWN AS A FEATURE. It moves exactly once, at RFC 9001 s4.1.2's confirmation,
+        // and it moves to DateTimeOffset.MaxValue - so this method bounds an unconfirmed
+        // attempt by both abandonments and a confirmed connection by s10.1's alone. The
+        // paragraph in ConfirmIfHandshakeDoneArrived carries the reasoning; what matters here
+        // is that not one line of this method needed to know about it.
         var (deadlineAt, deadlineKind) = EarliestDeadline();
         var remaining = deadlineAt - _options.TimeProvider.GetUtcNow();
 
@@ -5549,6 +5595,86 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         using var confirmed = _client!.ConfirmHandshake();
         ApplyDiscards(confirmed);
         _confirmed = true;
+
+        // ====================================================================
+        // AND THE HANDSHAKE DEADLINE STOPS BOUNDING THIS CONNECTION HERE.
+        // ====================================================================
+        //
+        // THE BUG THIS LINE FIXES, BECAUSE IT IS EASIER TO STATE THAN THE FIX. StartAsync set
+        // `_deadline = startedAt + HandshakeDeadline` and NOTHING EVER MOVED IT AGAIN, while
+        // ReceiveWithinDeadlineAsync re-reads it on every wake for the whole life of the
+        // connection - "Both abandonment deadlines are re-read here on EVERY wake", which is
+        // the sentence that makes the receive loop provably terminate and is also what killed
+        // a connection that had nothing left to prove. So an ESTABLISHED connection was
+        // abandoned exactly HandshakeDeadline after StartAsync no matter how much traffic it
+        // was carrying, and DeadlineExceeded then blamed "the QUIC handshake did not confirm",
+        // a handshake that had in fact confirmed seconds earlier. The field report is a
+        // proxied HTTP/3 dial with the shipped ten-second default: 19 to 48 datagrams relayed
+        // over 9.2 seconds AFTER the handshake, every discard and retention counter zero, then
+        // an IOException at the ten-second mark. Roughly 4% of proxied dials; a direct dial
+        // rarely lives ten seconds, which is why it almost never showed there.
+        //
+        // RFC 9000 s10.1 IS WHAT BOUNDS A CONNECTION, AND IT SAYS SO IN ONE SENTENCE: "If a
+        // max_idle_timeout is specified by either endpoint in its transport parameters
+        // (Section 18.2), the connection is silently closed and its state is discarded when it
+        // remains idle for longer than the minimum of the max_idle_timeout value advertised by
+        // both endpoints." IDLE is the condition it names, and idleness restarts on every
+        // packet processed - so a connection exchanging datagrams is, by s10.1's own
+        // arithmetic, never at risk from it. The handshake deadline is local policy with no
+        // RFC source and it bounds THE HANDSHAKE; there is no reading of s10 under which a
+        // one-shot handshake bound goes on applying to a connection whose handshake is over.
+        //
+        // THE FIELD IS RETIRED RATHER THAN THE READERS TAUGHT TO SKIP IT, and that choice is
+        // the whole of the design. The alternative was `if (!_confirmed)` at each of the three
+        // places that read the deadline - EarliestDeadline's first line, the post-wake check in
+        // ReceiveWithinDeadlineAsync, and AbandonAsync's comparison. That leaves `_deadline`
+        // holding an instant that PASSED LONG AGO but is still live, so every future reader has
+        // to know it is conditionally meaningless, and the FOURTH reader - the one a later task
+        // adds without reading this comment - reintroduces exactly the bug above. Retiring the
+        // field makes the three existing readers correct without knowing about `_confirmed` at
+        // all, and makes a fourth correct for free: RemainingBeforeDeadline can no longer
+        // return a non-positive value on a confirmed connection, so nothing built on it can
+        // abandon one. A stale field a reader must reason about is the thing worth deleting;
+        // a field whose value states the truth ("there is no handshake deadline any more") is
+        // not stale.
+        //
+        // DateTimeOffset.MaxValue AND NOT A LONGER DEADLINE. Pushing the instant out would hide
+        // this at a larger latency and leave a live connection dying for a reason that has
+        // nothing to do with it - the same failure one order of magnitude further away. The
+        // subtraction in RemainingBeforeDeadline stays in range: DateTime's whole span is about
+        // 3.16e18 ticks and TimeSpan holds 9.22e18, so MaxValue minus any clock reading cannot
+        // overflow.
+        //
+        // WHAT STILL BOUNDS THIS CONNECTION, ALL OF IT UNCHANGED. EarliestDeadline takes a
+        // MINIMUM, so removing an entry can only LENGTHEN a wait - the one direction its own
+        // remark did not have to think about before - and what is left has to be enough on its
+        // own. It is: s10.1's idle deadline is still in the table and still carries s10.1's
+        // third-paragraph floor ("endpoints MUST increase the idle timeout period to be at
+        // least three times the current Probe Timeout (PTO)") through EffectiveIdlePeriod,
+        // which is capped to a period this connection can actually arm - see there. The other
+        // three entries (RFC 9002 A.8's loss detection timer, s7.7's pacing release, s13.2.1's
+        // delayed ACK) only ever shorten it further, and the caller's CancellationToken ends
+        // any wait from outside. So every wait still terminates, and the thing that terminates
+        // it is now the thing RFC 9000 s10.1 says should.
+        //
+        // AbandonAsync's COMPARISON STAYS CORRECT AND ITS ANSWER STAYS TRUTHFUL. It picks the
+        // nearer of the two abandonment deadlines with
+        // `RemainingBeforeIdleTimeout() <= RemainingBeforeDeadline()` and publishes that as
+        // IdleTimedOut. After this line the right-hand side is enormous and the left-hand side
+        // is what expired, so the comparison selects idle - which is not "it always reports
+        // idle now" but "the only abandonment a confirmed connection HAS is the idle one", and
+        // reporting it is therefore true rather than merely convenient. Before this line
+        // nothing has changed at all and the comparison still separates the two.
+        //
+        // DeadlineExceeded IS THEREFORE UNREACHABLE FROM A CONFIRMED CONNECTION BY
+        // CONSTRUCTION, so its message - which asserts that a handshake did not confirm - can
+        // no longer be raised on one that did. That is why the message is left exactly as it
+        // was: it was not wrong, the state it was raised in was. See its own remark.
+        //
+        // TlsQuicConnectionTests.AConfirmedConnectionKeepsExchangingDatagramsPastTheHandshake
+        // Deadline is the witness, and TlsQuicConnectionTests.AnUnconfirmedConnectionStillDies
+        // OnTheHandshakeDeadline is the one that stops this being fixed by deleting the bound.
+        _deadline = DateTimeOffset.MaxValue;
 
         // RFC 9000 s14.3.1: "A QUIC sender can therefore enter the DPLPMTUD BASE state when the
         // QUIC connection handshake has been completed." This is that instant, and it is the
@@ -6521,8 +6647,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // both TimeSpan and every DateTimeOffset sum built from one. A PEER CHOOSES THIS NUMBER,
     // so a conversion that threw would be a remote kill switch of exactly the shape the
     // discard guard was; it saturates instead. The cap is a year because anything past it is
-    // indistinguishable from s18.2's "disabled" for an attempt the handshake deadline already
-    // bounds in seconds.
+    // indistinguishable from s18.2's "disabled".
+    //
+    // "FOR AN ATTEMPT THE HANDSHAKE DEADLINE ALREADY BOUNDS IN SECONDS" IS WHAT THAT SENTENCE
+    // USED TO END WITH, AND CONFIRMATION TOOK THAT BOUND AWAY. A year is still a fine answer to
+    // "what did this peer advertise" - EffectiveIdleTimeout is a fact about advertisements and
+    // TlsQuicConnectionTests.APeerAdvertisingTheLargestVarintIdleTimeoutSaturatesRatherThan
+    // Overflowing pins the year - but it is no longer a period anything downstream is protected
+    // from. EffectiveIdlePeriod is where that is handled now; see Armable there.
     private static TimeSpan? ToIdleTimeout(ulong? milliseconds)
     {
         if (milliseconds is not { } value || value == 0)
@@ -6588,12 +6720,47 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     {
         if (EffectiveIdleTimeout() is not { } advertised)
         {
-            return _options.IdleTimeout;
+            return Armable(_options.IdleTimeout);
         }
 
         var floor = FromTicksSaturating((double)PtoDuration(_peerMaxAckDelay).Ticks * 3.0);
-        return advertised >= floor ? advertised : floor;
+        return Armable(advertised >= floor ? advertised : floor);
     }
+
+    /// <summary>The longest delay a <see cref="CancellationTokenSource"/> can be built for, and
+    /// therefore the longest wait <c>ReceiveWithinDeadlineAsync</c> can arm.</summary>
+    /// <remarks>The runtime's own ceiling, restated because it is not exposed: the constructor
+    /// refuses a delay whose whole milliseconds exceed <c>0xFFFFFFFE</c>, which is a little
+    /// under 50 days.</remarks>
+    private static readonly TimeSpan MaximumArmableDelay =
+        TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
+    // THE IDLE PERIOD IS NOW THE ONLY THING BOUNDING A CONFIRMED CONNECTION, SO IT HAS TO BE A
+    // PERIOD A TIMER CAN ACTUALLY BE ARMED FOR. Until RFC 9001 s4.1.2's confirmation retired
+    // the handshake deadline, EarliestDeadline's minimum was capped by it at ten seconds of
+    // local policy and nothing downstream could ever see a long one; after the retirement the
+    // idle deadline reaches ReceiveWithinDeadlineAsync's CancellationTokenSource unfiltered,
+    // and that constructor THROWS above its ceiling rather than clamping.
+    //
+    // WHICH WOULD BE A REMOTE KILL SWITCH, WHICH IS THE ONE OUTCOME ToIdleTimeout EXISTS TO
+    // PREVENT: "A PEER CHOOSES THIS NUMBER, so a conversion that threw would be a remote kill
+    // switch of exactly the shape the discard guard was; it saturates instead." Its saturation
+    // point is a year, which is far past what a timer can express, so a peer advertising a
+    // max_idle_timeout of fifty days or more would have turned every post-handshake receive
+    // into an ArgumentOutOfRangeException. TlsQuicConnectionOptions.IdleTimeout is only
+    // validated positive, so a local caller could reach the same place from the other side.
+    //
+    // A CEILING AND NOT A DIFFERENT POLICY. RFC 9000 s10.1's floor is applied FIRST and this
+    // clamps afterwards, so the "at least three times the current PTO" MUST is satisfied unless
+    // a PTO of over sixteen days would be needed to break it - which PtoDuration cannot produce
+    // from ToMaxAckDelay's capped input and MaximumPtoCount's capped backoff. And fifty days is
+    // past every value s10.1 is written about; ToIdleTimeout's own remark already reads its
+    // saturation point as "indistinguishable from s18.2's disabled".
+    //
+    // TlsQuicConnectionTests.AConfirmedConnectionArmsAnIdlePeriodTheTimerCanExpress is the
+    // witness, and it drives the peer-chosen side because that is the side an attacker holds.
+    private static TimeSpan Armable(TimeSpan period) =>
+        period <= MaximumArmableDelay ? period : MaximumArmableDelay;
 
     private TimeSpan RemainingBeforeIdleTimeout() =>
         IdleDeadline() - _options.TimeProvider.GetUtcNow();
@@ -6645,6 +6812,19 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // deadlines that have BOTH passed - but it is no longer standing in for a clock that
         // did not move. A3-5's row 145 is the mutation that measures the difference, and it
         // survives for exactly this reason.
+        //
+        // AND ON A CONFIRMED CONNECTION IT SELECTS IDLE EVERY TIME, WHICH IS AN ANSWER AND NOT
+        // A DEGENERATE COMPARISON. `_deadline` is DateTimeOffset.MaxValue from RFC 9001
+        // s4.1.2's confirmation onwards, so the right-hand side is an enormous positive and the
+        // left-hand side is whatever expired. IdleTimedOut is therefore true whenever a
+        // confirmed connection is abandoned - and that is the TRUTH about it rather than a
+        // default: RFC 9000 s10.1's idle timeout is the only abandonment such a connection has
+        // left, because the other one bounded a handshake that is over. Callers read this
+        // property to tell "the peer went quiet" from "the attempt ran out of time", and after
+        // confirmation the second of those is not a state that exists. The comparison is
+        // unchanged for the unconfirmed case, where it still separates two live deadlines and
+        // TlsQuicConnectionTests.TheNearerAbandonmentDeadlineStillBoundsTheReceiveWhenTheProbe
+        // IsLater pins both of its answers.
         var idle = RemainingBeforeIdleTimeout() <= RemainingBeforeDeadline();
         IdleTimedOut = idle;
 
