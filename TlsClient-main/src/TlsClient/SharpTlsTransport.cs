@@ -527,25 +527,24 @@ internal sealed class SharpTlsTransport : IAsyncDisposable
         }
     }
 
-    /// <summary>Refuses anything older than TLS 1.3, wherever the ClientHello came from.</summary>
+    /// <summary>Refuses a ClientHello that does not offer TLS 1.3, wherever it came from.</summary>
     /// <remarks>THE CHECK IS HERE BECAUSE THIS IS WHERE EVERY PATH CONVERGES. A profile can be
     /// chosen from TlsProfiles, built with ClientHelloProfiles.Custom, or rewritten in place by
     /// TlsSessionOptions.ConfigureTls, which runs immediately above both call sites - validating
-    /// at snapshot time would miss that last one entirely. This client no longer implements TLS
-    /// 1.1 or 1.2, so offering either would advertise a fallback it cannot complete: a server
-    /// that took it would leave the handshake unfinishable, which is a worse failure than this
-    /// one and arrives later.</remarks>
+    /// at snapshot time would miss that last one entirely.
+    /// <para>Offering 1.2 ALONGSIDE 1.3 is allowed: captured browser and app hellos do exactly
+    /// that (the Spotify iOS h2 hello lists 1.3 and 1.2), and refusing them made every such
+    /// preset undialable. A server that answers with a 1.2 ServerHello is refused by SharpTls
+    /// at the handshake (CustomTlsClient), so no downgrade path exists. What stays refused here
+    /// is a hello with no 1.3 at all - that one could never complete.</para></remarks>
     private static void RequireTls13Only(CustomTlsClientOptions tlsOptions)
     {
-        foreach (var version in tlsOptions.ClientHello.Spec.SupportedVersions)
+        if (!tlsOptions.ClientHello.Spec.SupportedVersions.Contains(
+                SharpTls.Protocol.TlsProtocolVersion.Tls13))
         {
-            if (version != SharpTls.Protocol.TlsProtocolVersion.Tls13)
-            {
-                throw new InvalidOperationException(
-                    $"This client speaks TLS 1.3 only; the ClientHello offers {version}. " +
-                    "Remove the older version from the profile, or from what ConfigureTls " +
-                    "writes onto it.");
-            }
+            throw new InvalidOperationException(
+                "This client speaks TLS 1.3 only, and the ClientHello does not offer it. " +
+                "Add TLS 1.3 to the profile, or to what ConfigureTls writes onto it.");
         }
     }
 

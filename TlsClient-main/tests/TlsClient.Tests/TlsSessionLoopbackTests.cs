@@ -159,6 +159,37 @@ public sealed class TlsSessionLoopbackTests
     }
 
     [Fact]
+    public async Task Session_ConnectsWithAHelloThatAlsoOffersTls12()
+    {
+        // The captured iOS h2 hello offers TLS 1.3 AND 1.2 in supported_versions, like the real
+        // app. Offering 1.2 alongside 1.3 must still connect; only a 1.2 ServerHello is refused.
+        using var certificates = TestCertificates.Create();
+        using var serverCredential = new TlsServerCertificate(
+            certificates.Leaf,
+            [certificates.Root]);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        var serverTask = RunSingleResponseServerAsync(
+            listener,
+            serverCredential,
+            timeout.Token);
+        var options = TlsPresets.SpotifyH2.CreateOptions();
+        options.HttpVersionPolicy = TlsHttpVersionPolicy.Http11Only;
+        options.DangerouslySkipServerCertificateValidation = true;
+        await using var session = new TlsSession(options);
+
+        var response = await session.GetAsync(
+            $"https://127.0.0.1:{port}/offers-tls12-too",
+            timeout.Token);
+        await serverTask;
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Session_TunnelsSharpTlsThroughHttpConnectProxy()
     {
         using var certificates = TestCertificates.Create();
