@@ -16,3 +16,6 @@ using System.Runtime.Versioning;
 [assembly: InternalsVisibleTo("TlsClient.Tests")]
 [assembly: InternalsVisibleTo("TlsClient.Fuzz")]
 [assembly: InternalsVisibleTo("TlsClient.Performance")]
+// MobileGen's DealerWebSocket reuses ProxyTunnel (SOCKS5 / HTTP CONNECT) to put the dealer
+// websocket on the same exit as the rest of a gen.
+[assembly: InternalsVisibleTo("MobileGen")]
