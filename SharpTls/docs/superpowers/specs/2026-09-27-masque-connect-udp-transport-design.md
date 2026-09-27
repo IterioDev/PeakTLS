@@ -1,6 +1,7 @@
 # MASQUE CONNECT-UDP datagram transport — design
 
-Date: 2026-09-27. Status: approved in conversation, awaiting review.
+Date: 2026-09-27. Status: design approved in conversation; five reviewer rounds applied;
+awaiting the user's read before planning.
 
 ## Goal
 
@@ -123,8 +124,8 @@ Today received HTTP datagrams are validated (quarter stream id, RFC 9297 s2.1) a
   forwarding `TlsQuicHttp3Streams`' flag and list, so the transport can wait for SETTINGS and
   read the two values step 2 needs with `TlsQuicHttp3Settings.Value`.
 - `PumpOnceAsync` is this type's (QUIC pump, then `TryProcess`, which is where received
-  datagrams are drained); a `false` return carries an HTTP/3 connection error code, which the
-  transport turns into `MasqueTunnelClosed`.
+  datagrams are drained); a `false` return means an HTTP/3 connection error, whose code is read
+  from `ConnectionErrorCode` and turned into `MasqueTunnelClosed` by the transport.
 - The tunnel stream's response body (capsules, RFC 9297 s3.2) is never parsed and never kept;
   the stream stays open for the tunnel's life, and a FIN or RESET_STREAM from the proxy ends the
   tunnel (component 4).
@@ -142,9 +143,12 @@ returned in every receive result; the inner connection never compares it, and th
 the real address), `OuterSpec` (`TlsQuicConnectionSpec`), `OuterHttp3Spec` (`TlsQuicHttp3Spec`,
 with `SETTINGS_H3_DATAGRAM = 1`), `ConfigureOuterClientHello` (`Action<ClientHelloBuilder>`, the
 type `TlsQuicOptions.ConfigureClientHello` already uses; TlsClient passes
-`TlsQuicOptions.ApplyDefaultClientHello`), `HandshakeDeadline` (bounds steps 1 to 4 below as one
-deadline), `IdleTimeout` (the outer's RFC 9000 s10.1 value; TlsClient passes the inner's, so a
-pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
+`TlsQuicOptions.ApplyDefaultClientHello`; TlsClient passes the outer `TlsQuicOptions`'
+`ConfigureClientHello`, null meaning that default, as `Http3Connection.CreateTlsClient` does, so
+`configureOuter` can set it), `HandshakeDeadline` (bounds steps 1 to 4 below as one deadline).
+ALPN is fixed to `h3`. No idle timeout option: like the inner Spotify connection, the outer
+advertises no `max_idle_timeout`, so the proxy's value governs and the failure path below
+handles its expiry.
 
 `static Task<TlsQuicMasqueTransport> ConnectAsync(options, cancellationToken)`, in order:
 
@@ -156,8 +160,9 @@ pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
    `CustomTlsQuicClientOptions { ServerName, ServerPort, ClientHello }`. No default parameter set
    carries `max_datagram_frame_size` (`RfcMinimumParameters` holds only
    `initial_source_connection_id`), so the outer options add an explicit
-   `TlsQuicTransportParameterSlot.Literal(0x20, 65535)` entry; `TlsQuicHttp3Connection`'s init
-   check refuses `SETTINGS_H3_DATAGRAM = 1` without it. `OuterSpec` has PMTUD off and
+   `TlsQuicTransportParameterSlot.Literal(0x20, [0x80, 0x00, 0xFF, 0xFF])` entry (65535 as a
+   varint; `Literal` takes bytes); `TlsQuicHttp3Connection`'s init check refuses
+   `SETTINGS_H3_DATAGRAM = 1` without it. `OuterSpec` has PMTUD off and
    `BasePathMtu = MaximumPathMtu = 1392`; `OuterHttp3Spec` sends `SETTINGS_H3_DATAGRAM = 1`.
    Failure: the connection's own exception.
 2. Open local streams, pump until the proxy's SETTINGS arrive. `SETTINGS_ENABLE_CONNECT_PROTOCOL`
@@ -177,10 +182,11 @@ pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
 
 Ownership. The outer `TlsQuicConnection` is not thread-safe, so exactly one task touches it
 after `ConnectAsync`: the owner task. It loops: while `connection.QueuedDatagrams` is below the
-FIFO bound, move one payload from the outbound channel through `http3.TrySendDatagram` (the
-transport prefixes RFC 9298 s5's context id 0 first); then `connection.SendPendingAsync`;
-`http3.PumpOnceAsync` (a `false` return is an HTTP/3 connection error: `MasqueTunnelClosed`
-carrying the code); drain `http3.DrainDatagrams(streamId)` into the inbound channel, stripping
+FIFO bound, move one payload from the outbound channel with `Reader.TryRead` (never an awaiting
+read, which would starve the pump) through `http3.TrySendDatagram` (the transport prefixes
+RFC 9298 s4's context id 0 first); then `connection.SendPendingAsync`; `http3.PumpOnceAsync` (a
+`false` return is an HTTP/3 connection error: `MasqueTunnelClosed` carrying
+`ConnectionErrorCode`); drain `http3.DrainDatagrams(streamId)` into the inbound channel, stripping
 the context id and counting a non-zero one as dropped. The pump blocks inside
 the connection's receive until the proxy sends or a timer fires, so a writer must be able to
 interrupt it: the same mechanism `Http3StreamMultiplexer` already uses (`_pumpInterrupt`), a
@@ -217,8 +223,8 @@ proxy's is shorter than the inner's, the outer ends first during a long idle and
 takes this path.
 
 `DisposeAsync`: cancel the owner task, CONNECTION_CLOSE the outer with H3_NO_ERROR, which ends
-the tunnel stream with it (the library has no RESET_STREAM send path and this design adds none),
-dispose the socket. Idempotent.
+the tunnel stream with it (the library has no caller-initiated RESET_STREAM path, only the one
+that answers STOP_SENDING, and this design adds none), dispose the socket. Idempotent.
 
 ### 5. TlsClient wiring (existing files)
 
@@ -241,9 +247,11 @@ dispose the socket. Idempotent.
 - TCP path: `ProxyTunnel`'s switch on `TlsProxyType` gains a `Masque` arm that throws
   `NotSupportedException`: "MASQUE carries UDP; set `options.Quic.Proxy` and give `options.Proxy`
   a SOCKS5 or HTTP proxy for TCP".
-- Outer options: `TlsQuicOptions` defaults (the library's default QUIC ClientHello) with PMTUD
+- Outer options: a fresh `TlsQuicOptions` (the library's default QUIC ClientHello) with PMTUD
   off, both MTUs 1392, an explicit `max_datagram_frame_size = 65535` transport parameter entry,
-  `SETTINGS_H3_DATAGRAM = 1`, `IdleTimeout` equal to the inner's; `configureOuter` runs last.
+  and a fresh `TlsHttp3Options` whose `Settings` carry `SETTINGS_H3_DATAGRAM = 1` (that is where
+  the setting lives, and `TlsQuicOptions.Snapshot` takes one); `configureOuter` runs last on the
+  `TlsQuicOptions`.
 - Telemetry: `TlsConnectEventKind.MasqueTunnelOpened` (elapsed to the 2xx) and
   `MasqueTunnelClosed` (reason), through the existing `ConnectObserver`.
 
@@ -308,8 +316,8 @@ never in the repository:
 ## Documentation
 
 `TlsClient-main/docs/USAGE.md`: the proxy-type table in section 2a gains a `TlsProxy.Masque` row
-and a `Quic.Proxy` paragraph, and the "h3 through an HTTP proxy ... Neither relays UDP" row of
-the h3 table is rewritten. `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` gains a pointer to the new
+and a `Quic.Proxy` paragraph, its heading "With HTTP/3 it must be SOCKS5" is reworded, and the
+"h3 through an HTTP proxy ... Neither relays UDP" row of the h3 table is rewritten. `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` gains a pointer to the new
 `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`, which holds the wire details above (dial sequence,
 framing, error model, MTU arithmetic) for readers who never see this spec.
 
