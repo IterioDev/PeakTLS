@@ -1575,10 +1575,10 @@ public static TlsProxy Masque(
     ArgumentNullException.ThrowIfNull(username);
     ArgumentNullException.ThrowIfNull(password);
     var uri = new Uri(address, UriKind.Absolute);
-    if (uri.IsDefaultPort || uri.Port < 0)
+    if (uri.IsDefaultPort || uri.Port < 0)   // note: IsDefaultPort is also true for an explicit :443; a MASQUE proxy on 443 would need a different check
     {
         throw new ArgumentException(
-            "A MASQUE proxy address must name its UDP port explicitly, for example https://masque.oxylabs.io:50000.",
+            "A MASQUE proxy address must name a UDP port other than 443 explicitly, for example https://masque.oxylabs.io:50000.",
             nameof(address));
     }
     var proxy = Create(TlsProxyType.Masque, uri, Uri.UriSchemeHttps, new NetworkCredential(username, password));
@@ -1768,7 +1768,7 @@ public sealed class MasqueRoutingTests
         options.Quic.Proxy = TlsProxy.Masque("https://127.0.0.1:1", "u", "p");
         options.Quic.HandshakeDeadline = TimeSpan.FromSeconds(2);
         options.Timeout = TimeSpan.FromSeconds(10);
-        options.Retry.RetryConnectionFailures = false; // one attempt is the point; check the property's real name
+        options.Retry.RetryConnectionFailures = false; // TlsRetryOptions.cs:28, default true; one attempt is the point
         await using var session = new TlsSession(options);
 
         var exception = await Assert.ThrowsAnyAsync<Exception>(
@@ -1842,7 +1842,7 @@ private static async ValueTask<Http3Connection> DialInnerAsync(
     CancellationToken cancellationToken)
 ```
 
-whose body is those lines with four mechanical changes: `spec` (read at `:314`) becomes `configuration.Quic.ConnectionSpec`; `tlsClient` (declared at `:310`, outside the span) becomes a local `CustomTlsQuicClient? tlsClient = null;` at the top of the helper; the `var handshakeTimeout = ...` (`~:340`) and `var probing = ...` (`~:352`) declarations are deleted because both are now parameters (leaving them is CS0136), and the loop computes them before the call; `connection` is a local disposed in a `catch { if (connection is not null) await connection.DisposeAsync(); throw; }` inside the helper. The loop then reads `return await DialInnerAsync(origin, configuration, factory, tls13SessionCache, transport, endPoint, relay, probing, handshakeTimeout, connectionId, cancellationToken);` with its existing outer catch keeping the transport disposal and retry decision. Run the `Socks5Association*` and `Http3Connection*` suites before going further: this refactor must be behaviour-neutral.
+whose body is those lines with four mechanical changes: `spec` (read at `:314`) becomes `configuration.Quic.ConnectionSpec`; `tlsClient` (declared at `:310`, outside the span) becomes a local `CustomTlsQuicClient? tlsClient = null;` at the top of the helper; the `var handshakeTimeout = ...` (`~:340`) and `var probing = ...` (`~:352`) declarations are deleted because both are now parameters (leaving them is CS0136), and the loop computes them before the call; `connection` is a local disposed in a `catch { if (connection is not null) await connection.DisposeAsync(); throw; }` inside the helper. The loop then reads `return await DialInnerAsync(origin, configuration, factory, tls13SessionCache, transport, endPoint, relay, probing, handshakeTimeout, connectionId, cancellationToken);` with its existing outer catch keeping the transport disposal and retry decision. Also delete the `connection` disposal in the loop's outer catch (`Http3Connection.cs:446-449`), since `connection` now lives in the helper. Run `dotnet test TlsClient-main/tests/TlsClient.Tests --filter "FullyQualifiedName~Socks5Association|FullyQualifiedName~Http3"` before going further: this refactor must be behaviour-neutral.
 
 Then, after `spec`/`factory` are built and BEFORE the origin is resolved (MASQUE never resolves the origin locally; move the `dnsResolver.ResolveAsync` block below this branch), add:
 
@@ -1916,11 +1916,16 @@ private static async ValueTask<IHttpConnection> CreateThroughMasqueAsync(
 }
 ```
 
-`TlsConnectEventKind`: append `MasqueTunnelOpened` and `MasqueTunnelClosed` with summaries; add the two lines to `PublicAPI.Unshipped.txt`.
+`TlsConnectEventKind`: append `MasqueTunnelOpened = 17` and `MasqueTunnelClosed = 18` (after `Socks5AssociationWentSilent = 16`) with summaries; add to `PublicAPI.Unshipped.txt`:
+
+```
+TlsClient.TlsConnectEventKind.MasqueTunnelOpened = 17 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.MasqueTunnelClosed = 18 -> TlsClient.TlsConnectEventKind
+```
 
 - [ ] **Step 4: Run, expect pass**
 
-Run: `dotnet test TlsClient-main/tests/TlsClient.Tests --filter "FullyQualifiedName~MasqueRoutingTests|FullyQualifiedName~ProxyTunnelTests|FullyQualifiedName~Socks5|FullyQualifiedName~Http3Connection|FullyQualifiedName~ProxyUsageDocTests"`.
+Run: `dotnet test TlsClient-main/tests/TlsClient.Tests --filter "FullyQualifiedName~MasqueRoutingTests|FullyQualifiedName~ProxyTunnelTests|FullyQualifiedName~Socks5|FullyQualifiedName~Http3|FullyQualifiedName~ProxyUsageDocTests"`.
 
 - [ ] **Step 5: Commit**
 
