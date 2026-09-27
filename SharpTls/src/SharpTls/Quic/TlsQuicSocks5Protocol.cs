@@ -22,6 +22,11 @@ public enum TlsQuicProxyError
     MalformedProxyResponse,
     /// <summary>The control connection closed, which ends the UDP association.</summary>
     AssociationTerminated,
+
+    /// <summary>The relay answered a QUIC datagram with a TLS alert record, which only a TCP
+    /// TLS server produces: the proxy writes UDP ASSOCIATE payload into a TCP connection to the
+    /// destination port, so it cannot carry QUIC at all.</summary>
+    RelayDeliveredTlsAlert,
 }
 
 /// <summary>A SOCKS5 proxy failure. Distinct from <see cref="TlsQuicTransportException"/>,
@@ -206,7 +211,7 @@ internal static class TlsQuicSocks5Protocol
     }
 
     // RFC 1928 s6.
-    private static string DescribeReplyCode(byte code) => code switch
+    internal static string DescribeReplyCode(byte code) => code switch
     {
         0x01 => "general SOCKS server failure",
         0x02 => "connection not allowed by ruleset",

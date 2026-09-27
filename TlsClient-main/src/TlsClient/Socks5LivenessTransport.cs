@@ -38,10 +38,20 @@ namespace TlsClient;
 /// </remarks>
 internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
 {
-    private readonly TlsQuicSocks5Transport _relay;
+    private readonly ITlsQuicDatagramTransport _relay;
+    private readonly TlsQuicSocks5Transport? _socks;
     private int _inboundDatagrams;
+    private bool _sawQuicDatagram;
 
     public Socks5LivenessTransport(TlsQuicSocks5Transport relay)
+        : this((ITlsQuicDatagramTransport)relay)
+    {
+        _socks = relay;
+    }
+
+    /// <summary>For tests: any transport stands in for the relay, and the drop counters read as
+    /// zero because only <see cref="TlsQuicSocks5Transport"/> keeps them.</summary>
+    internal Socks5LivenessTransport(ITlsQuicDatagramTransport relay)
     {
         ArgumentNullException.ThrowIfNull(relay);
         _relay = relay;
@@ -79,9 +89,9 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     /// </remarks>
     public long RelayedTotal =>
         InboundDatagrams +
-        _relay.DatagramsFromUnexpectedSource +
-        _relay.MalformedRelayHeaders +
-        _relay.OversizedRelayPayloads;
+        (_socks?.DatagramsFromUnexpectedSource ?? 0) +
+        (_socks?.MalformedRelayHeaders ?? 0) +
+        (_socks?.OversizedRelayPayloads ?? 0);
 
     /// <summary>
     /// Gets whether nothing whatsoever has come back through this association — neither a
@@ -95,7 +105,7 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
 
     /// <summary>Gets the inner transport's account of every datagram it dropped, for splicing
     /// into a failure message.</summary>
-    public string DropSummary => _relay.DropSummary;
+    public string DropSummary => _socks?.DropSummary ?? "no relay counters: not a SOCKS5 relay";
 
     /// <inheritdoc />
     public int MaxDatagramPayloadSize => _relay.MaxDatagramPayloadSize;
@@ -122,6 +132,19 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     {
         var result = await _relay.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
 
+        // THE RELAY'S FIRST DATAGRAMS SAY WHETHER IT RELAYS UDP AT ALL. A QUIC datagram carries
+        // RFC 9000 s17's fixed bit; a seven-byte TLS alert record is what a TCP TLS server
+        // answers to bytes that are not a ClientHello, and a UDP relay cannot produce one. Its
+        // arrival before any QUIC datagram means the proxy writes UDP ASSOCIATE payload into a
+        // TCP connection to the destination port, and every attempt through it will sit out the
+        // handshake deadline. SharpTls's receiver rightly only counts such a packet (RFC 9000
+        // s12.2 forbids a throw on unauthenticated input); the association is where the verdict
+        // belongs, and once one QUIC datagram has arrived the check is off for good.
+        if (!_sawQuicDatagram)
+        {
+            _sawQuicDatagram = InspectFirstDatagram(buffer.Span[..result.Length]);
+        }
+
         // THE 0 -> 1 TRANSITION IS THE EVENT, so the callback fires exactly once however many
         // datagrams follow. Interlocked because the connection's receive loop and the dialling
         // thread read this from different threads; the counter is only consulted once the
@@ -136,4 +159,34 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
 
     /// <inheritdoc />
     public ValueTask DisposeAsync() => _relay.DisposeAsync();
+
+    private static bool InspectFirstDatagram(ReadOnlySpan<byte> datagram)
+    {
+        if (IsTlsAlertRecord(datagram))
+        {
+            throw new TlsQuicProxyException(
+                TlsQuicProxyError.RelayDeliveredTlsAlert,
+                "The SOCKS5 relay answered a QUIC datagram with a TLS alert record "
+                + $"({Convert.ToHexString(datagram)}: alert level {datagram[5]}, description "
+                + $"{datagram[6]}). Only a TCP TLS server produces that record, so this proxy writes "
+                + "UDP ASSOCIATE payload into a TCP connection to the destination port and cannot "
+                + "carry QUIC. Use HTTP/2 over TCP through it, or a proxy whose UDP ASSOCIATE "
+                + "relays datagrams.");
+        }
+
+        return datagram.Length > 0 && (datagram[0] & 0x40) != 0;
+    }
+
+    /// <summary>RFC 8446 s5.1's record header with ContentType alert (21), a legacy version of
+    /// 0x0300 to 0x0304 and a length of 2, then an alert level of warning or fatal: OpenSSL and
+    /// BoringSSL answer any first record that is not TLS with exactly <c>15 03 01 00 02 02 46</c>,
+    /// fatal <c>protocol_version</c>.</summary>
+    internal static bool IsTlsAlertRecord(ReadOnlySpan<byte> datagram) =>
+        datagram.Length == 7
+        && datagram[0] == 0x15
+        && datagram[1] == 0x03
+        && datagram[2] <= 0x04
+        && datagram[3] == 0x00
+        && datagram[4] == 0x02
+        && datagram[5] is 1 or 2;
 }

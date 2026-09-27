@@ -158,7 +158,10 @@ internal static class ProxyTunnel
         if (response[1] != 0)
         {
             throw new HttpRequestException(
-                $"The SOCKS5 proxy rejected CONNECT with status 0x{response[1]:x2}.");
+                $"The SOCKS5 proxy rejected CONNECT with status 0x{response[1]:x2} "
+                + $"({SharpTls.Quic.TlsQuicSocks5Protocol.DescribeReplyCode(response[1])}). The proxy "
+                + "could not or would not reach the destination; that decision was made on its side "
+                + "of the tunnel.");
         }
         var addressLength = response[3] switch
         {

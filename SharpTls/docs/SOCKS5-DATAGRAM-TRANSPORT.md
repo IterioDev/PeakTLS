@@ -172,6 +172,14 @@ does, any pending or subsequent `ReceiveAsync`/`SendAsync` call throws
 `TlsQuicProxyException(TlsQuicProxyError.AssociationTerminated)`. `DisposeAsync` closes the
 UDP socket first, then the control connection.
 
+A relay that answers a QUIC Initial with a seven-byte TLS alert record (`15 03 01 00 02 02 46`,
+fatal `protocol_version`) is not relaying UDP at all: only a TCP TLS server produces that record,
+so the proxy is writing the datagram payload into a TCP connection to the destination port.
+TlsClient's `Socks5LivenessTransport` fails such an association at once with
+`TlsQuicProxyException(TlsQuicProxyError.RelayDeliveredTlsAlert)` instead of waiting out the
+handshake deadline; SharpTls's own packet receiver keeps RFC 9000 s12.2's rule and only counts
+the discard.
+
 ## Error model
 
 ```csharp
@@ -183,6 +191,7 @@ public enum TlsQuicProxyError
     AssociateRejected,
     MalformedProxyResponse,
     AssociationTerminated,
+    RelayDeliveredTlsAlert,
 }
 
 public sealed class TlsQuicProxyException : IOException

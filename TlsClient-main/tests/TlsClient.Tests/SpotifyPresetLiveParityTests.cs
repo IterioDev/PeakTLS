@@ -48,14 +48,10 @@ public sealed class SpotifyPresetLiveParityTests
     private static bool IsGrease(int value) =>
         (value & 0x0F0F) == 0x0A0A && (value >> 8) == (value & 0xFF);
 
-    private static async Task<JsonDocument> DialAsync()
+    /// <summary>The 9.1.86 spclient GET image without the per-account credentials: the same
+    /// sequence samples/TlsClient.SpotifyIos26/Program.cs adds, and USAGE.md section 3c shows.</summary>
+    private static HttpRequestMessage NewRequest()
     {
-        var options = TlsPresets.Spotify.CreateOptions();
-        options.Timeout = TimeSpan.FromSeconds(30);
-        await using var session = new TlsSession(options);
-
-        // The 9.1.86 spclient GET image without the per-account credentials: the same sequence
-        // samples/TlsClient.SpotifyIos26/Program.cs adds, and USAGE.md section 3c shows.
         var request = new HttpRequestMessage(HttpMethod.Get, Endpoint);
         request.AddHeader("spotify-app-version", "9.1.86.2428");
         request.AddHeader("accept", "*/*");
@@ -65,6 +61,45 @@ public sealed class SpotifyPresetLiveParityTests
         request.AddHeader("accept-language", "en-GB,en;q=0.9");
         request.AddHeader("accept-encoding", "gzip, deflate, br");
         request.AddHeader("user-agent", "Spotify/9.1.86 iOS/27.0 (iPhone17,2)");
+        return request;
+    }
+
+    /// <summary>The second and third requests on one connection are where the QPACK dynamic
+    /// table does its work: the capacity has been announced, pairs are inserted on their second
+    /// use, and the sections reference them. Only a real decoder can say those bytes were right,
+    /// and one request per connection, which the other facts here use, never inserts.</summary>
+    [Fact]
+    public async Task ThreeRequestsOnOneConnectionAllDecodeAtTheServer()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var options = TlsPresets.Spotify.CreateOptions();
+        options.Timeout = TimeSpan.FromSeconds(30);
+        await using var session = new TlsSession(options);
+
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            var response = await session.SendAsync(NewRequest());
+
+            Assert.Equal(HttpVersion.Version30, response.HttpVersion);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using var document = JsonDocument.Parse(response.Text);
+            Assert.Equal(
+                CapturedJa3Hash,
+                document.RootElement.GetProperty("tls").GetProperty("ja3").GetProperty("hash").GetString());
+        }
+    }
+
+    private static async Task<JsonDocument> DialAsync()
+    {
+        var options = TlsPresets.Spotify.CreateOptions();
+        options.Timeout = TimeSpan.FromSeconds(30);
+        await using var session = new TlsSession(options);
+
+        var request = NewRequest();
 
         var response = await session.SendAsync(request);
 

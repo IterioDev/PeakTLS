@@ -797,6 +797,37 @@ internal sealed class Http3Connection : IHttpConnection
     /// stream and its caller retires the connection, while everything else in flight runs
     /// on.</para>
     /// </remarks>
+    /// <summary>RFC 9114 s8.1 and RFC 9204 s6 names for an application error code, or the raw
+    /// value when it is neither.</summary>
+    private static string DescribeHttp3ErrorCode(ulong code)
+    {
+        var name = code switch
+        {
+            0x100 => "H3_NO_ERROR",
+            0x101 => "H3_GENERAL_PROTOCOL_ERROR",
+            0x102 => "H3_INTERNAL_ERROR",
+            0x103 => "H3_STREAM_CREATION_ERROR",
+            0x104 => "H3_CLOSED_CRITICAL_STREAM",
+            0x105 => "H3_FRAME_UNEXPECTED",
+            0x106 => "H3_FRAME_ERROR",
+            0x107 => "H3_EXCESSIVE_LOAD",
+            0x108 => "H3_ID_ERROR",
+            0x109 => "H3_SETTINGS_ERROR",
+            0x10a => "H3_MISSING_SETTINGS",
+            0x10b => "H3_REQUEST_REJECTED",
+            0x10c => "H3_REQUEST_CANCELLED",
+            0x10d => "H3_REQUEST_INCOMPLETE",
+            0x10e => "H3_MESSAGE_ERROR",
+            0x10f => "H3_CONNECT_ERROR",
+            0x110 => "H3_VERSION_FALLBACK",
+            0x200 => "QPACK_DECOMPRESSION_FAILED",
+            0x201 => "QPACK_ENCODER_STREAM_ERROR",
+            0x202 => "QPACK_DECODER_STREAM_ERROR",
+            _ => null,
+        };
+        return name is null ? $"application error 0x{code:x}" : $"{name} (0x{code:x})";
+    }
+
     private async ValueTask<ParsedHttpResponse> ReadResponseAsync(
         Http3StreamState state,
         BufferedRequest request,
@@ -896,10 +927,31 @@ internal sealed class Http3Connection : IHttpConnection
             }
         }
 
+        if (progress.ResetErrorCode is { } resetCode)
+        {
+            // A peer RESET_STREAM ends one exchange and leaves the connection whole: SharpTls has
+            // already released the s2.1.2 slot, so the failure is stream-scoped and the pool
+            // keeps the connection. Naming the code is what RFC 9114 s4.1.1's retry rule needs.
+            throw new TlsHttpProtocolException(
+                $"The server reset request stream {state.StreamId} with "
+                + $"{DescribeHttp3ErrorCode(resetCode)} "
+                + (headers is null
+                    ? "before any response header section arrived."
+                    : "before the response was complete.")
+                + (resetCode == 0x10b
+                    ? " RFC 9114 s4.1.1: the request was not processed and may be retried, "
+                        + "preferably on another connection."
+                    : string.Empty))
+            {
+                IsStreamScoped = true,
+            };
+        }
         if (headers is null || status is null)
         {
             throw new TlsHttpProtocolException(
-                "The HTTP/3 response stream ended before its header section arrived.");
+                "The HTTP/3 response stream ended before its header section arrived: the server "
+                + $"closed stream {state.StreamId} with FIN after {progress.Body?.Length ?? 0} body "
+                + "byte(s) and no HEADERS frame, which is neither a response nor a RESET_STREAM.");
         }
         if (!progress.ResponseIsComplete)
         {

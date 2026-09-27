@@ -57,7 +57,8 @@ internal sealed class SharpTlsHttp3Streams(
             response.TrailerFields,
             response.Body.Length,
             ReceiveComplete(streamId),
-            response.IsComplete);
+            response.IsComplete,
+            response.ResetErrorCode);
     }
 
     public byte[] CopyBody(ulong streamId, int start, int end)

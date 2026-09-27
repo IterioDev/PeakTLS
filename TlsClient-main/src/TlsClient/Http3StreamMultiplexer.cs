@@ -24,13 +24,16 @@ namespace TlsClient;
 /// <param name="ReceiveComplete">Whether the peer closed its half of the stream.</param>
 /// <param name="IsComplete">Whether the response is a complete RFC 9114 section 4.1 message.
 /// </param>
+/// <param name="ResetErrorCode">The application error code of a peer RESET_STREAM, or
+/// <see langword="null"/> while the stream has not been reset; a reset ends the exchange.</param>
 internal readonly record struct Http3StreamSnapshot(
     int Status,
     ImmutableArray<TlsQuicHttp3Field> HeaderFields,
     ImmutableArray<TlsQuicHttp3Field> TrailerFields,
     int BodyLength,
     bool ReceiveComplete,
-    bool IsComplete);
+    bool IsComplete,
+    ulong? ResetErrorCode = null);
 
 /// <summary>
 /// The QUIC and HTTP/3 operations <see cref="Http3StreamMultiplexer"/> drives, narrowed to what
@@ -106,6 +109,8 @@ internal interface IHttp3Streams : IAsyncDisposable
 /// <param name="Done">Whether the peer closed its half of the stream.</param>
 /// <param name="ResponseIsComplete">Whether the reader considers the message complete.</param>
 /// <param name="Fault">What ended this stream, if anything did.</param>
+/// <param name="ResetErrorCode">The application error code of a peer RESET_STREAM, or
+/// <see langword="null"/>; when set, <paramref name="Done"/> is also set.</param>
 internal readonly record struct Http3StreamProgress(
     int Status,
     ImmutableArray<TlsQuicHttp3Field> HeaderFields,
@@ -114,7 +119,8 @@ internal readonly record struct Http3StreamProgress(
     byte[]? Body,
     bool Done,
     bool ResponseIsComplete,
-    Exception? Fault);
+    Exception? Fault,
+    ulong? ResetErrorCode = null);
 
 /// <summary>
 /// One in-flight HTTP/3 request stream: what the read loop has harvested for it, and what its
@@ -149,6 +155,7 @@ internal sealed class Http3StreamState(ulong streamId, bool wantsChunks, long bo
     private byte[]? _body;
     private bool _done;
     private bool _responseIsComplete;
+    private ulong? _resetErrorCode;
     private Exception? _fault;
 
     /// <summary>Gets whether nothing further will be harvested for this stream.</summary>
@@ -171,7 +178,8 @@ internal sealed class Http3StreamState(ulong streamId, bool wantsChunks, long bo
         ImmutableArray<TlsQuicHttp3Field> trailerFields,
         byte[]? body,
         bool done,
-        bool responseIsComplete)
+        bool responseIsComplete,
+        ulong? resetErrorCode = null)
     {
         lock (Sync)
         {
@@ -190,6 +198,7 @@ internal sealed class Http3StreamState(ulong streamId, bool wantsChunks, long bo
                 _trailerFields = trailerFields;
                 _body = body;
                 _responseIsComplete = responseIsComplete;
+                _resetErrorCode = resetErrorCode;
                 _done = true;
             }
         }
@@ -225,7 +234,8 @@ internal sealed class Http3StreamState(ulong streamId, bool wantsChunks, long bo
                 _body,
                 _done,
                 _responseIsComplete,
-                _fault);
+                _fault,
+                _resetErrorCode);
         }
     }
 }
@@ -533,8 +543,9 @@ internal sealed class Http3StreamMultiplexer(IHttp3Streams streams) : IAsyncDisp
                 chunk,
                 snapshot.TrailerFields,
                 body,
-                snapshot.ReceiveComplete,
-                snapshot.IsComplete);
+                snapshot.ReceiveComplete || snapshot.ResetErrorCode is not null,
+                snapshot.IsComplete,
+                snapshot.ResetErrorCode);
         }
     }
 
