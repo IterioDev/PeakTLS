@@ -87,7 +87,7 @@ public sealed class TlsQuicPacketReceiverTests
         Assert.Equal(datagram[0], receiver.FirstDiscardFirstByte);
         Assert.Equal(1, receiver.DiscardsFor(TlsQuicDiscardReason.AuthenticationFailed));
         Assert.Equal(
-            $"AuthenticationFailed x1; first was AuthenticationFailed at Initial, {datagram.Length} bytes, first octet 0x{datagram[0]:X2}",
+            $"AuthenticationFailed x1; first was AuthenticationFailed at Initial, {datagram.Length} bytes, first octet 0x{datagram[0]:X2}, bytes {Convert.ToHexString(datagram)}",
             receiver.DescribeDiscards());
 
         // A second discard of another kind counts but does not displace the first.

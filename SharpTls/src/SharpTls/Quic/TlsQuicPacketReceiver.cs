@@ -495,6 +495,14 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// removal.</summary>
     internal byte FirstDiscardFirstByte { get; private set; }
 
+    /// <summary>Gets the first discarded packet's bytes, at most 1500 of them, so one log line
+    /// carries what a decoder needs: an Initial decrypts from its own header, and a Retry or
+    /// Version Negotiation packet is cleartext.</summary>
+    internal ReadOnlyMemory<byte> FirstDiscardBytes => _firstDiscardBytes;
+
+    private const int MaximumRetainedDiscardBytes = 1500;
+    private byte[] _firstDiscardBytes = [];
+
     /// <summary>Gets how many packets were discarded for <paramref name="reason"/>.</summary>
     internal int DiscardsFor(TlsQuicDiscardReason reason) => _discardsByReason[(int)reason];
 
@@ -516,7 +524,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         }
 
         var first = FirstDiscardLevel is { } level ? $"{FirstDiscardReason} at {level}" : $"{FirstDiscardReason}";
-        return $"{string.Join(", ", parts)}; first was {first}, {FirstDiscardLength} bytes, first octet 0x{FirstDiscardFirstByte:X2}";
+        return $"{string.Join(", ", parts)}; first was {first}, {FirstDiscardLength} bytes, first octet 0x{FirstDiscardFirstByte:X2}, bytes {Convert.ToHexString(_firstDiscardBytes)}";
     }
 
     private void NoteDiscard(TlsQuicDiscardReason reason, ReadOnlySpan<byte> packet, TlsQuicEncryptionLevel? level)
@@ -531,6 +539,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         FirstDiscardLevel = level;
         FirstDiscardLength = packet.Length;
         FirstDiscardFirstByte = packet.Length == 0 ? (byte)0 : packet[0];
+        _firstDiscardBytes = packet[..Math.Min(packet.Length, MaximumRetainedDiscardBytes)].ToArray();
     }
 
     /// <summary>Whether read keys are installed at <paramref name="level"/>.</summary>
