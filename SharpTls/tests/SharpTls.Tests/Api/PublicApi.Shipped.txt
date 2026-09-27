@@ -624,6 +624,11 @@ T: public enum SharpTls.Quic.TlsQuicProxyError : System.Int32
   F: public const SharpTls.Quic.TlsQuicProxyError CredentialsRejected = SharpTls.Quic.TlsQuicProxyError.CredentialsRejected
   F: public const SharpTls.Quic.TlsQuicProxyError CredentialsRequired = SharpTls.Quic.TlsQuicProxyError.CredentialsRequired
   F: public const SharpTls.Quic.TlsQuicProxyError MalformedProxyResponse = SharpTls.Quic.TlsQuicProxyError.MalformedProxyResponse
+  F: public const SharpTls.Quic.TlsQuicProxyError MasqueAuthenticationRejected = SharpTls.Quic.TlsQuicProxyError.MasqueAuthenticationRejected
+  F: public const SharpTls.Quic.TlsQuicProxyError MasqueNotOffered = SharpTls.Quic.TlsQuicProxyError.MasqueNotOffered
+  F: public const SharpTls.Quic.TlsQuicProxyError MasqueTargetRejected = SharpTls.Quic.TlsQuicProxyError.MasqueTargetRejected
+  F: public const SharpTls.Quic.TlsQuicProxyError MasqueTunnelClosed = SharpTls.Quic.TlsQuicProxyError.MasqueTunnelClosed
+  F: public const SharpTls.Quic.TlsQuicProxyError MasqueTunnelRefused = SharpTls.Quic.TlsQuicProxyError.MasqueTunnelRefused
   F: public const SharpTls.Quic.TlsQuicProxyError NoAcceptableAuthenticationMethod = SharpTls.Quic.TlsQuicProxyError.NoAcceptableAuthenticationMethod
   F: public const SharpTls.Quic.TlsQuicProxyError RelayDeliveredTlsAlert = SharpTls.Quic.TlsQuicProxyError.RelayDeliveredTlsAlert
 T: public sealed class SharpTls.Quic.TlsQuicProxyException : System.IO.IOException, System.Runtime.Serialization.ISerializable
