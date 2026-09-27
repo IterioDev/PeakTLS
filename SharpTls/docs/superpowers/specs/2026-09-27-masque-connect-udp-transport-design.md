@@ -32,7 +32,8 @@ them; 0-RTT or resumption on the outer connection; any change to the inner Spoti
 | Packet sizes | outer 1392, inner 1352, PMTUD off on both | guide |
 
 The Spotify presets already run PMTUD off with every inner datagram at 1200 bytes
-(`TlsPreset.cs`, `quic.PathMtuDiscovery = false`, `BasePathMtu` 1200), under the 1352 ceiling.
+(`TlsPreset.cs` sets `quic.PathMtuDiscovery = false`; `BasePathMtu` stays at its 1200 default),
+under the 1352 ceiling.
 Nothing in the inner preset changes.
 
 ## Architecture
@@ -83,10 +84,10 @@ Receive already exists: RFC 9221 s3's rules are enforced and payloads land in
 
 ### 2. `TlsQuicHttp3Request`: extended CONNECT (SharpTls, existing file)
 
-- `internal string? Protocol { get; init; }` emits `:protocol` (RFC 9220 s3).
-  `TlsQuicHttp3PseudoHeader` gains `Protocol`; it is emitted immediately after `:method` in
-  whatever `PseudoHeaderOrder` the spec carries, so no spec has to list it and the existing
-  order validation is untouched. RFC 8441 s4, which RFC 9220 s3 adopts for HTTP/3, requires
+- `internal string? Protocol { get; init; }` emits `:protocol` (RFC 9220 s3). No new
+  `TlsQuicHttp3PseudoHeader` member: the emit loop writes `:protocol` right after its `Method`
+  arm whenever `Protocol` is set, in whatever `PseudoHeaderOrder` the spec carries, so no spec
+  lists it and the existing order validation is untouched. RFC 8441 s4, which RFC 9220 s3 adopts for HTTP/3, requires
   `:scheme` and `:path` alongside `:protocol`; the existing validator already refuses an order
   that omits them (`MandatoryPseudoHeaderOmitted`), so no new error value. The "CONNECT
   LIMITATION" remark in `TlsQuicHttp3Request.cs` (around line 342) is rewritten, since this
@@ -95,9 +96,9 @@ Receive already exists: RFC 9221 s3's rules are enforced and payloads land in
   peer's SETTINGS carried `SETTINGS_ENABLE_CONNECT_PROTOCOL` (0x08) = 1: RFC 8441 s3 grants the
   extended form only "upon receipt" of that setting, and RFC 9220 s3 carries the rule to HTTP/3
   unchanged. Refusal: `TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled`.
-- `Protocol` is never a member of `PseudoHeaderOrder`: an order that lists it is rejected at
-  init with `ArgumentException`, and the emit switch gets an explicit arm so nothing falls to the
-  `:path` default. `:protocol` is emitted right after `:method` whenever `Protocol` is set.
+- The tunnel exchange never buffers a body: `TlsQuicHttp3Response.TryRead` accumulates DATA
+  today, and a stream that never FINs would grow without bound, so an exchange opened with
+  `receivesDatagrams` drops its body chunks (capsules, RFC 9297 s3.2) as they arrive.
 - Header values are ordinary fields: `proxy-authorization`, `capsule-protocol: ?1` (RFC 9297
   s3.4 SHOULD; RFC 9298 s3.4 shows it and the guide's proxy expects it). QPACK handles them
   like any other.
@@ -118,12 +119,15 @@ Today received HTTP datagrams are validated (quarter stream id, RFC 9297 s2.1) a
 - `internal bool TrySendDatagram(ulong streamId, ReadOnlySpan<byte> payload)`: writes
   `varint(streamId / 4)`, payload, then `connection.TryQueueDatagram`, returning its answer.
 - `internal ulong DroppedDatagramsWrongStream` for `DropSummary`; `internal bool
-  PeerSettingsReceived` forwarding `TlsQuicHttp3Streams`' flag, so the transport can wait for
-  SETTINGS.
-- The tunnel stream's response body (capsules, RFC 9297 s3.2) is read and discarded; nothing
-  parses capsules. The stream stays open for the tunnel's life; a FIN or RESET_STREAM from the
-  proxy ends the tunnel (component 4).
-
+  PeerSettingsReceived` and `internal ImmutableArray<TlsQuicHttp3Setting> PeerSettings`
+  forwarding `TlsQuicHttp3Streams`' flag and list, so the transport can wait for SETTINGS and
+  read the two values step 2 needs with `TlsQuicHttp3Settings.Value`.
+- `PumpOnceAsync` is this type's (QUIC pump, then `TryProcess`, which is where received
+  datagrams are drained); a `false` return carries an HTTP/3 connection error code, which the
+  transport turns into `MasqueTunnelClosed`.
+- The tunnel stream's response body (capsules, RFC 9297 s3.2) is never parsed and never kept;
+  the stream stays open for the tunnel's life, and a FIN or RESET_STREAM from the proxy ends the
+  tunnel (component 4).
 ### 4. `TlsQuicMasqueTransport` (SharpTls, new file `Quic/TlsQuicMasqueTransport.cs`)
 
 Implements `ITlsQuicDatagramTransport`. One instance is one tunnel. Both the transport and its
@@ -147,10 +151,14 @@ pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
 1. Resolve the proxy host, open a UDP socket, dial the outer `TlsQuicConnection` with ALPN `h3`,
    SNI the proxy host, standard certificate validation. The ClientHello is built the way
    `Http3Connection.CreateTlsClient` builds one: `TlsQuicClientHelloProfileFactory` composes
-   `OuterSpec.TransportParameters` (whose default entries already carry `max_datagram_frame_size`)
-   with the source connection id, applies `ConfigureOuterClientHello`, and the result goes into
-   `CustomTlsQuicClientOptions { ServerName, ServerPort, ClientHello }`. `OuterSpec` has PMTUD off
-   and `BasePathMtu = MaximumPathMtu = 1392`; `OuterHttp3Spec` sends `SETTINGS_H3_DATAGRAM = 1`.
+   `OuterSpec.TransportParameters` with the source connection id, applies
+   `ConfigureOuterClientHello`, and the result goes into
+   `CustomTlsQuicClientOptions { ServerName, ServerPort, ClientHello }`. No default parameter set
+   carries `max_datagram_frame_size` (`RfcMinimumParameters` holds only
+   `initial_source_connection_id`), so the outer options add an explicit
+   `TlsQuicTransportParameterSlot.Literal(0x20, 65535)` entry; `TlsQuicHttp3Connection`'s init
+   check refuses `SETTINGS_H3_DATAGRAM = 1` without it. `OuterSpec` has PMTUD off and
+   `BasePathMtu = MaximumPathMtu = 1392`; `OuterHttp3Spec` sends `SETTINGS_H3_DATAGRAM = 1`.
    Failure: the connection's own exception.
 2. Open local streams, pump until the proxy's SETTINGS arrive. `SETTINGS_ENABLE_CONNECT_PROTOCOL`
    must be 1, `SETTINGS_H3_DATAGRAM` must be 1, the proxy's transport parameters must carry a
@@ -171,8 +179,9 @@ Ownership. The outer `TlsQuicConnection` is not thread-safe, so exactly one task
 after `ConnectAsync`: the owner task. It loops: while `connection.QueuedDatagrams` is below the
 FIFO bound, move one payload from the outbound channel through `http3.TrySendDatagram` (the
 transport prefixes RFC 9298 s5's context id 0 first); then `connection.SendPendingAsync`;
-`connection.PumpOnceAsync`; drain `http3.DrainDatagrams(streamId)` into the inbound channel,
-stripping the context id and counting a non-zero one as dropped. `PumpOnceAsync` blocks inside
+`http3.PumpOnceAsync` (a `false` return is an HTTP/3 connection error: `MasqueTunnelClosed`
+carrying the code); drain `http3.DrainDatagrams(streamId)` into the inbound channel, stripping
+the context id and counting a non-zero one as dropped. The pump blocks inside
 the connection's receive until the proxy sends or a timer fires, so a writer must be able to
 interrupt it: the same mechanism `Http3StreamMultiplexer` already uses (`_pumpInterrupt`), a
 cancellation source the outbound writer cancels and the owner task replaces, which the
@@ -188,10 +197,11 @@ datagrams leave in order once it opens. The two channels are the whole concurren
   to the outbound channel, awaiting when it is full.
 - `ReceiveAsync(buffer)`: reads the inbound channel, copies, returns
   `TlsQuicDatagramReceiveResult(length, TargetEndPoint)`.
-- `MaxDatagramPayloadSize` = min(outer `MaximumDatagramFramePayload`, proxy ceiling 1500) minus
-  quarter stream id varint length minus 1 (context id). For stream 0 at 1392 that is 1358, above
-  the guide's 1352 and above the preset's 1200. `DatagramOverhead` stays 0: the capacity is
-  reported directly.
+- `MaxDatagramPayloadSize` = outer `MaximumDatagramFramePayload` minus quarter stream id varint
+  length minus 1 (context id). For stream 0 at 1392 that is 1358, above the guide's 1352 and
+  above the preset's 1200. The guide's 1500 is a UDP packet ceiling that the 1392 outer packet
+  already respects, so it never binds. `DatagramOverhead` stays 0: the capacity is reported
+  directly.
 - `DropSummary`: dropped for wrong stream (from the HTTP/3 layer), wrong context id and oversize
   inbound (counted here).
 
@@ -232,8 +242,8 @@ dispose the socket. Idempotent.
   `NotSupportedException`: "MASQUE carries UDP; set `options.Quic.Proxy` and give `options.Proxy`
   a SOCKS5 or HTTP proxy for TCP".
 - Outer options: `TlsQuicOptions` defaults (the library's default QUIC ClientHello) with PMTUD
-  off, both MTUs 1392, datagram transport parameter and setting on, `IdleTimeout` equal to the
-  inner's; `configureOuter` runs last.
+  off, both MTUs 1392, an explicit `max_datagram_frame_size = 65535` transport parameter entry,
+  `SETTINGS_H3_DATAGRAM = 1`, `IdleTimeout` equal to the inner's; `configureOuter` runs last.
 - Telemetry: `TlsConnectEventKind.MasqueTunnelOpened` (elapsed to the 2xx) and
   `MasqueTunnelClosed` (reason), through the existing `ConnectObserver`.
 
@@ -308,7 +318,7 @@ framing, error model, MTU arithmetic) for readers who never see this spec.
 Create: `SharpTls/src/SharpTls/Quic/TlsQuicMasqueTransport.cs`, `TlsQuicMasqueOptions.cs`,
 `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`, tests beside the existing SOCKS5 ones.
 Modify: `TlsQuicConnection.cs`, `TlsQuicApplicationSendPath.cs`, `TlsQuicHttp3Request.cs`,
-`TlsQuicHttp3Spec.cs` (`TlsQuicHttp3PseudoHeader.Protocol`), `TlsQuicHttp3Connection.cs`,
+`TlsQuicHttp3Connection.cs`,
 `TlsQuicSocks5Protocol.cs` (enum), `TlsProxy.cs`, `TlsQuicOptions.cs`, `Http3Connection.cs`,
 `HttpConnectionFactory.cs`, `ProxyTunnel.cs`, `TlsConnectEvent.cs`,
 `TlsClient-main/src/TlsClient/PublicAPI.Unshipped.txt`,
