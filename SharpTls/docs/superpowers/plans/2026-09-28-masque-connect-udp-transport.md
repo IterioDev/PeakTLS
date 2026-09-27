@@ -238,10 +238,9 @@ public async Task AQueuedDatagramLeavesAsOneLengthBearingDatagramFrameAndNothing
 
     Assert.True(harness.Connection.TryQueueDatagram(payload));
     Assert.Equal(1, harness.Connection.QueuedDatagrams);
-    Assert.True(await harness.Connection.SendPendingAsync(cancellation.Token));
+    await harness.FlushAsync(cancellation.Token);   // sends and pumps every datagram, PMTU probes included
     Assert.Equal(0, harness.Connection.QueuedDatagrams);
 
-    await harness.Peer.PumpOnceAsync(SentAt, cancellation.Token); // see Harness for SentAt
     var frames = harness.Peer.LastDatagramFrames; // the (Level, Type) list, LoopbackQuicPeer.cs:510
     Assert.Contains(frames, f => f.Type == TlsQuicFrameType.Datagram);
     Assert.DoesNotContain(frames, f => f.Type == TlsQuicFrameType.Stream);
@@ -332,7 +331,7 @@ public void ALostDatagramFrameIsDroppedNotRepaired() =>
     Assert.Equal(TlsQuicRepairAction.Drop, TlsQuicRetransmission.ActionFor(TlsQuicFrameType.Datagram)); // TlsQuicLossDetection.cs:1127,1134,1073,1248
 ```
 
-`SentAt` is `private static` per test class in this suite (`LoopbackQuicPeerTests.cs:26`); declare the same member in this class. The gate MUST start `Open = true`: `Harness.CreateAsync` flushes the local control streams through the gated 1-RTT path and asserts `SendPendingAsync` returned true (`TlsQuicHttp3ConnectionTests.cs:2094-2098`); set `Open = false` after `CreateAsync` returned and before queueing, so the test's first assertion reads `Assert.False(await harness.Connection.SendPendingAsync(...))` only after that flip. Where a test pairs one `SendPendingAsync` with one `Peer.PumpOnceAsync`, prefer `harness.FlushAsync(ct)` (`:2162-2172`), which pumps every datagram sent; `SendPendingAsync` may also emit a path MTU probe (`TlsQuicApplicationSendPath.cs:434`).
+`SentAt` comes from the `using static` import (Task 1 made it `internal static`); do not redeclare it. The gate MUST start `Open = true`: `Harness.CreateAsync` flushes the local control streams through the gated 1-RTT path and asserts `SendPendingAsync` returned true (`TlsQuicHttp3ConnectionTests.cs:2094-2098`); set `Open = false` after `CreateAsync` returned and before queueing, so the test's first assertion reads `Assert.False(await harness.Connection.SendPendingAsync(...))` only after that flip. Where a test pairs one `SendPendingAsync` with one `Peer.PumpOnceAsync`, prefer `harness.FlushAsync(ct)` (`:2162-2172`), which pumps every datagram sent; `SendPendingAsync` may also emit a path MTU probe (`TlsQuicApplicationSendPath.cs:434`).
 
 Every new test class in this chunk that calls `ScriptedSendGate`, `RetransmittingProbeSpec`, `PeerControl`, `Stream`, `ResponseBytes`, `Reset`, `HeadersPayload` or `FlowControlParameters` unqualified adds `using static SharpTls.Tests.Quic.TlsQuicConnectionTests;` (they are members of that partial: `TlsQuicConnectionRetransmissionTests.cs:40`, `TlsQuicHttp3ConnectionTests.cs:67`, `TlsQuicConnectionStreamTests.cs:37`).
 
@@ -631,7 +630,7 @@ git commit -m "feat(http3): extended CONNECT with :protocol, gated on the peer's
 
 - [ ] **Step 1: Write the failing tests**
 
-All six use one arrangement: `Harness.CreateAsync(ct, spec: new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable }, flowControl: [.. FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(TlsQuicTransportParameterId.MaxDatagramFrameSize, 65535)])` (`DatagramCapable` at `TestHttp3Settings.cs:40` is QpackCapable plus 0x33 = 1; the harness's `maxDatagramFrameSize` default already puts 0x20 in the client hello), then `await harness.PeerSendsAsync(ct, PeerControl(new TlsQuicHttp3Setting(0x08, 1), new TlsQuicHttp3Setting(0x33, 1)))`. Put that in a private `static Task<Harness> ArrangeAsync(ct)`. Sending on a request stream from the peer uses `harness.PeerSendsAsync(ct, Stream(streamId, offset, bytes))`, where `Stream(ulong, ulong, byte[], bool fin = false)` builds the STREAM frame (private in `TlsQuicConnectionStreamTests.cs:786`; make it `internal static` and add that file to this task's commit), and `ResponseBytes(int status, (string, string)[] fields, byte[] body)` (`TlsQuicHttp3ConnectionTests.cs:2456`) builds HEADERS plus DATA for a response.
+All six use one arrangement: `Harness.CreateAsync(ct, spec: new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable }, flowControl: [.. FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(TlsQuicTransportParameterId.MaxDatagramFrameSize, 65535)])` (`DatagramCapable` at `TestHttp3Settings.cs:40` is QpackCapable plus 0x33 = 1; the harness's `maxDatagramFrameSize` default already puts 0x20 in the client hello), then `await harness.PeerSendsAsync(ct, PeerControl(new TlsQuicHttp3Setting(0x08, 1), new TlsQuicHttp3Setting(0x33, 1)))`. Put that in `private static async Task<Harness> ArrangeAsync(CancellationToken ct) { var harness = await Harness.CreateAsync(ct, spec: ..., flowControl: ...); await harness.PeerSendsAsync(ct, PeerControl(...)); return harness; }` with `using static SharpTls.Tests.Quic.TlsQuicConnectionTests;` and `using SharpTls.Quic;` at the top of the file, `namespace SharpTls.Tests.Quic;`. Sending on a request stream from the peer uses `harness.PeerSendsAsync(ct, Stream(streamId, offset, bytes))`, where `Stream(ulong, ulong, byte[], bool fin = false)` builds the STREAM frame (private in `TlsQuicConnectionStreamTests.cs:786`; make it `internal static` and add that file to this task's commit), and `ResponseBytes(int status, (string, string)[] fields, byte[] body)` (`TlsQuicHttp3ConnectionTests.cs:2456`) builds HEADERS plus DATA for a response.
 
 ```csharp
 public sealed class TlsQuicHttp3DatagramExchangeTests
