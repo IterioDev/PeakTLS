@@ -1159,10 +1159,15 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             outer = null;
             return transport;
         }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (
+            (exception is OperationCanceledException && deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            || exception is TimeoutException)
         {
+            // Two clocks run to the same value: this method's linked deadline and the outer
+            // TlsQuicConnection's own HandshakeDeadline, which throws TimeoutException
+            // (TlsQuicConnection.cs:5181). Whichever fires first is the same fact.
             throw new TlsQuicProxyException(TlsQuicProxyError.MasqueTunnelRefused,
-                $"The MASQUE tunnel did not come up within {options.HandshakeDeadline}.");
+                $"The MASQUE tunnel did not come up within {options.HandshakeDeadline}.", exception);
         }
         finally
         {
@@ -1587,7 +1592,7 @@ public void TheOuterOptionsAreTheLibraryDefaultsPlusWhatTheGuideAsksFor()
     Assert.Equal(1392, snapshot.ConnectionSpec.BasePathMtu);
     Assert.Equal(1392, snapshot.ConnectionSpec.MaximumPathMtu);
     Assert.Contains(outer.TransportParameters.Entries, e => e.Id == 0x20);
-    Assert.Equal(1UL, TlsQuicHttp3Settings.Value(outer.Http3ForMasqueOuter().Snapshot().Settings, 0x33));
+    Assert.Equal(1UL, TlsQuicHttp3Settings.Value(TlsQuicOptions.CreateMasqueOuterHttp3().Snapshot().Settings, 0x33));
 }
 
 [Fact]
@@ -1598,7 +1603,7 @@ public void TheOuterHookRunsLast()
 }
 ```
 
-(`TlsQuicTransportParameterEntry.Id`, `TlsQuicTransportParameterOptions.cs:36`. The second assertion uses `CreateMasqueOuterHttp3()` from Step 3; write it as `TlsQuicOptions.CreateMasqueOuterHttp3().Snapshot().Settings`.)
+(`TlsQuicTransportParameterEntry.Id`, `TlsQuicTransportParameterOptions.cs:36`; `CreateMasqueOuterHttp3()` comes from Step 3.)
 
 - [ ] **Step 2: Run, expect compile failure**
 
@@ -1665,6 +1670,11 @@ git commit -m "feat(tlsclient): options.Quic.Proxy and the outer options a MASQU
 - [ ] **Step 1: Write the failing tests**
 
 ```csharp
+using SharpTls.Quic;
+
+namespace TlsClient.Tests;
+
+#pragma warning disable TLSCLIENT3 // Http3Only is [Experimental]; ProxyUsageDocTests.cs:58 does the same
 public sealed class MasqueRoutingTests
 {
     [Fact]
@@ -1727,9 +1737,10 @@ public sealed class MasqueRoutingTests
         Assert.Contains("did not come up within", proxyFailure.Message);
     }
 }
+#pragma warning restore TLSCLIENT3
 ```
 
-with `using SharpTls.Quic;` at the top of the file.
+The last test depends on Task 7 mapping BOTH `OperationCanceledException` (the linked deadline) and `TimeoutException` (SharpTls's own `HandshakeDeadline`, `TlsQuicConnection.cs:5181`, set to the same value) to `MasqueTunnelRefused` "did not come up within"; Task 7's listing does that.
 
 - [ ] **Step 2: Run, expect failures**
 
@@ -1758,7 +1769,9 @@ internal static void ThrowIfProxyCannotCarryHttp3(TlsProxy? proxy, TlsQuicConfig
 }
 ```
 
-rewrite the remark above it AND the exception text (`HttpConnectionFactory.cs:33-36` says "only SOCKS5 relays datagrams ... Use a SOCKS5 proxy", which is now false): "HTTP/3 cannot be tunnelled through a {proxy.Type} proxy in options.Proxy: QUIC is UDP. Use a SOCKS5 proxy whose UDP ASSOCIATE relays datagrams, or an RFC 9298 MASQUE proxy in options.Quic.Proxy, or a TCP version policy for this one." Call the helper where the inline check was; pass `configuration.Quic.Proxy is null ? proxy : null` to `Http3Connection.CreateAsync` so the SOCKS5 loop never sees a TCP proxy when MASQUE is in play. A per-request `TlsRequestOptions.Proxy` reaches the same check; nothing else to do for it.
+rewrite the remark above it AND the exception text (`HttpConnectionFactory.cs:33-36` says "only SOCKS5 relays datagrams ... Use a SOCKS5 proxy", which is now false): "HTTP/3 cannot be tunnelled through a {proxy.Type} proxy in options.Proxy: QUIC is UDP. Use a SOCKS5 proxy whose UDP ASSOCIATE relays datagrams, or an RFC 9298 MASQUE proxy in options.Quic.Proxy, or a TCP version policy for this one." `ProxyUsageDocTests.cs:84` pins the old phrase `"only SOCKS5 relays datagrams"`; change that assertion to `"options.Quic.Proxy"` (its `:83` check on `through a {type} proxy` still holds) and add the file to this task's commit. Call the helper where the inline check was; pass `configuration.Quic.Proxy is null ? proxy : null` to `Http3Connection.CreateAsync` so the SOCKS5 loop never sees a TCP proxy when MASQUE is in play. A per-request `TlsRequestOptions.Proxy` reaches the same check; nothing else to do for it.
+
+Telemetry scope, stated so nobody looks for more: `MasqueTunnelOpened` fires on a completed dial and `MasqueTunnelClosed` on a failed one. A tunnel that dies mid-life surfaces as `MasqueTunnelClosed` on the request that hits it (an `IOException` through the pool's existing path) and emits no connect event, exactly as a SOCKS5 `AssociationTerminated` does today; USAGE says so in Task 13.
 
 `Http3Connection.CreateAsync`: first extract the inner dial. Today the loop body (`Http3Connection.cs:309-489`) interleaves the options block, the SOCKS5 probe wiring on `relay.OnFirstInboundDatagram` (341-373), `ConnectAsync` with its two catch-to-`HttpRequestException` clauses (374-392), the ALPN check, `SendPendingAsync` (409), the `Socks5AssociationWatch` argument (431-437), `result.Start()`, and a catch that disposes and decides the retry (444-489). Move lines 313-442 into
 
@@ -1782,7 +1795,7 @@ private static async ValueTask<Http3Connection> DialInnerAsync(
     CancellationToken cancellationToken)
 ```
 
-whose body is those lines unchanged except that `connection` is a local disposed in a `catch { ...; throw; }` inside the helper. The loop then reads `var result = await DialInnerAsync(origin, configuration, factory, tls13SessionCache, transport, endPoint, relay, probing, handshakeTimeout, connectionId, cancellationToken); return result;` with its existing outer catch keeping the transport disposal and retry decision. Run the `Socks5Association*` and `Http3Connection*` suites before going further: this refactor must be behaviour-neutral.
+whose body is those lines with four mechanical changes: `spec` (read at `:314`) becomes `configuration.Quic.ConnectionSpec`; `tlsClient` (declared at `:310`, outside the span) becomes a local `CustomTlsQuicClient? tlsClient = null;` at the top of the helper; the `var handshakeTimeout = ...` (`~:340`) and `var probing = ...` (`~:352`) declarations are deleted because both are now parameters (leaving them is CS0136), and the loop computes them before the call; `connection` is a local disposed in a `catch { if (connection is not null) await connection.DisposeAsync(); throw; }` inside the helper. The loop then reads `return await DialInnerAsync(origin, configuration, factory, tls13SessionCache, transport, endPoint, relay, probing, handshakeTimeout, connectionId, cancellationToken);` with its existing outer catch keeping the transport disposal and retry decision. Run the `Socks5Association*` and `Http3Connection*` suites before going further: this refactor must be behaviour-neutral.
 
 Then, after `spec`/`factory` are built and BEFORE the origin is resolved (MASQUE never resolves the origin locally; move the `dnsResolver.ResolveAsync` block below this branch), add:
 
@@ -1865,7 +1878,7 @@ Run: `dotnet test TlsClient-main/tests/TlsClient.Tests --filter "FullyQualifiedN
 - [ ] **Step 5: Commit**
 
 ```bash
-git add TlsClient-main/src/TlsClient/Http3Connection.cs TlsClient-main/src/TlsClient/HttpConnectionFactory.cs TlsClient-main/src/TlsClient/ProxyTunnel.cs TlsClient-main/src/TlsClient/TlsConnectEvent.cs TlsClient-main/src/TlsClient/PublicAPI.Unshipped.txt TlsClient-main/tests/TlsClient.Tests/MasqueRoutingTests.cs
+git add TlsClient-main/src/TlsClient/Http3Connection.cs TlsClient-main/src/TlsClient/HttpConnectionFactory.cs TlsClient-main/src/TlsClient/ProxyTunnel.cs TlsClient-main/src/TlsClient/TlsConnectEvent.cs TlsClient-main/src/TlsClient/PublicAPI.Unshipped.txt TlsClient-main/tests/TlsClient.Tests/MasqueRoutingTests.cs TlsClient-main/tests/TlsClient.Tests/ProxyUsageDocTests.cs
 git commit -m "feat(tlsclient): dial HTTP/3 through a MASQUE tunnel when options.Quic.Proxy is set" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
@@ -1958,7 +1971,7 @@ public sealed class MasqueLiveTests
 }
 ```
 
-In `SpotifyPresetLiveParityTests.cs`: make `NewRequest()` `internal static`, and extract the body of `TheEndpointSeesTheHandsetsHelloSettingsTransportParametersAndHeaderOrder` after its `DialAsync()` call (JA3 hash and text, cipher list, transport-parameter rotation, SETTINGS, header order; from line 112 on) into `internal static void AssertHandsetFingerprint(JsonDocument document)`, called by both that test and the MASQUE one, so the four axes the spec's Testing section lists are asserted through the tunnel.
+In `SpotifyPresetLiveParityTests.cs`: make `NewRequest()` `internal static`, and extract the body of `TheEndpointSeesTheHandsetsHelloSettingsTransportParametersAndHeaderOrder` after its `DialAsync()` call (JA3 hash and text, cipher list, transport-parameter rotation, SETTINGS, header order; from line 119 on) into `internal static void AssertHandsetFingerprint(JsonDocument document)`, called by both that test and the MASQUE one, so the four axes the spec's Testing section lists are asserted through the tunnel.
 
 - [ ] **Step 2: Run live**
 
@@ -1967,7 +1980,7 @@ TLSCLIENT_LIVE_MASQUE='https://USER:PASS@masque.oxylabs.io:50000' dotnet test Tl
 ```
 Expected: 4 passed, each with a duration in the hundreds of milliseconds or more. Four passes at a few milliseconds each mean the env var was not seen and the tests returned early; that is not a pass. If `TheTargetSeesTheHandset` fails on a fingerprint axis, the tunnel altered bytes: stop and report; do not loosen the assertion.
 
-- [ ] **Step 3: USAGE.md** — reword the heading at line 201 to "With HTTP/3 it must be SOCKS5 or MASQUE", add a `TlsProxy.Masque` row to the proxy table (`:206-208`) with the `options.Quic.Proxy` snippet:
+- [ ] **Step 3: USAGE.md** — reword the heading at line 201 to "With HTTP/3 it must be SOCKS5 or MASQUE" and the sentence at `:203-204` ("the other two proxy types cannot") to name MASQUE as the second UDP-capable kind; add a `TlsProxy.Masque` row to the proxy table (`:206-208`) with the `options.Quic.Proxy` snippet; say that a tunnel closing mid-life reaches the caller as `TlsQuicProxyException` `MasqueTunnelClosed` on the next request, retried under the retry policy, with no connect event:
 
 ```csharp
 options.Proxy = TlsProxy.Socks5("socks5://pr.oxylabs.io:7777", user, pass);          // h2, TCP
