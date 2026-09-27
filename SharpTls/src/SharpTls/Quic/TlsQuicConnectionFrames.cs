@@ -1154,6 +1154,22 @@ internal static class TlsQuicConnectionFrames
         WriteBytes(destination, frame.Data);
     }
 
+    /// <summary>RFC 9221 s4's DATAGRAM frame in its 0x31 form: Type (i), Length (i), Datagram
+    /// Data. Only that form is ever sent, because a length-less 0x30 frame must be the last
+    /// frame in its packet and TryBuildApplicationPacket may append an ACK after it.</summary>
+    internal static void WriteDatagramFrameFields(List<byte> destination, in TlsQuicFrame frame)
+    {
+        if ((frame.RawType & TlsQuicFrames.DatagramLengthBit) == 0)
+        {
+            throw new ArgumentException(
+                "Only the length-bearing DATAGRAM form (0x31) is sent.", nameof(frame));
+        }
+
+        QuicVariableLengthInteger.Write(destination, frame.RawType);
+        QuicVariableLengthInteger.Write(destination, (ulong)frame.Data.Length);
+        WriteBytes(destination, frame.Data);
+    }
+
     // Appends one CONNECTION_CLOSE frame's wire bytes to destination (RFC 9000
     // s19.19 Figure 43), in whichever of the two forms frame.RawType selects. Same
     // contract as WriteResetStreamFrameFields.

@@ -779,11 +779,12 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
 
     /// <summary>Sends one 1-RTT packet whose payload is the given already-encoded frame
     /// bytes.</summary>
-    /// <remarks>FOR RFC 9221 s4's DATAGRAM FRAME AND NOTHING ELSE SO FAR. Every other frame
-    /// this peer sends goes through TlsQuicFrames.WriteFrame; DATAGRAM cannot, because that
-    /// writer throws on it deliberately. The bytes are written by the caller against s4's
-    /// two-field format, which keeps the encoding in the test that asserts on it rather than
-    /// in a helper no test reads back.</remarks>
+    /// <remarks>FOR RFC 9221 s4's DATAGRAM FRAME IN ITS 0x30 (LEN-CLEAR) FORM AND NOTHING
+    /// ELSE SO FAR. Every other frame this peer sends goes through TlsQuicFrames.WriteFrame;
+    /// the 0x30 form cannot, because that writer throws on it deliberately (only the 0x31
+    /// form is sent). The bytes are written by the caller against s4's two-field format,
+    /// which keeps the encoding in the test that asserts on it rather than in a helper no
+    /// test reads back.</remarks>
     internal ValueTask SendOneRttRawFrameAsync(
         byte[] encodedFrame, CancellationToken cancellationToken = default)
     {
@@ -993,13 +994,13 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
             TlsQuicFrames.WriteFrame(payload, frame);
         }
 
-        // THE ESCAPE HATCH FOR FRAMES THE LIBRARY REFUSES TO WRITE. TlsQuicFrames.WriteFrame
-        // throws on a DATAGRAM frame by design - this client never sends one, and
-        // TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne pins
-        // that - so a test peer that needs to send one has to hand-encode it. RFC 9221 s4's
-        // format is two fields, which is why the bytes come in already formed rather than
-        // through a second writer here: a writer would be the very thing the library refuses
-        // to own, and it would drift from s4 with nothing reading it back.
+        // THE ESCAPE HATCH FOR THE ONE FRAME FORM THE LIBRARY REFUSES TO WRITE.
+        // TlsQuicFrames.WriteFrame throws on a 0x30 (LEN-clear) DATAGRAM frame by design -
+        // TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten pins that - so a test
+        // peer that needs to send one has to hand-encode it. RFC 9221 s4's format is two
+        // fields, which is why the bytes come in already formed rather than through a
+        // second writer here: a writer would be the very thing the library refuses to own,
+        // and it would drift from s4 with nothing reading it back.
         if (rawFrames is not null)
         {
             payload.AddRange(rawFrames);

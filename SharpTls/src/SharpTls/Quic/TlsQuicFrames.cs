@@ -979,43 +979,32 @@ internal static class TlsQuicFrames
                 TlsQuicConnectionFrames.WriteConnectionCloseFrameFields(destination, frame);
                 return;
 
-            // THE ONE FRAME TYPE THIS LIBRARY READS AND REFUSES TO WRITE, and
-            // the refusal is the feature. Task C17 closed an advertisement, not
-            // a feature: this client advertises max_datagram_frame_size and
-            // SETTINGS_H3_DATAGRAM by default, so it must not kill a connection
-            // over an arriving DATAGRAM - but it implements no datagram
-            // semantics and must never claim to by emitting one.
+            // RFC 9221 s4 DATAGRAM, in its 0x31 (LEN-present) form only. The 0x30
+            // (LEN-clear) form is never emitted: s4 requires it be the last frame in its
+            // packet, and TryBuildApplicationPacket may append an ACK after any frame it
+            // writes, so only the length-bearing form is safe to hand to this
+            // general-purpose writer. WriteDatagramFrameFields enforces that split and
+            // throws on a RawType with DatagramLengthBit clear; pinned by
+            // TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten.
             //
-            // An explicit arm rather than a fall-through to `default` below.
-            // Falling through would throw the same exception with a message
-            // reading like an oversight, and would leave the refusal resting on
-            // the absence of a case label - which the next person to add a frame
-            // type could undo without ever reading a word about why it was
-            // absent. Pinned by
-            // TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibrary
-            // NeverSendsOne.
-            //
-            // RFC 9221 s3 makes sending a separate permission this endpoint has
-            // not got anyway: "An endpoint MUST NOT send DATAGRAM frames until
-            // it has received the max_datagram_frame_size transport parameter
-            // with a non-zero value during the handshake." Nothing in this tree
-            // reads a peer's value of that parameter, so even the conformant
-            // path to a first DATAGRAM does not exist here.
+            // RFC 9221 s3's send-side MUST NOT ("An endpoint MUST NOT send DATAGRAM
+            // frames until it has received the max_datagram_frame_size transport
+            // parameter with a non-zero value during the handshake") is enforced above
+            // this writer, not in it: nothing here yet reads a peer's value of that
+            // parameter, so gating on it is left to whichever future caller queues a
+            // DATAGRAM to send.
             case TlsQuicFrameType.Datagram:
-                throw new ArgumentException(
-                    "RFC 9221 DATAGRAM frames are parsed and dropped, never sent: SharpTls " +
-                    "advertises max_datagram_frame_size and SETTINGS_H3_DATAGRAM but implements " +
-                    "no datagram semantics.",
-                    nameof(frame));
+                TlsQuicConnectionFrames.WriteDatagramFrameFields(destination, frame);
+                return;
 
             default:
                 // Reachable only for a RawType neither s12.4 Table 3 nor RFC 9221
                 // assigns, since A2 task 5 gave every value from 0x00 to 0x1e a
-                // case label above and task C17 gave 0x30-0x31 the refusing arm
+                // case label above and task C17 gave 0x30-0x31 their own arm
                 // immediately above - the same narrowing the read dispatch's
                 // default arm records. A DATAGRAM therefore never reaches here,
-                // which is why its refusal carries its own message rather than
-                // this one's "not implemented".
+                // which is why a length-less one's refusal carries its own message
+                // rather than this one's "not implemented".
                 // TlsQuicFramesTests.WritingAFrameTypeAboveTableThreeThrows is the
                 // surviving witness; WritingAnUnimplementedFrameTypeThrows was
                 // deleted by that task because its subject, a Table 3 type with no
