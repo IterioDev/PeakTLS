@@ -132,8 +132,20 @@ public sealed class TlsQuicSocks5ProtocolTests
         Assert.Equal(TlsQuicProxyError.CredentialsRejected, exception.Error);
     }
 
+    // RFC 1929 says 0x01; a share of deployed proxies answer 0x05, and curl ignores the
+    // octet entirely. Both are accepted, and the STATUS octet still decides.
+    [Fact]
+    public void AuthenticationReplyWithTheSocksVersionInVerIsAccepted()
+    {
+        TlsQuicSocks5Protocol.ValidateAuthenticationReply([0x05, 0x00]);
+
+        var exception = Assert.Throws<TlsQuicProxyException>(
+            () => TlsQuicSocks5Protocol.ValidateAuthenticationReply([0x05, 0x01]));
+        Assert.Equal(TlsQuicProxyError.CredentialsRejected, exception.Error);
+    }
+
     [Theory]
-    [InlineData(new byte[] { 0x05, 0x00 })]     // wrong subnegotiation version
+    [InlineData(new byte[] { 0x02, 0x00 })]     // neither subnegotiation nor SOCKS version
     [InlineData(new byte[] { 0x01 })]           // truncated
     [InlineData(new byte[] { 0x01, 0x00, 0x00 })] // over-long
     [InlineData(new byte[0])]

@@ -142,10 +142,17 @@ internal static class TlsQuicSocks5Protocol
                 $"SOCKS5 authentication reply must be 2 bytes, received {reply.Length}.");
         }
 
-        if (reply[0] != AuthenticationVersion)
+        // RFC 1929 s2 puts the subnegotiation version, 0x01, in VER. A share of deployed
+        // proxies - commercial gateways in particular - answer with the SOCKS version, 0x05,
+        // instead, and every widely used client tolerates it: curl's socks.c reads the
+        // STATUS octet and "ignore[s] the first (VER) byte". Refusing them cost whole
+        // sessions over a byte that carries no decision, so both spellings are accepted;
+        // anything else is still the malformed reply it always was.
+        if (reply[0] != AuthenticationVersion && reply[0] != Version)
         {
             throw Malformed(
-                $"SOCKS5 authentication reply VER was 0x{reply[0]:X2}, expected 0x01.");
+                $"SOCKS5 authentication reply VER was 0x{reply[0]:X2}, expected 0x01 (RFC "
+                    + "1929) or the 0x05 some proxies send in its place.");
         }
 
         if (reply[1] != AuthenticationSuccess)
