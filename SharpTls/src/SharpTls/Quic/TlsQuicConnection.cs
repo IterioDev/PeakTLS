@@ -1303,9 +1303,10 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal ulong? AdvertisedMaxDatagramFrameSize => _client?.AdvertisedMaxDatagramFrameSize;
 
     /// <summary>Gets the peer's RFC 9221 s3 <c>max_datagram_frame_size</c>, or
-    /// <see langword="null"/> when its transport parameters carried none, in which case it
-    /// accepts no DATAGRAM frames. <see cref="AdvertisedMaxDatagramFrameSize"/> is OUR value;
-    /// this is theirs, and it is what the send side must honour.</summary>
+    /// <see langword="null"/> when its transport parameters carried none or carried 0 (RFC 9221
+    /// s3 gives both the same meaning), in which case it accepts no DATAGRAM frames. <see
+    /// cref="AdvertisedMaxDatagramFrameSize"/> is OUR value; this is theirs, and it is what the
+    /// send side must honour.</summary>
     internal ulong? PeerMaxDatagramFrameSize { get; private set; }
 
     /// <summary>The Source Connection ID this connection drew and puts on its packets; it is
