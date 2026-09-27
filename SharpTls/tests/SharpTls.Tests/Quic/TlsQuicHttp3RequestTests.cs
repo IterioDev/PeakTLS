@@ -1332,7 +1332,7 @@ public sealed class TlsQuicHttp3RequestTests
 
     // Every frame in the buffer, read back through the C2 codec rather than by slicing at
     // offsets this file computed.
-    private static List<(ulong Type, byte[] Payload)> ReadFrames(List<byte> encoded)
+    internal static List<(ulong Type, byte[] Payload)> ReadFrames(List<byte> encoded)
     {
         var bytes = encoded.ToArray();
         var frames = new List<(ulong, byte[])>();
@@ -1352,7 +1352,7 @@ public sealed class TlsQuicHttp3RequestTests
 
     // Task C8's decoder, which is what makes every order claim here a read-back rather than a
     // restatement of the encoder's input.
-    private static List<(string Name, string Value)> DecodeFieldSection(byte[] section)
+    internal static List<(string Name, string Value)> DecodeFieldSection(byte[] section)
     {
         var buffer = new byte[64 * 1024];
         var lines = new TlsQuicQpackDecodedFieldLine[64];

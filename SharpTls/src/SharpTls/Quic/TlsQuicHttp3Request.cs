@@ -325,8 +325,10 @@ internal enum TlsQuicHttp3RequestError
 //
 // NOT enforced, and each for a stated reason rather than by omission:
 //
-//   - CONNECT, AND THIS IS A DECISION RATHER THAN A GAP. See THE CONNECT LIMITATION below,
-//     which is stated at length because the validator's shape actively excludes it.
+//   - PLAIN CONNECT, AND THIS IS A DECISION RATHER THAN A GAP. See THE CONNECT LIMITATION
+//     below, which is stated at length because the validator's shape actively excludes it.
+//     Extended CONNECT (RFC 8441, RFC 9220) is a different shape and is supported - see
+//     Protocol below and the same banner.
 //   - The scheme-has-no-mandatory-authority arm. s4.3.1 continues: "If the scheme does not
 //     have a mandatory authority component and none is provided in the request target, the
 //     request MUST NOT contain the :authority pseudo-header or Host header fields." Deciding
@@ -339,15 +341,18 @@ internal enum TlsQuicHttp3RequestError
 //     the request meets the connection - task C11.
 //
 // ============================================================================
-// THE CONNECT LIMITATION. THIS VALIDATOR REJECTS EVERY LEGAL CONNECT REQUEST.
+// THE CONNECT LIMITATION. PLAIN CONNECT IS STILL REJECTED; EXTENDED CONNECT IS THE ONE
+// CONNECT SHAPE THIS LIBRARY SENDS.
 // ============================================================================
 //
-// Not implemented, deliberately: nothing on the path this subsystem exists to serve sends
-// CONNECT, and speculative support was declined. What follows is the named gap, so that the
-// next reader finds a decision rather than an omission.
+// :method CONNECT names two request shapes that RFC 9114 s4.4 and RFC 8441 s4 (via RFC 9220
+// s3's HTTP/3 mapping) make opposites of each other, and this validator treats them
+// oppositely for exactly that reason.
 //
-// The validator above is written from s4.3.1, and a CONNECT request is s4.3.1's exact
-// INVERSE. rfc9114-section4.4-connect.txt, s4.4, verbatim:
+// PLAIN CONNECT, RFC 9114 s4.4, is still refused, deliberately: nothing on the path this
+// subsystem exists to serve sends it, and speculative support was declined. The validator
+// above is written from s4.3.1, and a plain CONNECT request is s4.3.1's exact INVERSE.
+// rfc9114-section4.4-connect.txt, s4.4, verbatim:
 //
 //     "A CONNECT request MUST be constructed as follows:
 //      *  The :method pseudo-header field is set to "CONNECT"
@@ -355,14 +360,27 @@ internal enum TlsQuicHttp3RequestError
 //      *  The :authority pseudo-header field contains the host and port to connect to"
 //
 // OMITTED, not empty and not "/". So the mandatory-pseudo-header check - which demands that
-// PseudoHeaderOrder contain :method, :scheme AND :path - refuses a conforming CONNECT with
-// MandatoryPseudoHeaderOmitted, and a caller who "fixes" that by putting :scheme and :path
-// back emits a request s4.4's last sentence calls malformed: "A CONNECT request that does not
-// conform to these restrictions is malformed." There is no way to spell a legal CONNECT
-// through this type, and there is not meant to be.
+// PseudoHeaderOrder contain :method, :scheme AND :path - refuses a conforming plain CONNECT
+// with MandatoryPseudoHeaderOmitted, and a caller who "fixes" that by putting :scheme and
+// :path back emits a request s4.4's last sentence calls malformed: "A CONNECT request that
+// does not conform to these restrictions is malformed." There is no way to spell a legal
+// PLAIN CONNECT through this type, and there is not meant to be.
+//
+// EXTENDED CONNECT, RFC 8441 s4 via RFC 9220 s3's HTTP/3 mapping, is the opposite shape and
+// is what Protocol exists for. RFC 8441 s4: "on requests that contain the :protocol
+// pseudo-header field... the :scheme and :path pseudo-header fields ... MUST be included."
+// Because :scheme and :path are present, the same mandatory-pseudo-header check that refuses
+// a plain CONNECT is satisfied by an extended one, and Protocol's own emitted line is the
+// only part of an extended CONNECT this type adds: everything else - :method CONNECT,
+// :scheme, :authority, :path, the ordinary fields - is spelled through the members every
+// other request already uses. Whether an extended CONNECT may be SENT AT ALL is a
+// connection-level decision, not this type's: RFC 8441 s3 conditions it on the peer's
+// SETTINGS_ENABLE_CONNECT_PROTOCOL, and TlsQuicHttp3Connection.TryOpenRequest is the gate
+// that reads it, this type having no reference to the peer's SETTINGS at all.
 //
 // TWO FACTS THE IMPLEMENTOR WILL NEED, BOTH ALREADY MISREAD ONCE ELSEWHERE, because they sit
-// one line apart in s4.4 and are of DIFFERENT SEVERITIES:
+// one line apart in s4.4 and are of DIFFERENT SEVERITIES - and RFC 9220 changes neither of
+// them for an extended CONNECT's tunnel:
 //
 //   - H3_CONNECT_ERROR is a STREAM error. s4.4: "A proxy treats any error in the TCP
 //     connection, which includes receiving a TCP segment with the RST bit set, as a stream
@@ -373,9 +391,9 @@ internal enum TlsQuicHttp3RequestError
 //     extension. Receipt of any other known frame type MUST be treated as a connection error
 //     of type H3_FRAME_UNEXPECTED." The whole connection goes.
 //
-// Neither code is a member of TlsQuicHttp3ErrorCode, because nothing raises them. s4.4 also
-// obliges no client to implement CONNECT at all - every remaining paragraph binds the proxy -
-// so this is unimplemented functionality and not a spec violation.
+// Neither code is a member of TlsQuicHttp3ErrorCode, because nothing raises them yet: this
+// task only gets an extended CONNECT onto the wire and gates it on the peer's setting, and
+// the tunnel's own frame-level behaviour past that point is later work.
 //
 // ============================================================================
 // CONNECTION-SPECIFIC FIELDS: WHY SIX NAMES, AND WHY TE IS NOT ONE OF THEM.
@@ -479,6 +497,11 @@ internal sealed class TlsQuicHttp3Request
     private static readonly byte[] SchemeName = Encoding.UTF8.GetBytes(":scheme");
     private static readonly byte[] PathName = Encoding.UTF8.GetBytes(":path");
 
+    // RFC 9220 s3's :protocol. Not one of the four s4.3.1 names above - it belongs to no
+    // PseudoHeaderOrder member and is emitted unconditionally right after :method, see
+    // Protocol's own doc comment.
+    private static readonly byte[] ProtocolName = Encoding.UTF8.GetBytes(":protocol");
+
     // s4.3.1: "An intermediary that converts an HTTP/3 request to HTTP/1.1 MUST create a Host
     // field if one is not present in a request by copying the value of the :authority
     // pseudo-header field." The reverse direction is why a Host field can stand in for
@@ -523,6 +546,14 @@ internal sealed class TlsQuicHttp3Request
 
     /// <summary>Gets the <c>:path</c> value.</summary>
     internal required string Path { get; init; }
+
+    /// <summary>RFC 9220 s3's <c>:protocol</c> for an extended CONNECT (RFC 8441 s4), for
+    /// example <c>connect-udp</c> (RFC 9298 s3). <see langword="null"/> for every other
+    /// request. When set, <c>:scheme</c> and <c>:path</c> are mandatory (the existing
+    /// validator's MandatoryPseudoHeaderOmitted covers that) and the line is emitted right
+    /// after <c>:method</c>, whatever <see cref="TlsQuicHttp3Spec.PseudoHeaderOrder"/> says,
+    /// because no spec lists it.</summary>
+    internal string? Protocol { get; init; }
 
     /// <summary>Gets the ordinary field lines, in the order they are emitted - after every
     /// pseudo-header, per RFC 9114 s4.3.</summary>
@@ -857,19 +888,38 @@ internal sealed class TlsQuicHttp3Request
         // merged or reordered.
         for (var i = 0; i < order.Length; i++)
         {
-            lines.Add(order[i] switch
+            // A switch EXPRESSION cannot add two lines from one arm, which :method's arm needs
+            // when Protocol is set - so this is a switch STATEMENT, not the single-line form
+            // every other pseudo-header still fits.
+            switch (order[i])
             {
-                TlsQuicHttp3PseudoHeader.Method => (MethodName, Encoding.UTF8.GetBytes(method)),
-                TlsQuicHttp3PseudoHeader.Authority =>
-                    (AuthorityName, Encoding.UTF8.GetBytes(authority)),
-                TlsQuicHttp3PseudoHeader.Scheme => (SchemeName, Encoding.UTF8.GetBytes(scheme)),
+                case TlsQuicHttp3PseudoHeader.Method:
+                    lines.Add((MethodName, Encoding.UTF8.GetBytes(method)));
+
+                    // RFC 9220 s3's :protocol has no PseudoHeaderOrder member of its own - see
+                    // Protocol's doc comment - so it is emitted here, right after :method,
+                    // whatever order the rest of the switch is following.
+                    if (Protocol is { } protocol)
+                    {
+                        lines.Add((ProtocolName, Encoding.UTF8.GetBytes(protocol)));
+                    }
+
+                    break;
+                case TlsQuicHttp3PseudoHeader.Authority:
+                    lines.Add((AuthorityName, Encoding.UTF8.GetBytes(authority)));
+                    break;
+                case TlsQuicHttp3PseudoHeader.Scheme:
+                    lines.Add((SchemeName, Encoding.UTF8.GetBytes(scheme)));
+                    break;
 
                 // The discard arm is Path rather than a throw:
                 // TlsQuicHttp3Spec.PseudoHeaderOrder's init accessor runs Enum.IsDefined over
                 // every element, so no fifth value can reach here, and a `_ => throw` would be
                 // both unreachable and a throw on this deliberately non-throwing path.
-                _ => (PathName, Encoding.UTF8.GetBytes(path)),
-            });
+                default:
+                    lines.Add((PathName, Encoding.UTF8.GetBytes(path)));
+                    break;
+            }
         }
 
         for (var i = 0; i < fields.Count; i++)
