@@ -34,6 +34,68 @@ public sealed class ProxyTunnelTests
     }
 
     [Fact]
+    public async Task Socks5_AcceptsAnAuthenticationReplyWhoseVerEchoesTheSocksVersion()
+    {
+        // RFC 1929 says the reply's VER is 0x01; a share of deployed proxies answer 0x05.
+        // STATUS 0x00 is the decision, so the tunnel proceeds to CONNECT either way.
+        await using var transport = new ScriptedDuplexStream(
+        [
+            5, 2,
+            5, 0,
+            5, 0, 0, 1, 127, 0, 0, 1, 0x04, 0x38,
+        ]);
+        var proxy = TlsProxy.Socks5("socks5://user:pass@127.0.0.1:1080");
+
+        await ProxyTunnel.EstablishAsync(
+            transport,
+            new Uri("https://example.com/"),
+            proxy,
+            4096,
+            CancellationToken.None);
+
+        Assert.Equal(3, transport.Writes.Count);
+        Assert.Equal(
+            [5, 1, 0, 3, 11, .. "example.com"u8.ToArray(), 0x01, 0xbb],
+            transport.Writes[2]);
+    }
+
+    [Fact]
+    public async Task Socks5_RejectsAnAuthenticationStatusOtherThanZeroWhateverTheVer()
+    {
+        await using var transport = new ScriptedDuplexStream([5, 2, 5, 1]);
+        var proxy = TlsProxy.Socks5("socks5://user:pass@127.0.0.1:1080");
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            await ProxyTunnel.EstablishAsync(
+                transport,
+                new Uri("https://example.com/"),
+                proxy,
+                4096,
+                CancellationToken.None));
+
+        Assert.Contains("rejected username/password", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(2, transport.Writes.Count);
+    }
+
+    [Fact]
+    public async Task Socks5_NamesAnAuthenticationVerThatIsNeitherRfc1929NorSocks()
+    {
+        await using var transport = new ScriptedDuplexStream([5, 2, 2, 0]);
+        var proxy = TlsProxy.Socks5("socks5://user:pass@127.0.0.1:1080");
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(async () =>
+            await ProxyTunnel.EstablishAsync(
+                transport,
+                new Uri("https://example.com/"),
+                proxy,
+                4096,
+                CancellationToken.None));
+
+        Assert.Contains("VER 0x02", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(2, transport.Writes.Count);
+    }
+
+    [Fact]
     public async Task Socks5_UsesIpv6AddressTypeWithoutLocalDns()
     {
         await using var transport = new ScriptedDuplexStream(

@@ -199,7 +199,17 @@ internal static class ProxyTunnel
         await transport.FlushAsync(cancellationToken).ConfigureAwait(false);
         var response = new byte[2];
         await ReadExactlyAsync(transport, response, cancellationToken).ConfigureAwait(false);
-        if (response[0] != 1 || response[1] != 0)
+        // RFC 1929 s2 puts the subnegotiation version, 0x01, in VER. A share of deployed
+        // proxies answer with the SOCKS version, 0x05, instead, and curl ignores the byte
+        // outright; STATUS is the only octet that carries a decision. SharpTls's QUIC
+        // SOCKS5 path accepts the same two spellings.
+        if (response[0] != 1 && response[0] != 5)
+        {
+            throw new HttpRequestException(
+                $"The SOCKS5 proxy answered username/password authentication with VER 0x{response[0]:X2}; "
+                + "RFC 1929 says 0x01, and some proxies send 0x05 in its place.");
+        }
+        if (response[1] != 0)
         {
             throw new HttpRequestException(
                 "The SOCKS5 proxy rejected username/password authentication.");
