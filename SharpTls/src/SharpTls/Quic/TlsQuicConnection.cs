@@ -1302,6 +1302,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// the client - and therefore the ClientHello - does not exist until then.</remarks>
     internal ulong? AdvertisedMaxDatagramFrameSize => _client?.AdvertisedMaxDatagramFrameSize;
 
+    /// <summary>Gets the peer's RFC 9221 s3 <c>max_datagram_frame_size</c>, or
+    /// <see langword="null"/> when its transport parameters carried none, in which case it
+    /// accepts no DATAGRAM frames. <see cref="AdvertisedMaxDatagramFrameSize"/> is OUR value;
+    /// this is theirs, and it is what the send side must honour.</summary>
+    internal ulong? PeerMaxDatagramFrameSize { get; private set; }
+
     /// <summary>The Source Connection ID this connection drew and puts on its packets; it is
     /// also what it advertised as <c>initial_source_connection_id</c>, because the factory
     /// was handed these exact bytes.</summary>
@@ -3658,6 +3664,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 peer.Parameters
                     .Get((ulong)TlsQuicTransportParameterId.MaxAckDelay)
                     ?.GetVariableInteger());
+
+            // RFC 9221 s3: absent or 0 both mean "no DATAGRAM frames accepted".
+            var advertisedDatagramLimit = peer.Parameters
+                .Get((ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize)
+                ?.GetVariableInteger();
+            PeerMaxDatagramFrameSize = advertisedDatagramLimit is 0 ? null : advertisedDatagramLimit;
 
             // RFC 9287 s3, read in the same step and for the same reason as the pair above: it
             // is a permission the PEER grants, it arrives with the peer's transport parameters,

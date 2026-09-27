@@ -2023,7 +2023,7 @@ public sealed partial class TlsQuicConnectionTests
         return payload.ToArray();
     }
 
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         private readonly TestPki _pki;
         private readonly TlsServerCertificate _credential;

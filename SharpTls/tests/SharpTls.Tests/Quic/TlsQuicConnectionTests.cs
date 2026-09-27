@@ -1027,7 +1027,7 @@ public sealed partial class TlsQuicConnectionTests
 
     // No clock in the loopback half: LoopbackQuicPeer builds every packet at one instant and
     // reads no clock of its own.
-    private static readonly DateTimeOffset SentAt =
+    internal static readonly DateTimeOffset SentAt =
         new(2026, 8, 18, 12, 0, 0, TimeSpan.Zero);
 
     /// <summary>Spec() with RFC 9000 s14.3's path MTU search turned off.</summary>
@@ -1049,7 +1049,7 @@ public sealed partial class TlsQuicConnectionTests
         PathMtuDiscovery = false,
     };
 
-    private static TlsQuicConnectionSpec Spec() =>
+    internal static TlsQuicConnectionSpec Spec() =>
         Spec(new TlsQuicConnectionSpec().AesGcmConfidentialityLimit);
 
     // THE OVERLOAD EXISTS FOR ONE TEST AND TAKES THE DEFAULT FROM THE SPEC ITSELF, so that the
@@ -1259,7 +1259,7 @@ public sealed partial class TlsQuicConnectionTests
         });
     }
 
-    private static TlsServerCertificate Credential(TestPki pki) =>
+    internal static TlsServerCertificate Credential(TestPki pki) =>
         new(pki.Leaf, (RSA)pki.LeafKey, [pki.Root]);
 
     // AutomaticSessionTicketCount 0 for the reason LoopbackQuicPeerTests gives: at the default
@@ -1289,7 +1289,7 @@ public sealed partial class TlsQuicConnectionTests
     // advertised 0 of them by RFC 9000 s18.2's blanket "default value of 0 if the transport
     // parameter is absent", and every test in this class drove such a server until the client
     // learned to check. Thirty-eight of them went red when it did.
-    private static CustomTlsQuicServer Server(
+    internal static CustomTlsQuicServer Server(
         TlsServerCertificate credential,
         ReadOnlyMemory<byte> originalDestinationConnectionId,
         byte[]? overrideOriginalDestination = null,
