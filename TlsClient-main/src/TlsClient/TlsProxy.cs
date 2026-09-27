@@ -4,7 +4,7 @@ using System.Text;
 
 namespace TlsClient;
 
-/// <summary>Describes an HTTP CONNECT or SOCKS5 proxy.</summary>
+/// <summary>Describes an HTTP CONNECT, SOCKS5, or MASQUE (RFC 9298 CONNECT-UDP) proxy.</summary>
 public sealed class TlsProxy
 {
     private readonly NetworkCredential? _credentials;
@@ -70,11 +70,41 @@ public sealed class TlsProxy
             new NetworkCredential(username, password));
     }
 
+    /// <summary>Creates an RFC 9298 CONNECT-UDP (MASQUE) proxy reached over HTTP/3. <paramref
+    /// name="address"/> is <c>https://host:port</c> with the port required; used through <see
+    /// cref="TlsSessionOptions"/>'s Quic.Proxy, which a later task adds. TCP requests never use
+    /// it.</summary>
+    public static TlsProxy Masque(
+        string address,
+        string username,
+        string password,
+        Action<TlsQuicOptions>? configureOuter = null)
+    {
+        ArgumentNullException.ThrowIfNull(username);
+        ArgumentNullException.ThrowIfNull(password);
+        var uri = new Uri(address, UriKind.Absolute);
+        if (uri.IsDefaultPort || uri.Port < 0)   // note: IsDefaultPort is also true for an explicit :443; a MASQUE proxy on 443 would need a different check
+        {
+            throw new ArgumentException(
+                "A MASQUE proxy address must name a UDP port other than 443 explicitly, for example https://masque.oxylabs.io:50000.",
+                nameof(address));
+        }
+        var proxy = Create(TlsProxyType.Masque, uri, Uri.UriSchemeHttps, new NetworkCredential(username, password));
+        proxy.ConfigureOuterQuic = configureOuter;
+        return proxy;
+    }
+
+    /// <summary>Shapes the OUTER QUIC connection to a MASQUE proxy; null means TlsClient's
+    /// defaults. Only the proxy sees that connection; the target sees the inner one.</summary>
+    internal Action<TlsQuicOptions>? ConfigureOuterQuic { get; private set; }
+
     /// <inheritdoc />
     public override string ToString() => $"{Type} proxy {Address.Host}:{EffectivePort}";
 
     internal int EffectivePort => Address.IsDefaultPort || Address.Port < 0
-        ? Type == TlsProxyType.Http ? 80 : 1080
+        ? Type == TlsProxyType.Http ? 80
+            : Type == TlsProxyType.Masque ? throw new InvalidOperationException("MASQUE proxies always carry a port.")
+            : 1080
         : Address.Port;
 
     internal string PoolKey { get; }
@@ -180,4 +210,7 @@ public enum TlsProxyType
 
     /// <summary>SOCKS5 with optional username/password authentication.</summary>
     Socks5 = 2,
+
+    /// <summary>MASQUE: an RFC 9298 CONNECT-UDP proxy reached over HTTP/3.</summary>
+    Masque = 3,
 }

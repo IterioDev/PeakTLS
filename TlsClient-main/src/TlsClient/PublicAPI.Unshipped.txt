@@ -262,6 +262,7 @@ TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.InitialStreamId.get -> int
 TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.SettingsAckPlacement.get -> TlsClient.TlsHttp2SettingsAckPlacement
 TlsClient.TlsHttpBehaviorProfile.TlsHttp2Behavior.StreamIdStep.get -> int
 TlsClient.TlsHttpVersionPolicy.Http3Only = 3 -> TlsClient.TlsHttpVersionPolicy
+TlsClient.TlsProxyType.Masque = 3 -> TlsClient.TlsProxyType
 TlsClient.TlsQpackNameMatchPolicy
 TlsClient.TlsQpackNameMatchPolicy.LiteralName = 1 -> TlsClient.TlsQpackNameMatchPolicy
 TlsClient.TlsQpackNameMatchPolicy.NameReference = 0 -> TlsClient.TlsQpackNameMatchPolicy
@@ -426,6 +427,7 @@ static TlsClient.TlsPresets.Spotify917602050IOS260Http3.get -> TlsClient.TlsPres
 static TlsClient.TlsPresets.Spotify918602428IOS270Http3.get -> TlsClient.TlsPreset!
 static TlsClient.TlsProfiles.Spotify917602050IOS260Quic.get -> TlsClient.TlsProfile!
 static TlsClient.TlsProfiles.Spotify918602428IOS270Quic.get -> TlsClient.TlsProfile!
+static TlsClient.TlsProxy.Masque(string! address, string! username, string! password, System.Action<TlsClient.TlsQuicOptions!>? configureOuter = null) -> TlsClient.TlsProxy!
 static TlsClient.TlsQuicOptions.ApplyDefaultClientHello(SharpTls.ClientHelloBuilder! builder) -> void
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byte[]! Value)?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
