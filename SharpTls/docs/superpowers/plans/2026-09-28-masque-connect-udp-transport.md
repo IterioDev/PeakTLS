@@ -79,6 +79,17 @@ public sealed class TlsQuicConnectionDatagramTests
 
         Assert.Null(harness.Connection.PeerMaxDatagramFrameSize);
     }
+
+    [Fact]
+    public async Task AnAdvertisedZeroMeansNoDatagramsAndReadsAsNull()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
+            cancellation.Token,
+            flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(TlsQuicTransportParameterId.MaxDatagramFrameSize, 0)]);
+
+        Assert.Null(harness.Connection.PeerMaxDatagramFrameSize);
+    }
 }
 ```
 
@@ -97,8 +108,8 @@ Next to `AdvertisedMaxDatagramFrameSize` (line 1303):
 
 ```csharp
 /// <summary>Gets the peer's RFC 9221 s3 <c>max_datagram_frame_size</c>, or
-/// <see langword="null"/> when its transport parameters carried none, in which case it
-/// accepts no DATAGRAM frames. <see cref="AdvertisedMaxDatagramFrameSize"/> is OUR value;
+/// <see langword="null"/> when its transport parameters carried none or carried 0 (s3 gives
+/// both the same meaning), in which case it accepts no DATAGRAM frames. <see cref="AdvertisedMaxDatagramFrameSize"/> is OUR value;
 /// this is theirs, and it is what the send side must honour.</summary>
 internal ulong? PeerMaxDatagramFrameSize { get; private set; }
 ```
@@ -115,7 +126,7 @@ PeerMaxDatagramFrameSize = advertisedDatagramLimit is 0 ? null : advertisedDatag
 
 - [ ] **Step 4: Run the test, expect pass**
 
-Run the same command. Expected: `Passed! - Failed: 0, Passed: 2`.
+Run the same command. Expected: `Passed! - Failed: 0, Passed: 3`.
 
 - [ ] **Step 5: Commit**
 
