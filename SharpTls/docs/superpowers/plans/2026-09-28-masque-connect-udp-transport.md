@@ -873,7 +873,7 @@ The tests need an outer "proxy" peer: `MasqueHarness`, a new `internal sealed cl
 3. **The peer script is one sequential task and nothing else touches the peer while it runs.** Unlike `ConfirmedHandshake`, which drives client and peer alternately from one thread, here the client pumps itself inside `ConnectAsync`. The script: pump the peer until its handshake is complete, `SendHandshakeDoneAsync`, send `PeerControl(peerSettings)` with `SendStreamFramesAsync`, then pump until `ReceivedStreamFrames` holds a HEADERS frame on stream 0 (keep its bytes: Task 7's request test decodes them with `HeadersPayload` and `DecodeFieldSection`), and answer with `Stream(0, 0, ResponseBytes(answerStatus, [], []))`, or `Reset(0, 0, 0x10c)` when `answerWithReset` is set. `LoopbackQuicPeer` is not thread-safe: tests that later send raw frames (Task 8) do so only after `ConnectAsync` returned and the script task completed, and they pump the peer through `PumpPeerAsync` from the test thread.
 4. **Visibility.** These `private static` helpers on the `TlsQuicConnectionTests` partial become `internal static` (word changes): `Server`, `Credential`, `Spec`, `SentAt` (`TlsQuicConnectionTests.cs`), `PeerControl(params TlsQuicHttp3Setting[])` (`TlsQuicHttp3ConnectionTests.cs:2418`, returns the stream-3 control frame carrying SETTINGS; Task 4 already made it internal), `HeadersPayload(byte[])` (`:2016`, strips the HEADERS frame out of stream bytes), `ResponseBytes(int status, (string, string)[] fields, byte[] body)` (`:2456`, builds response HEADERS plus DATA), `Reset(streamId, finalSize, code)` (`:898`, a RESET_STREAM frame), `Stream(id, offset, data, fin)` (`TlsQuicConnectionStreamTests.cs:786`), and `TlsQuicHttp3RequestTests.DecodeFieldSection` (`:1355`, internal after Task 4). `FlowControlParameters` is already internal (`:1340`).
 
-`MasqueHarness.CreateAsync(ct, peerSettings: TlsQuicHttp3Setting[], serverMaxDatagramFrameSize: 65535, answerStatus: 200, answerWithReset: false, outerSpec: null)` returns a `MasqueHarness` object, not a bare transport: `Transport` (the `TlsQuicMasqueTransport`, or the exception `ConnectAsync` threw is rethrown after the peer task was awaited so its own failure is visible), `Peer` (the `LoopbackQuicPeer`, for `ReceivedStreamFrames`, `ReceivedDatagrams`, `SendOneRttRawFrameAsync`, `LastConnectionClose`), `ClientTransport` (the in-memory client half, for `Sent`), and `PumpPeerAsync(ct)`, which pumps the peer once per datagram the client has sent since the last call and never on an empty inbox (the `_peerConsumed` pattern of `Harness`, `TlsQuicHttp3ConnectionTests.cs:2055-2058, 2144-2158`; `Peer.PumpOnceAsync` blocks otherwise). `answerWithReset: true` makes the script send `Reset(0, 0, 0x10c)` instead of the HEADERS answer. `outerSpec` replaces the default outer spec (the congestion test passes one whose `Recovery = new TlsQuicRecoverySpec { CongestionController = () => gate }`, Task 3's technique, with the gate `Open = true` for the handshake and closed only after `CreateAsync` returned). The harness polls `ClientTransport.Sent.Count` from its own task with a short `Task.Delay`; `Sent` is a plain list, so no other thread touches it while polling.
+`MasqueHarness.CreateAsync(ct, peerSettings: TlsQuicHttp3Setting[], serverMaxDatagramFrameSize: 65535, answerStatus: 200, answerWithReset: false, outerSpec: null)` returns a `MasqueHarness` object, not a bare transport: `Transport` (the `TlsQuicMasqueTransport`, or the exception `ConnectAsync` threw is rethrown after the peer task was awaited so its own failure is visible), `Peer` (the `LoopbackQuicPeer`, for `ReceivedStreamFrames`, `ReceivedDatagrams`, `SendOneRttRawFrameAsync`, `LastConnectionClose`), `ClientTransport` (the in-memory client half, for `Sent`), and `PumpPeerAsync(ct)`, which pumps the peer once per datagram the client has sent since the last call and never on an empty inbox (the `_peerConsumed` pattern of `Harness`, `TlsQuicHttp3ConnectionTests.cs:2055-2058, 2144-2158`; `Peer.PumpOnceAsync` blocks otherwise). `answerWithReset: true` makes the script send `Reset(0, 0, 0x10c)` instead of the HEADERS answer. `outerSpec` replaces the default outer spec (the congestion test passes one whose `Recovery = new TlsQuicRecoverySpec { CongestionController = () => gate }`, Task 3's technique, with the gate `Open = true` for the handshake and closed only after `CreateAsync` returned). The harness polls `ClientTransport.Sent.Count` from its own task with a short `Task.Delay` while the client's `ConnectAsync` task appends to that plain list (`InMemoryDatagramTransport.cs:52,124`); reading `Count` and `[0]` of a list that only grows is benign, and the harness reads nothing else from it. `PumpPeerAsync` passes `SentAt` to `Peer.PumpOnceAsync(sentAt, ct)` (`LoopbackQuicPeer.cs:578`). `serverMaxDatagramFrameSize` is `ulong?`: null omits the 0x20 entry from `Server(flowControl:)`, which the "no 0x20" half of `AProxyWithoutDatagramsIsRefusedByName` needs. Both new source files and the harness need `using SharpTls;` (`ClientHelloBuilder` and `TlsQuicClientHelloProfileFactory` live in that namespace).
 
 The outer specs the tests use:
 
@@ -1202,8 +1202,10 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             // Two clocks run to the same value: this method's linked deadline and the outer
             // TlsQuicConnection's own HandshakeDeadline, which throws TimeoutException
             // (TlsQuicConnection.cs:5181). Whichever fires first is the same fact.
+            // TlsQuicProxyException has one constructor, (error, message); the cause rides in
+            // the text, the shape Closed(...) below uses too.
             throw new TlsQuicProxyException(TlsQuicProxyError.MasqueTunnelRefused,
-                $"The MASQUE tunnel did not come up within {options.HandshakeDeadline}.", exception);
+                $"The MASQUE tunnel did not come up within {options.HandshakeDeadline} ({exception.GetType().Name}: {exception.Message}).");
         }
         finally
         {
@@ -1286,11 +1288,13 @@ git commit -m "feat(quic): dial a MASQUE CONNECT-UDP tunnel and judge the proxy'
 // SendAsync with MaxDatagramPayloadSize + 1 bytes → ArgumentOutOfRangeException naming the ceiling.
 
 [Fact] public async Task SendAwaitsWhenTheOuterIsCongestionBlocked()
-// Block the outer window (as in Task 3's test). A blocked outer absorbs 64 (connection FIFO)
-// + 1 (_stalled) + 64 (outbound channel) = 129 payloads before SendAsync awaits, so issue 130
-// SendAsync calls without awaiting: the first 129 complete, the 130th's ValueTask is still
-// pending after 200 ms; then let the peer ACK and assert all 130 arrive at the peer in order
-// (peer.ReceivedDatagrams from Task 3).
+// Block the outer window (outerSpec with a closed ScriptedSendGate, as in Task 3's test). A
+// blocked outer absorbs 64 (connection FIFO) + 1 (_stalled) + 64 (outbound channel) = 129
+// payloads before SendAsync awaits, so issue 130 SendAsync calls without awaiting; await the
+// first 129 with a 5 s timeout (the owner drains them concurrently, so they complete
+// eventually, not instantly), then assert the 130th's task is still pending after 200 ms;
+// open the gate, await the 130th, PumpPeerAsync, and assert all 130 arrive at the peer in
+// order (peer.ReceivedDatagrams from Task 3).
 
 [Fact] public async Task AResetAfterTheResponseSurfacesAsTunnelClosedOnTheNextReceive()
 // After 200 the peer sends RESET_STREAM (error 0x10c) for the request stream; ReceiveAsync throws
@@ -1346,7 +1350,7 @@ public async ValueTask<TlsQuicDatagramReceiveResult> ReceiveAsync(Memory<byte> b
     {
         throw closed.InnerException as TlsQuicProxyException ?? Closed(closed);
     }
-    datagram.CopyTo(buffer);
+    datagram.CopyTo(buffer);   // never longer than MaxDatagramPayloadSize: the owner dropped larger ones
     return new TlsQuicDatagramReceiveResult(datagram.Length, _targetEndPoint);
 }
 
@@ -1509,7 +1513,7 @@ git commit -m "feat(quic): run the MASQUE tunnel from one owner task with delay-
 - Create: `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`
 - Modify: `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` (one pointer paragraph under "Error model")
 
-- [ ] **Step 1: Write the doc** from the spec's Components 4, Error model and MTU arithmetic sections: purpose, the dial's five steps with the exact CONNECT-UDP header list, framing bytes (`[quarter stream id][0x00][payload]` inside a `0x31` frame), the owner task and its two channels, the five errors with when they fire, the 1392/1360/1358/1200 arithmetic, `DropSummary`, and the tests-only options. Under 200 lines. Cite RFC 9221 s3/s4/s5.2/s5.4, RFC 9297 s2.1/s3.4, RFC 9298 s2/s3.1/s3.5/s4, RFC 8441 s3/s4, RFC 9220 s3.
+- [ ] **Step 1: Write the doc** from the spec's Components 4, Error model and MTU arithmetic sections: purpose, the dial's five steps with the exact CONNECT-UDP header list, framing bytes (`[quarter stream id][0x00][payload]` inside a `0x31` frame), the owner task and its two channels, the five errors with when they fire, the 1392/1360/1358/1200 arithmetic (stated for an 8-byte server connection id: the outer short header carries the proxy's SCID, and a longer one lowers the capacity by the difference), `DropSummary`, and the tests-only options. Under 200 lines. Cite RFC 9221 s3/s4/s5.2/s5.4, RFC 9297 s2.1/s3.4, RFC 9298 s2/s3.1/s3.5/s4, RFC 8441 s3/s4, RFC 9220 s3.
 
 - [ ] **Step 2: Add the pointer** in the SOCKS5 doc after the TLS-alert paragraph: "A proxy that only tunnels UDP into TCP cannot carry QUIC; providers that offer RFC 9298 CONNECT-UDP are reached through `TlsQuicMasqueTransport`, see MASQUE-DATAGRAM-TRANSPORT.md."
 
