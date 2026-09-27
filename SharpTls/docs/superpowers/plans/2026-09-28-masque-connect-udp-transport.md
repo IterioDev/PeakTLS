@@ -66,7 +66,7 @@ public sealed class TlsQuicConnectionDatagramTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
             cancellation.Token,
-            flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TransportParameter(0x20, 65535)]);
+            flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)]);
 
         Assert.Equal(65535UL, harness.Connection.PeerMaxDatagramFrameSize);
     }
@@ -79,14 +79,12 @@ public sealed class TlsQuicConnectionDatagramTests
 
         Assert.Null(harness.Connection.PeerMaxDatagramFrameSize);
     }
-
-    // Same constructor the harness's flowControl entries use; varint-encoded value.
-    internal static TlsQuicTransportParameter TransportParameter(ulong id, ulong value) =>
-        new(id, QuicVariableLengthInteger.Encode(value));
 }
 ```
 
-`Harness` is nested in `public sealed partial class TlsQuicConnectionTests` (the partial's other half is `TlsQuicHttp3ConnectionTests.cs`, where the harness sits at line 2026) and is `private sealed class` today; make it `internal sealed class`, and make `FlowControlParameters`, `Server`, `Credential`, `Spec` and `SentAt` on that partial `internal static` too (Chunk 2 needs them). `flowControl` REPLACES the server's parameter list (`Server` does `parameters.AddRange(flowControl ?? FlowControlParameters())`, `TlsQuicConnectionTests.cs:~1322`), which is why the test spreads `FlowControlParameters()` first: without it the peer grants no streams and the harness cannot open its control streams.
+`TlsQuicTransportParameter.VariableInteger(id, value)` already exists (`TlsQuicConnectionTests.cs:1212`); `FlowControlParameters` is already `internal static` (`:1340`).
+
+`Harness` is nested in `public sealed partial class TlsQuicConnectionTests` (the partial's other half is `TlsQuicHttp3ConnectionTests.cs`, where the harness sits at line 2026) and is `private sealed class` today; make it `internal sealed class`, and make `Server`, `Credential`, `Spec` and `SentAt` on that partial `internal static` too (Chunk 2 needs them). `flowControl` REPLACES the server's parameter list (`Server` does `parameters.AddRange(flowControl ?? FlowControlParameters())`, `TlsQuicConnectionTests.cs:~1322`), which is why the test spreads `FlowControlParameters()` first: without it the peer grants no streams and the harness cannot open its control streams.
 
 - [ ] **Step 2: Run the test, expect a compile failure**
 
@@ -108,12 +106,12 @@ internal ulong? PeerMaxDatagramFrameSize { get; private set; }
 In `ApplyPeerTransportParametersAsync`, after `_peerMaxAckDelay = ...`:
 
 ```csharp
-PeerMaxDatagramFrameSize = peer.Parameters
+// RFC 9221 s3: absent or 0 both mean "no DATAGRAM frames accepted".
+var advertisedDatagramLimit = peer.Parameters
     .Get((ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize)
     ?.GetVariableInteger();
-```
-
-Write it as `var advertised = ...?.GetVariableInteger(); PeerMaxDatagramFrameSize = advertised is 0 ? null : advertised;` because RFC 9221 s3 says a value of 0 means the peer accepts no DATAGRAM frames, the same as absence. `TlsQuicTransportParameterId.MaxDatagramFrameSize` exists (the parser's `case MaxDatagramFrameSize:` in `TlsQuicTransportParameters.cs:300` names it). The default `Server(...)` in the tests advertises no 0x20, so the second test's `Null` holds.
+PeerMaxDatagramFrameSize = advertisedDatagramLimit is 0 ? null : advertisedDatagramLimit;
+``` `TlsQuicTransportParameterId.MaxDatagramFrameSize` exists (the parser's `case MaxDatagramFrameSize:` in `TlsQuicTransportParameters.cs:300` names it). The default `Server(...)` in the tests advertises no 0x20, so the second test's `Null` holds.
 
 - [ ] **Step 4: Run the test, expect pass**
 
@@ -154,7 +152,7 @@ public void ADatagramFrameRoundTripsInItsLengthBearingForm()
     Assert.Equal(frame.Data.ToArray(), written.Skip(2).ToArray());
 
     var offset = 0;
-    Assert.True(TlsQuicFrames.TryReadFrame(written.ToArray(), ref offset, out var read, out var error)); // :173
+    Assert.True(TlsQuicFrames.TryReadFrame(written.ToArray(), ref offset, out var read, out var error)); // :369
     Assert.Equal(TlsQuicFrameType.Datagram, read.Type);
     Assert.Equal(frame.Data.ToArray(), read.Data.ToArray());
     Assert.Equal(written.Count, offset);
@@ -169,7 +167,7 @@ public void TheLengthLessDatagramFormIsNeverWritten()
 }
 ```
 
-(check `TryReadFrame`'s exact parameter list at `:173` and adjust the call).
+Also update the comment at `TlsQuicFramesTests.cs:393-394`, which names the deleted theory.
 
 - [ ] **Step 2: Run, expect the ArgumentException**
 
@@ -193,13 +191,11 @@ internal static void WriteDatagramFrameFields(List<byte> destination, in TlsQuic
         throw new ArgumentException(
             "Only the length-bearing DATAGRAM form (0x31) is sent.", nameof(frame));
     }
-    QuicVariableLengthInteger.Write(destination, frame.RawType);
+    QuicVariableLengthInteger.Write(destination, frame.RawType);          // QuicVariableLengthInteger.cs:70
     QuicVariableLengthInteger.Write(destination, (ulong)frame.Data.Length);
-    destination.AddRange(frame.Data.Span);
+    WriteBytes(destination, frame.Data);                                  // as TlsQuicConnectionFrames.cs:1154 does
 }
-```
-
-(use the same varint-writing call the neighbouring `Write*FrameFields` use if `QuicVariableLengthInteger.Write(List<byte>, ulong)` is not its exact shape). Replace the throw arm in `TlsQuicFrames.cs:1000-1012` with:
+``` Replace the throw arm in `TlsQuicFrames.cs:1000-1012` with:
 
 ```csharp
 case TlsQuicFrameType.Datagram:
@@ -235,7 +231,7 @@ public async Task AQueuedDatagramLeavesAsOneLengthBearingDatagramFrameAndNothing
 {
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
     using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
-        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TransportParameter(0x20, 65535)]);
+        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)]);
     var payload = Enumerable.Range(0, 300).Select(i => (byte)i).ToArray();
 
     Assert.True(harness.Connection.TryQueueDatagram(payload));
@@ -260,7 +256,7 @@ public async Task TheQueueRefusesTheSixtyFifthDatagramAndNeverDrops()
 {
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
     using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
-        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TransportParameter(0x20, 65535)]);
+        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)]);
 
     for (var i = 0; i < 64; i++)
     {
@@ -286,7 +282,7 @@ public async Task APayloadAboveTheFrameCeilingIsRefusedByName()
 {
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
     using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
-        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TransportParameter(0x20, 65535)]);
+        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)]);
     var ceiling = harness.Connection.MaximumDatagramFramePayload;
 
     Assert.True(ceiling >= 1200, $"ceiling {ceiling}");
@@ -297,36 +293,40 @@ public async Task APayloadAboveTheFrameCeilingIsRefusedByName()
 [Fact]
 public async Task ACongestionBlockedWindowHoldsDatagramsAndReleasesThemInOrder()
 {
+    // The blocked-window tests (TlsQuicConnectionRetransmissionTests.cs:1479, :1573) close the
+    // window with ScriptedSendGate { Open = false } (private at :2076; make it internal) plugged
+    // in through RetransmittingProbeSpec -> Recovery.CongestionController. Harness.CreateAsync
+    // gains `TlsQuicConnectionSpec? connectionSpec = null`, passed to the Connection(...)
+    // overload it already calls (TlsQuicConnectionTests.cs:1115).
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    var gate = new ScriptedSendGate { Open = false };
     using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(
-        cancellation.Token, flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TransportParameter(0x20, 65535)]);
-
-    // Exhaust the window with stream data the peer does not acknowledge: the arrangement
-    // TlsQuicConnectionRetransmissionTests uses around line 1537 (it reads
-    // harness.Connection.CongestionControl.CongestionWindowBytes and sends until
-    // SendPendingAsync returns false). Write FillTheWindowAsync from it; no stub.
-    await FillTheWindowAsync(harness, cancellation.Token);
-    Assert.False(await harness.Connection.SendPendingAsync(cancellation.Token));
+        cancellation.Token,
+        connectionSpec: RetransmittingProbeSpec(gate),   // the retransmission tests' builder; make it internal
+        flowControl: [.. TlsQuicConnectionTests.FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)]);
 
     Assert.True(harness.Connection.TryQueueDatagram(new byte[] { 1 }));
     Assert.True(harness.Connection.TryQueueDatagram(new byte[] { 2 }));
-    Assert.False(await harness.Connection.SendPendingAsync(cancellation.Token)); // still blocked
+    Assert.False(await harness.Connection.SendPendingAsync(cancellation.Token)); // window shut
     Assert.Equal(2, harness.Connection.QueuedDatagrams);
 
-    // The peer acknowledges everything (the cumulative-ACK helper the retransmission tests
-    // use), the client pumps, and the two datagrams leave in order.
-    await harness.Peer.SendCumulativeAckAsync(cancellation.Token);
-    await harness.Connection.PumpOnceAsync(cancellation.Token);
+    gate.Open = true;
     Assert.True(await harness.Connection.SendPendingAsync(cancellation.Token));
     Assert.True(await harness.Connection.SendPendingAsync(cancellation.Token));
+    Assert.Equal(0, harness.Connection.QueuedDatagrams);
 
     await harness.Peer.PumpOnceAsync(SentAt, cancellation.Token);
     await harness.Peer.PumpOnceAsync(SentAt, cancellation.Token);
     Assert.Equal([new byte[] { 1 }, new byte[] { 2 }], harness.Peer.ReceivedDatagrams);
 }
+
+[Fact]
+public void ALostDatagramFrameIsDroppedNotRepaired() =>
+    // RFC 9221 s5.2; TlsQuicLossDetection.ActionFor at :1248 already answers Drop and no test pins it.
+    Assert.Equal(TlsQuicLossAction.Drop, TlsQuicLossDetection.ActionFor(TlsQuicFrameType.Datagram)); // check the enum's and method's exact names at :1248
 ```
 
-`SentAt` is `private static` per test class in this suite (`LoopbackQuicPeerTests.cs:26`); declare the same member in this class.
+`SentAt` is `private static` per test class in this suite (`LoopbackQuicPeerTests.cs:26`); declare the same member in this class. If the handshake itself needs the gate open (the Initial and Handshake packets go through the same controller), create the gate with `Open = true`, run `CreateAsync`, then set `Open = false` before queueing.
 
 - [ ] **Step 2: Run, expect compile failure on `TryQueueDatagram`**
 
@@ -435,12 +435,12 @@ Two RFC 9221 s5.2 rules are already satisfied by existing code; verify, do not r
 - [ ] **Step 5: Run the datagram tests and the send-path suite**
 
 Run: `dotnet test SharpTls/tests/SharpTls.Tests --filter "FullyQualifiedName~TlsQuicConnectionDatagramTests|FullyQualifiedName~TlsQuicApplicationSendPath|FullyQualifiedName~TlsQuicConnectionTests|FullyQualifiedName~TlsQuicFramesTests"`
-Expected: all pass. Add one loss fact to `TlsQuicConnectionDatagramTests`: build the pair with `ImpairingDatagramTransport` dropping the client's first application packet after the handshake (see how `TlsQuicConnectionRetransmissionTests` arranges a dropped packet), queue a datagram, send, then send stream data and drive the peer's ACKs until the PTO fires; assert `harness.Peer.ReceivedDatagrams` is empty while the stream data arrived. Give it a body; an empty `[Fact]` passes vacuously and is forbidden in this plan.
+Expected: all pass, including the `ALostDatagramFrameIsDroppedNotRepaired` unit fact. An empty `[Fact]` passes vacuously and is forbidden in this plan.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add SharpTls/src/SharpTls/Quic/TlsQuicConnection.cs SharpTls/src/SharpTls/Quic/TlsQuicApplicationSendPath.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicConnectionDatagramTests.cs SharpTls/tests/SharpTls.Tests/Quic/LoopbackQuicPeer.cs
+git add SharpTls/src/SharpTls/Quic/TlsQuicConnection.cs SharpTls/src/SharpTls/Quic/TlsQuicApplicationSendPath.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicConnectionDatagramTests.cs SharpTls/tests/SharpTls.Tests/Quic/LoopbackQuicPeer.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ConnectionTests.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicConnectionRetransmissionTests.cs
 git commit -m "feat(quic): send DATAGRAM frames from a bounded, congestion-gated queue" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
@@ -451,7 +451,7 @@ git commit -m "feat(quic): send DATAGRAM frames from a bounded, congestion-gated
 - Modify: `SharpTls/src/SharpTls/Quic/TlsQuicHttp3Spec.cs:215` (add `EnableConnectProtocolIdentifier`)
 - Modify: `SharpTls/src/SharpTls/Quic/TlsQuicHttp3Connection.cs:17-30` (`TlsQuicHttp3RequestRefusal`), `:595-640` (`TryOpenRequest`)
 - Modify: `TlsClient-main/src/TlsClient/Http3Connection.cs:1065-1110` (`Describe` switch on the refusal)
-- Modify: `SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ConnectionTests.cs` (`PeerControl` overload, `internal static`), `SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3RequestTests.cs:1355` (`DecodeFieldSection` → `internal static`)
+- Modify: `SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ConnectionTests.cs:2418` (`PeerControl` → `internal static`), `SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3RequestTests.cs:1335,1355` (`ReadFrames`, `DecodeFieldSection` → `internal static`)
 - Test: `SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ExtendedConnectTests.cs` (new)
 
 - [ ] **Step 1: Write the failing tests**
@@ -478,12 +478,19 @@ public sealed class TlsQuicHttp3ExtendedConnectTests
         ],
     };
 
+    // TryEncode writes a HEADERS frame; its callers decode with
+    // DecodeFieldSection(Assert.Single(ReadFrames(encoded)).Payload) (TlsQuicHttp3RequestTests.cs:184,
+    // :365; ReadFrames at :1335, DecodeFieldSection at :1355). Make both helpers internal static.
+    private static ImmutableArray<TlsQuicHttp3Field> Decode(List<byte> encoded) =>
+        TlsQuicHttp3RequestTests.DecodeFieldSection(
+            Assert.Single(TlsQuicHttp3RequestTests.ReadFrames(encoded)).Payload);
+
     [Fact]
     public void TheProtocolPseudoHeaderFollowsTheMethodWhateverTheOrder()
     {
         var encoded = new List<byte>();
-        Assert.True(ConnectUdp().TryEncode(encoded, new TlsQuicHttp3Spec(), out _)); // the static-only encode path TlsQuicHttp3RequestTests use; check its exact signature there
-        var fields = TlsQuicHttp3RequestTests.DecodeFieldSection(encoded.ToArray());   // make that helper internal (it is private static at :1355)
+        Assert.True(ConnectUdp().TryEncode(encoded, new TlsQuicHttp3Spec(), out _)); // same call the request tests make at :184
+        var fields = Decode(encoded);
 
         Assert.Equal(
             [":method", ":protocol", ":scheme", ":authority", ":path", "proxy-authorization", "capsule-protocol"],
@@ -497,7 +504,7 @@ public sealed class TlsQuicHttp3ExtendedConnectTests
         var get = new TlsQuicHttp3Request { Method = "GET", Scheme = "https", Authority = "a", Path = "/" };
         var encoded = new List<byte>();
         Assert.True(get.TryEncode(encoded, new TlsQuicHttp3Spec(), out _));
-        Assert.DoesNotContain(TlsQuicHttp3RequestTests.DecodeFieldSection(encoded.ToArray()), f => f.Name == ":protocol");
+        Assert.DoesNotContain(Decode(encoded), f => f.Name == ":protocol");
     }
 
     [Fact]
@@ -518,8 +525,8 @@ public sealed class TlsQuicHttp3ExtendedConnectTests
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var harness = await TlsQuicConnectionTests.Harness.CreateAsync(cancellation.Token);
-        await harness.PeerSendsAsync(cancellation.Token, PeerControl((0x08, 1)));   // see below
-        Assert.True(harness.Http3.PeerSettingsReceived);
+        await harness.PeerSendsAsync(cancellation.Token, PeerControl(new TlsQuicHttp3Setting(0x08, 1)));
+        Assert.True(harness.Http3.Streams.PeerSettingsReceived);   // TlsQuicHttp3Connection.cs:502, used at TlsQuicHttp3ConnectionTests.cs:216
 
         var stream = harness.Http3.TryOpenRequest(ConnectUdp(), out var refusal, out _);
 
@@ -529,7 +536,7 @@ public sealed class TlsQuicHttp3ExtendedConnectTests
 }
 ```
 
-Peer SETTINGS reach the client through `harness.PeerSendsAsync(ct, PeerControl())` (`TlsQuicHttp3ConnectionTests.cs:279`), where `PeerControl()` builds the server's control-stream bytes. Add an overload `PeerControl(params (ulong Id, ulong Value)[] settings)` beside it that emits the stream type `0x00`, the SETTINGS frame type `0x04`, a varint length, and the id/value varint pairs; the existing parameterless one keeps its bytes. Make both `internal static` so this class and Chunk 2's harness can call them.
+Peer SETTINGS reach the client through `harness.PeerSendsAsync(ct, PeerControl(...))` (`TlsQuicHttp3ConnectionTests.cs:279`). `PeerControl(params TlsQuicHttp3Setting[] settings)` already exists (`:2418`) and builds the server's control-stream bytes (stream type `0x00`, SETTINGS frame `0x04`, length, id/value pairs); do NOT add an overload (a second `params` overload makes every existing call ambiguous). Make it `internal static` so this class and Chunk 2's harness can call it. `PeerSendsAsync` pumps the client connection and runs `Http3.TryProcess` itself (`:2337-2342`), so no extra `PumpOnceAsync` follows it.
 
 - [ ] **Step 2: Run, expect compile failures (`Protocol`, `ExtendedConnectNotEnabled`)**
 
@@ -616,7 +623,7 @@ git commit -m "feat(http3): extended CONNECT with :protocol, gated on the peer's
 
 - [ ] **Step 1: Write the failing tests**
 
-All six use one arrangement: `Harness.CreateAsync(ct, spec: new TlsQuicHttp3Spec { Settings = [.. TestHttp3Settings.QpackCapable, new TlsQuicHttp3Setting(0x33, 1)] }, flowControl: [.. FlowControlParameters(), TransportParameter(0x20, 65535)])` (the harness's `maxDatagramFrameSize` default already puts 0x20 in the client hello), then `await harness.PeerSendsAsync(ct, PeerControl((0x08, 1), (0x33, 1)))`. Put that in a private `static Task<Harness> ArrangeAsync(ct)`.
+All six use one arrangement: `Harness.CreateAsync(ct, spec: new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable }, flowControl: [.. FlowControlParameters(), TlsQuicTransportParameter.VariableInteger(0x20, 65535)])` (`DatagramCapable` at `TestHttp3Settings.cs:40` is QpackCapable plus 0x33 = 1; the harness's `maxDatagramFrameSize` default already puts 0x20 in the client hello), then `await harness.PeerSendsAsync(ct, PeerControl(new TlsQuicHttp3Setting(0x08, 1), new TlsQuicHttp3Setting(0x33, 1)))`. Put that in a private `static Task<Harness> ArrangeAsync(ct)`. Sending on a request stream from the peer uses `harness.PeerSendsAsync(ct, Stream(streamId, offset, bytes))`, where `Stream(ulong, ulong, byte[], bool fin = false)` builds the STREAM frame (private in `TlsQuicConnectionStreamTests.cs:786`; make it `internal static` and add that file to this task's commit), and `ResponseBytes(int status, (string, string)[] fields, byte[] body)` (`TlsQuicHttp3ConnectionTests.cs:2456`) builds HEADERS plus DATA for a response.
 
 ```csharp
 public sealed class TlsQuicHttp3DatagramExchangeTests
@@ -691,13 +698,9 @@ public sealed class TlsQuicHttp3DatagramExchangeTests
         var tunnel = harness.Http3.TryOpenRequest(ConnectUdp(), out _, out _, receivesDatagrams: true)!;
         await harness.FlushAsync(cancellation.Token);
 
-        // HeadersPayload(...) builds a HEADERS frame (helper in TlsQuicHttp3ConnectionTests.cs);
-        // DataFrame(...) is a DATA frame: type 0x00, varint length, bytes. Both on the tunnel's
-        // stream, no FIN, via harness.PeerSendsAsync(ct, bytes, streamId) — check that helper's
-        // stream-id parameter; if it only writes the control stream, use
-        // harness.Peer.SendStreamFramesAsync with a STREAM frame on tunnel.Id.
-        await harness.PeerSendsOnStreamAsync(cancellation.Token, tunnel.Id, [.. HeadersPayload(200), .. DataFrame(new byte[100])]);
-        Assert.True(await harness.Http3.PumpOnceAsync(cancellation.Token));
+        // A 200 followed by 100 body bytes on the tunnel's stream, no FIN. PeerSendsAsync pumps
+        // and processes; do not pump again afterwards (an empty inbox blocks until the token).
+        await harness.PeerSendsAsync(cancellation.Token, Stream(tunnel.Id, 0, ResponseBytes(200, [], new byte[100])));
 
         var response = harness.Http3.ResponseFor(tunnel.Id)!;
         Assert.Equal(200, response.Status);
@@ -711,7 +714,7 @@ public sealed class TlsQuicHttp3DatagramExchangeTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var harness = await ArrangeAsync(cancellation.Token);
 
-        Assert.True(harness.Http3.PeerSettingsReceived);
+        Assert.True(harness.Http3.Streams.PeerSettingsReceived);
         Assert.Equal(1UL, TlsQuicHttp3Settings.Value(harness.Http3.PeerSettings, 0x08));
     }
 
@@ -727,7 +730,7 @@ public sealed class TlsQuicHttp3DatagramExchangeTests
 }
 ```
 
-Every helper named here that does not exist yet (`PeerSendsOnStreamAsync`, `DataFrame`) is written in this task beside `PeerControl`; none is left to the reader.
+Every helper named here exists already or is made `internal static` in this task (`Stream`, `ResponseBytes`, `PeerControl`, `FlushAsync`); `DatagramFrame` is the one new one and is written above.
 
 - [ ] **Step 2: Run, expect compile failures**
 
@@ -825,7 +828,7 @@ Run: `dotnet test SharpTls/tests/SharpTls.Tests --filter "FullyQualifiedName~Tls
 - [ ] **Step 5: Commit**
 
 ```bash
-git add SharpTls/src/SharpTls/Quic/TlsQuicHttp3Connection.cs SharpTls/src/SharpTls/Quic/TlsQuicHttp3Request.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3DatagramExchangeTests.cs
+git add SharpTls/src/SharpTls/Quic/TlsQuicHttp3Connection.cs SharpTls/src/SharpTls/Quic/TlsQuicHttp3Request.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3DatagramExchangeTests.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ConnectionTests.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicConnectionStreamTests.cs SharpTls/tests/SharpTls.Tests/Quic/TlsQuicHttp3ExtendedConnectTests.cs
 git commit -m "feat(http3): exchanges that send and receive HTTP datagrams on an open request stream" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
@@ -835,7 +838,7 @@ git commit -m "feat(http3): exchanges that send and receive HTTP datagrams on an
 - Modify: `SharpTls/src/SharpTls/Quic/TlsQuicSocks5Protocol.cs:11-32` (`TlsQuicProxyError`)
 - Regenerate: `SharpTls/tests/SharpTls.Tests/Api/PublicApi.Shipped.txt`
 
-- [ ] **Step 1: Add the members** after `RelayDeliveredTlsAlert`, each with a one-line summary from the spec's error table: `MasqueNotOffered`, `MasqueAuthenticationRejected`, `MasqueTargetRejected`, `MasqueTunnelRefused`, `MasqueTunnelClosed`. The file is CRLF; keep it.
+- [ ] **Step 1: Add the members** after `RelayDeliveredTlsAlert`, each with a one-line summary from the spec's error table: `MasqueNotOffered`, `MasqueAuthenticationRejected`, `MasqueTargetRejected`, `MasqueTunnelRefused`, `MasqueTunnelClosed`. Widen the enum's summary at `TlsQuicSocks5Protocol.cs:10` ("Reasons a SOCKS5 proxy association failed") to cover MASQUE tunnels. The file mixes CRLF and LF; match the neighbouring lines.
 
 - [ ] **Step 2: Regenerate the baseline and run its test**
 
