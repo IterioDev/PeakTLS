@@ -195,14 +195,16 @@ public sealed class QuicFuzzSeedsTests
         Assert.Contains("TlsQuicAckFrames.TryGetRanges (as parsed): 4/4 true", report);
         Assert.Contains("TlsQuicFrameLegality.Permits: 2228/2340 true", report);
 
-        // "3 threw" is TASK C17 AND IS NOT A DEFECT TO CHASE. It was 0 before, and
-        // the three are exactly the three DATAGRAM frames the corpus's axis-1 walk
-        // accepts (0x30 once, 0x31 twice - see the per-type rows above, which is
-        // where the 3 is re-derivable from rather than being a number on its own).
-        // WriteFrame refuses to emit a DATAGRAM by design: SharpTls parses and
-        // drops them to honour an advertisement its defaults make, and implements
-        // no datagram semantics to send. Any FOURTH throw is a real finding.
-        Assert.Contains("TlsQuicFrames.WriteFrame re-encode: 582 ok, 3 threw ArgumentException", report);
+        // "1 threw", down from the "3 threw" the paragraph above still describes:
+        // e638c60 taught WriteFrame to emit the 0x31 (length-bearing) DATAGRAM form
+        // instead of refusing it. The axis-1 walk accepts three DATAGRAM frames,
+        // 0x30 once and 0x31 twice (the walk's own per-type table, not the reslice
+        // one above, carries that split), and the two 0x31 frames moved from threw
+        // to ok: 582 -> 584. The one 0x30 (LEN-clear) frame still throws -
+        // WriteDatagramFrameFields still refuses that form by design ("Only the
+        // length-bearing DATAGRAM form (0x31) is sent."). Any SECOND throw is a
+        // real finding.
+        Assert.Contains("TlsQuicFrames.WriteFrame re-encode: 584 ok, 1 threw ArgumentException", report);
 
         // The reviewer's own example, verified directly rather than only through
         // the aggregate count above: a PING frame is one byte (type only, no
