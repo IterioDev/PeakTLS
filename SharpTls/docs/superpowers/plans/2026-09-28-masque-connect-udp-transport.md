@@ -996,7 +996,7 @@ public sealed class TlsQuicMasqueTransportTests
     // :scheme https, :authority "proxy.test:50000", :path "/.well-known/masque/udp/target.test/443/",
     // proxy-authorization "Basic " + base64("user:pass"), capsule-protocol "?1", in that order.
 
-    [Theory] [InlineData(65535, 1358)] [InlineData(1300, 1295)]
+    [Theory] [InlineData(65535UL, 1358)] [InlineData(1300UL, 1295)]
     public async Task TheCapacityIsTheOuterFramePayloadMinusFraming(ulong peerLimit, int expected)
     // Server 0x20 = peerLimit, OuterSpec with BasePathMtu = MaximumPathMtu = 1392 and an 8-byte
     // DestinationConnectionIdLength; assert MaxDatagramPayloadSize == expected (stream 0 → 1-byte
@@ -1015,6 +1015,7 @@ Every test that reads the peer after `CreateAsync` (request bytes, datagrams, th
 - [ ] **Step 3: Write the transport's dial half**
 
 ```csharp
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -1316,8 +1317,9 @@ git commit -m "feat(quic): dial a MASQUE CONNECT-UDP tunnel and judge the proxy'
 // InterruptPump. In production the ACK that opens the window is what wakes the pump; here the
 // peer sends a PING, harness.Peer.SendOneRttRawFrameAsync([0x01], ct). Then await the 130th,
 // PumpPeerAsync, and assert all 130 arrive at the peer in order (peer.ReceivedDatagrams from
-// Task 3). Give the outer spec a long initial RTT (Recovery.InitialRtt, seconds) so no PTO
-// probe lands inside the 200 ms window.
+// Task 3). Give the outer spec a long initial RTT so no PTO probe lands inside the 200 ms window:
+// TlsQuicConnectionSpec.InitialRttRange = (TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5))
+// (TlsQuicConnectionSpec.cs:827-841; shape as in TlsQuicConnectionProbeTimeoutTests.cs:397).
 
 [Fact] public async Task AResetAfterTheResponseSurfacesAsTunnelClosedOnTheNextReceive()
 // After 200 the peer sends RESET_STREAM (error 0x10c) for the request stream; ReceiveAsync throws
@@ -1534,7 +1536,7 @@ git commit -m "feat(quic): run the MASQUE tunnel from one owner task with delay-
 
 **Files:**
 - Create: `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`
-- Modify: `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` (one pointer paragraph under "Error model")
+- Modify: `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` (one pointer paragraph under "Association lifetime", after the TLS-alert paragraph)
 
 - [ ] **Step 1: Write the doc** from the spec's Components 4, Error model and MTU arithmetic sections: purpose, the dial's five steps with the exact CONNECT-UDP header list, framing bytes (`[quarter stream id][0x00][payload]` inside a `0x31` frame), the owner task and its two channels, the five errors with when they fire, the 1392/1360/1358/1200 arithmetic (stated for an 8-byte server connection id: the outer short header carries the proxy's SCID, and a longer one lowers the capacity by the difference), `DropSummary`, and the tests-only options. Under 200 lines. Cite RFC 9221 s3/s4/s5.2/s5.4, RFC 9297 s2.1/s3.4, RFC 9298 s2/s3.1/s3.5/s4, RFC 8441 s3/s4, RFC 9220 s3.
 
