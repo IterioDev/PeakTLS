@@ -92,8 +92,12 @@ Receive already exists: RFC 9221 s3's rules are enforced and payloads land in
   LIMITATION" remark in `TlsQuicHttp3Request.cs` (around line 342) is rewritten, since this
   design is the extended CONNECT it said was not meant to be.
 - `TlsQuicHttp3Connection.TryOpenRequest` refuses a request with `Protocol` set unless the
-  peer's SETTINGS carried `SETTINGS_ENABLE_CONNECT_PROTOCOL` (0x08) = 1 (RFC 9220 s3 MUST):
-  `TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled`.
+  peer's SETTINGS carried `SETTINGS_ENABLE_CONNECT_PROTOCOL` (0x08) = 1: RFC 8441 s3 grants the
+  extended form only "upon receipt" of that setting, and RFC 9220 s3 carries the rule to HTTP/3
+  unchanged. Refusal: `TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled`.
+- `Protocol` is never a member of `PseudoHeaderOrder`: an order that lists it is rejected at
+  init with `ArgumentException`, and the emit switch gets an explicit arm so nothing falls to the
+  `:path` default. `:protocol` is emitted right after `:method` whenever `Protocol` is set.
 - Header values are ordinary fields: `proxy-authorization`, `capsule-protocol: ?1` (RFC 9297
   s3.4 SHOULD; RFC 9298 s3.4 shows it and the guide's proxy expects it). QPACK handles them
   like any other.
@@ -107,15 +111,15 @@ Today received HTTP datagrams are validated (quarter stream id, RFC 9297 s2.1) a
   datagrams unless the stream's send side is open, and RFC 9298 s3.1 ties the tunnel's life to
   the request stream, so the send side stays open until the transport closes the connection.
   A test pins the flag. Datagrams whose quarter stream id (stream id / 4) names a marked stream
-  are queued on that exchange after the RFC 9298 s5 context id is read: context id 0 is a UDP
-  payload and is delivered; any other context id is counted and dropped (no other context is
-  ever registered). Datagrams for unmarked streams are counted and dropped, as now.
+  are queued on that exchange as RFC 9297 HTTP Datagram Payloads, untouched; this layer knows
+  nothing of RFC 9298's context id. Datagrams for unmarked streams are counted and dropped, as
+  now.
 - `internal List<byte[]> DrainDatagrams(ulong streamId)`.
 - `internal bool TrySendDatagram(ulong streamId, ReadOnlySpan<byte> payload)`: writes
-  `varint(streamId / 4)`, `varint(0)`, payload, then `connection.TryQueueDatagram`, returning
-  its answer.
-- `internal ulong DroppedDatagramsWrongStream`, `DroppedDatagramsWrongContext`: for
-  `DropSummary`.
+  `varint(streamId / 4)`, payload, then `connection.TryQueueDatagram`, returning its answer.
+- `internal ulong DroppedDatagramsWrongStream` for `DropSummary`; `internal bool
+  PeerSettingsReceived` forwarding `TlsQuicHttp3Streams`' flag, so the transport can wait for
+  SETTINGS.
 - The tunnel stream's response body (capsules, RFC 9297 s3.2) is read and discarded; nothing
   parses capsules. The stream stays open for the tunnel's life; a FIN or RESET_STREAM from the
   proxy ends the tunnel (component 4).
@@ -141,9 +145,13 @@ pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
 `static Task<TlsQuicMasqueTransport> ConnectAsync(options, cancellationToken)`, in order:
 
 1. Resolve the proxy host, open a UDP socket, dial the outer `TlsQuicConnection` with ALPN `h3`,
-   SNI the proxy host, standard certificate validation. `OuterSpec` has PMTUD off and
-   `BasePathMtu = MaximumPathMtu = 1392`, `max_datagram_frame_size = 65535`, and `OuterHttp3Spec`
-   sends `SETTINGS_H3_DATAGRAM = 1`. Failure: the connection's own exception.
+   SNI the proxy host, standard certificate validation. The ClientHello is built the way
+   `Http3Connection.CreateTlsClient` builds one: `TlsQuicClientHelloProfileFactory` composes
+   `OuterSpec.TransportParameters` (whose default entries already carry `max_datagram_frame_size`)
+   with the source connection id, applies `ConfigureOuterClientHello`, and the result goes into
+   `CustomTlsQuicClientOptions { ServerName, ServerPort, ClientHello }`. `OuterSpec` has PMTUD off
+   and `BasePathMtu = MaximumPathMtu = 1392`; `OuterHttp3Spec` sends `SETTINGS_H3_DATAGRAM = 1`.
+   Failure: the connection's own exception.
 2. Open local streams, pump until the proxy's SETTINGS arrive. `SETTINGS_ENABLE_CONNECT_PROTOCOL`
    must be 1, `SETTINGS_H3_DATAGRAM` must be 1, the proxy's transport parameters must carry a
    `max_datagram_frame_size`, and the resulting `MaxDatagramPayloadSize` must be at least 1200
@@ -161,9 +169,14 @@ pooled inner never outlives its tunnel). ALPN is fixed to `h3`.
 
 Ownership. The outer `TlsQuicConnection` is not thread-safe, so exactly one task touches it
 after `ConnectAsync`: the owner task. It loops: while `connection.QueuedDatagrams` is below the
-FIFO bound, move one payload from the outbound channel through `http3.TrySendDatagram`; then
-`connection.SendPendingAsync`; `connection.PumpOnceAsync`; drain `http3.DrainDatagrams(streamId)`
-into the inbound channel. It wakes on either channel or on the socket. Backpressure is delay,
+FIFO bound, move one payload from the outbound channel through `http3.TrySendDatagram` (the
+transport prefixes RFC 9298 s5's context id 0 first); then `connection.SendPendingAsync`;
+`connection.PumpOnceAsync`; drain `http3.DrainDatagrams(streamId)` into the inbound channel,
+stripping the context id and counting a non-zero one as dropped. `PumpOnceAsync` blocks inside
+the connection's receive until the proxy sends or a timer fires, so a writer must be able to
+interrupt it: the same mechanism `Http3StreamMultiplexer` already uses (`_pumpInterrupt`), a
+cancellation source the outbound writer cancels and the owner task replaces, which the
+connection's receive path honours as caller cancellation. Backpressure is delay,
 never drop and never a throw: the outbound channel is bounded (64, `BoundedChannelFullMode.Wait`)
 so an inner burst while the outer is congestion-window-blocked makes the inner's `SendAsync`
 await, which is what RFC 9221 s5.4 asks for. A test blocks the outer's window and shows the
@@ -179,15 +192,19 @@ datagrams leave in order once it opens. The two channels are the whole concurren
   quarter stream id varint length minus 1 (context id). For stream 0 at 1392 that is 1358, above
   the guide's 1352 and above the preset's 1200. `DatagramOverhead` stays 0: the capacity is
   reported directly.
-- `DropSummary`: dropped for wrong stream, wrong context, oversize inbound.
+- `DropSummary`: dropped for wrong stream (from the HTTP/3 layer), wrong context id and oversize
+  inbound (counted here).
 
 Failure after the tunnel is up. Owner task exceptions (outer connection closed by the proxy,
 including RFC 9298 s3.1's inactivity close, tunnel stream reset or finished, outer idle timeout,
 socket error) complete both channels with `TlsQuicProxyException(MasqueTunnelClosed)` whose
 message carries the proxy's error code or the underlying exception. Every later `SendAsync` and
 `ReceiveAsync` throws it. The inner connection reports it through the path SOCKS5
-`AssociationTerminated` takes today, and TlsClient's pool retires the connection and redials, as
-it does for that error.
+`AssociationTerminated` takes today; TlsClient's pool retires the connection and redials subject
+to the session's retry policy (`TlsSession.ShouldRetryException`), as for that error. The
+outer's effective idle time is the smaller of ours and the proxy's `max_idle_timeout`; if the
+proxy's is shorter than the inner's, the outer ends first during a long idle and the next use
+takes this path.
 
 `DisposeAsync`: cancel the owner task, CONNECTION_CLOSE the outer with H3_NO_ERROR, which ends
 the tunnel stream with it (the library has no RESET_STREAM send path and this design adds none),
@@ -195,17 +212,18 @@ dispose the socket. Idempotent.
 
 ### 5. TlsClient wiring (existing files)
 
-- `TlsProxyType.Masque = 2` (the enum leaves 1 unused on purpose; keep that);
+- `TlsProxyType.Masque = 3` (`Http = 0`, `Socks5 = 2`; 1 is unused on purpose and stays so);
   `TlsProxy.Masque(string address, string username, string password,
   Action<TlsQuicOptions>? configureOuter = null)`. `address` is `https://host:port` and the port
   is required: `EffectivePort` must not fall back to 1080 for this type.
 - `TlsQuicOptions.Proxy` (`TlsProxy?`, default null) and its `Snapshot` field. When set, it must
   be `Masque`; any other type throws `ArgumentException` at `Snapshot`.
 - `HttpConnectionFactory`, h3 branch: today it throws `NotSupportedException` for any
-  `options.Proxy` that is not SOCKS5 before `Http3Connection.CreateAsync`. When `Quic.Proxy` is
-  set that check is skipped and `options.Proxy` is not consulted at all for h3, so an HTTP proxy
-  for TCP beside MASQUE for h3 is a legal session. When `Quic.Proxy` is null the check stays as
-  it is.
+  `options.Proxy` that is not SOCKS5 before `Http3Connection.CreateAsync`, with a remark that
+  says this client does not speak MASQUE. When `Quic.Proxy` is set that check is skipped and
+  `options.Proxy` is not consulted at all for h3, so an HTTP proxy for TCP beside MASQUE for h3
+  is a legal session. When `Quic.Proxy` is null the check stays as it is; the remark is
+  rewritten.
 - `Http3Connection.CreateAsync`: when `configuration.Quic.Proxy` is set, the transport is
   `TlsQuicMasqueTransport.ConnectAsync(...)`, `relay` is null (no SOCKS5 liveness wrapper), and
   the target is not resolved locally (`TargetEndPoint` is `IPAddress.Any` with the origin's
@@ -254,9 +272,10 @@ Offline, no network:
 - Extended CONNECT: exact header bytes of the CONNECT-UDP request; refusal without
   `SETTINGS_ENABLE_CONNECT_PROTOCOL`; a `receivesDatagrams` request's HEADERS carries no FIN and
   an ordinary request's still does.
-- HTTP datagram framing: send prefixes quarter stream id and context id 0; receive delivers
-  context 0 to the marked stream, counts and drops other contexts and unmarked streams.
-- Transport: `MaxDatagramPayloadSize` arithmetic at 1392 (1358), at a peer limit of 1300
+- HTTP datagram framing: the HTTP/3 layer prefixes and strips the quarter stream id and delivers
+  payloads to the marked stream, counting and dropping unmarked streams; the transport prefixes
+  and strips context id 0 and counts and drops any other.
+- Transport: `MaxDatagramPayloadSize` arithmetic at 1392 with an 8-byte DCID (1358), at a peer limit of 1300
   (accepted, 1295) and of 1100 (refused, `MasqueNotOffered`); oversize send refused by name;
   2xx/407/400/other mapping; peer without settings; stream reset after the response surfaces
   `MasqueTunnelClosed` on the next receive; dispose is idempotent. These use the in-memory
@@ -278,8 +297,9 @@ never in the repository:
 
 ## Documentation
 
-`TlsClient-main/docs/USAGE.md` section 2a gains the `Quic.Proxy` MASQUE paragraph and the
-h3 limitations table row. `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` gains a pointer to the new
+`TlsClient-main/docs/USAGE.md`: the proxy-type table in section 2a gains a `TlsProxy.Masque` row
+and a `Quic.Proxy` paragraph, and the "h3 through an HTTP proxy ... Neither relays UDP" row of
+the h3 table is rewritten. `SharpTls/docs/SOCKS5-DATAGRAM-TRANSPORT.md` gains a pointer to the new
 `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`, which holds the wire details above (dial sequence,
 framing, error model, MTU arithmetic) for readers who never see this spec.
 
@@ -290,5 +310,7 @@ Create: `SharpTls/src/SharpTls/Quic/TlsQuicMasqueTransport.cs`, `TlsQuicMasqueOp
 Modify: `TlsQuicConnection.cs`, `TlsQuicApplicationSendPath.cs`, `TlsQuicHttp3Request.cs`,
 `TlsQuicHttp3Spec.cs` (`TlsQuicHttp3PseudoHeader.Protocol`), `TlsQuicHttp3Connection.cs`,
 `TlsQuicSocks5Protocol.cs` (enum), `TlsProxy.cs`, `TlsQuicOptions.cs`, `Http3Connection.cs`,
-`HttpConnectionFactory.cs`, `ProxyTunnel.cs`, `TlsConnectEvent.cs`, `PublicAPI.Unshipped.txt`,
-`PublicApi.Shipped.txt` (enum members only), `USAGE.md`, `SOCKS5-DATAGRAM-TRANSPORT.md`.
+`HttpConnectionFactory.cs`, `ProxyTunnel.cs`, `TlsConnectEvent.cs`,
+`TlsClient-main/src/TlsClient/PublicAPI.Unshipped.txt`,
+`SharpTls/tests/SharpTls.Tests/Api/PublicApi.Shipped.txt` (enum members only), `USAGE.md`,
+`SOCKS5-DATAGRAM-TRANSPORT.md`.
