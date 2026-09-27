@@ -56,11 +56,15 @@ outer dies with the inner. No pool, no sharing, no shared state.
 ### 1. `TlsQuicConnection`: DATAGRAM frame send path (SharpTls, existing file)
 
 Receive already exists: RFC 9221 s3's rules are enforced and payloads land in
-`DrainReceivedDatagrams()`. Missing is send.
+`DrainReceivedDatagrams()`. Missing is send, and the peer's limit.
 
+- The peer's `max_datagram_frame_size` is parsed and kept. Today `TlsQuicTransportParameters.cs`
+  reads the value and discards it, and `TlsQuicConnection.AdvertisedMaxDatagramFrameSize` is our
+  own ClientHello's value, not the peer's. New `internal ulong? PeerMaxDatagramFrameSize` on
+  `TlsQuicConnection`, null when the peer sent none.
 - `internal void QueueDatagram(ReadOnlyMemory<byte> payload)`: appends to a bounded FIFO (64
   entries; a full queue throws `InvalidOperationException` naming the bound, never drops).
-  Throws `InvalidOperationException` if the peer advertised no `max_datagram_frame_size`, or
+  Throws `InvalidOperationException` if `PeerMaxDatagramFrameSize` is null, or
   `ArgumentOutOfRangeException` if the frame would exceed it or `MaximumDatagramFramePayload`.
 - `internal int MaximumDatagramFramePayload`: the largest DATAGRAM frame payload one 1-RTT packet
   at the current path MTU can carry: MTU minus short header (1), Destination Connection ID
@@ -75,15 +79,18 @@ Receive already exists: RFC 9221 s3's rules are enforced and payloads land in
 
 ### 2. `TlsQuicHttp3Request`: extended CONNECT (SharpTls, existing file)
 
-- `internal string? Protocol { get; init; }` emits `:protocol` (RFC 9220 s3) after `:method`.
-  Pseudo-header order with it set: `:method`, `:protocol`, `:scheme`, `:authority`, `:path`.
-  RFC 9220 s3 requires `:scheme` and `:path` alongside `:protocol`; encoding without them is a
+- `internal string? Protocol { get; init; }` emits `:protocol` (RFC 9220 s3).
+  `TlsQuicHttp3PseudoHeader` gains `Protocol`; it is emitted immediately after `:method` in
+  whatever `PseudoHeaderOrder` the spec carries, so no spec has to list it and the existing
+  order validation is untouched. RFC 9220 s3 requires `:scheme` and `:path` alongside
+  `:protocol`; encoding without them is a
   `TlsQuicHttp3RequestError.ExtendedConnectMissingPseudoHeader`.
 - `TlsQuicHttp3Connection.TryOpenRequest` refuses a request with `Protocol` set unless the
   peer's SETTINGS carried `SETTINGS_ENABLE_CONNECT_PROTOCOL` (0x08) = 1 (RFC 9220 s3 MUST):
   `TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled`.
 - Header values are ordinary fields: `proxy-authorization`, `capsule-protocol: ?1` (RFC 9297
-  s3.1 requires it on a CONNECT-UDP request, RFC 9298 s3.1). QPACK handles them like any other.
+  s3.4 SHOULD; RFC 9298 s3.4 shows it and the guide's proxy expects it). QPACK handles them
+  like any other.
 
 ### 3. `TlsQuicHttp3Connection`: HTTP datagrams per stream (SharpTls, existing file)
 
@@ -110,24 +117,27 @@ Implements `ITlsQuicDatagramTransport`. One instance is one tunnel.
 Options (`TlsQuicMasqueOptions`, new file next to it): `ProxyEndPoint` (DnsEndPoint, host and
 port), `TargetHost`, `TargetPort`, `Username`, `Password`, `TargetEndPoint` (the IPEndPoint echoed
 in every receive result; the inner connection compares it, the proxy resolves the real address),
-`OuterSpec` (`TlsQuicConnectionSpec`), `OuterHelloConfiguration` (whatever the caller uses today
-to shape a ClientHello; TlsClient passes its default), `HandshakeDeadline`.
+`OuterSpec` (`TlsQuicConnectionSpec`), `OuterHttp3Spec` (`TlsQuicHttp3Spec`, with
+`SETTINGS_H3_DATAGRAM = 1`), `ConfigureOuterClientHello` (`Action<ClientHelloBuilder>`, the type
+`TlsQuicOptions.ConfigureClientHello` already uses; TlsClient passes its default,
+`TlsQuicClientHelloProfileFactory.Tls`), `HandshakeDeadline`. ALPN is fixed to `h3`.
 
 `static Task<TlsQuicMasqueTransport> ConnectAsync(options, cancellationToken)`, in order:
 
 1. Resolve the proxy host, open a UDP socket, dial the outer `TlsQuicConnection` with ALPN `h3`,
    SNI the proxy host, standard certificate validation. `OuterSpec` has PMTUD off and
-   `BasePathMtu = MaximumPathMtu = 1392`, `max_datagram_frame_size = 65535`, and its
-   `TlsQuicHttp3Spec` sends `SETTINGS_H3_DATAGRAM = 1`. Failure: the connection's own exception.
+   `BasePathMtu = MaximumPathMtu = 1392`, `max_datagram_frame_size = 65535`, and `OuterHttp3Spec`
+   sends `SETTINGS_H3_DATAGRAM = 1`. Failure: the connection's own exception.
 2. Open local streams, pump until the proxy's SETTINGS arrive. `SETTINGS_ENABLE_CONNECT_PROTOCOL`
-   must be 1 and `SETTINGS_H3_DATAGRAM` must be 1, and the outer transport parameters must carry
-   a `max_datagram_frame_size` of at least 1360 + 3; otherwise `TlsQuicProxyException`
-   (`MasqueNotOffered`) naming the missing item.
+   must be 1, `SETTINGS_H3_DATAGRAM` must be 1, the proxy's transport parameters must carry a
+   `max_datagram_frame_size`, and the resulting `MaxDatagramPayloadSize` must be at least 1200
+   (an inner Initial); otherwise `TlsQuicProxyException` (`MasqueNotOffered`) naming the missing
+   item or the capacity. This is the one floor; nothing else checks a size.
 3. Send the CONNECT-UDP request: `:method CONNECT`, `:protocol connect-udp`, `:scheme https`,
    `:authority {proxy host}:{port}`, `:path /.well-known/masque/udp/{TargetHost}/{TargetPort}/`,
    `proxy-authorization: Basic ...`, `capsule-protocol: ?1`. Target host percent-encoded per
    RFC 9298 s2 (a hostname needs no encoding).
-4. Pump until the response header section arrives. 200: tunnel up. 407:
+4. Pump until the response header section arrives. Any 2xx (RFC 9298 s3.5): tunnel up. 407:
    `MasqueAuthenticationRejected` ("credentials refused or account traffic limit reached").
    400: `MasqueTargetRejected`. Anything else: `MasqueTunnelRefused` carrying the status. A
    RESET_STREAM or connection close before headers: `MasqueTunnelClosed` carrying the code.
@@ -157,8 +167,9 @@ tunnel stream reset or finished, outer idle timeout, socket error) complete both
 underlying exception. Every later `SendAsync` and `ReceiveAsync` throws it. The inner
 connection reports it through the path SOCKS5 `AssociationTerminated` takes today.
 
-`DisposeAsync`: cancel the owner task, RESET_STREAM the tunnel with H3_NO_ERROR, CONNECTION_CLOSE
-the outer with H3_NO_ERROR, dispose the socket. Idempotent.
+`DisposeAsync`: cancel the owner task, CONNECTION_CLOSE the outer with H3_NO_ERROR, which ends
+the tunnel stream with it (the library has no RESET_STREAM send path and this design adds none),
+dispose the socket. Idempotent.
 
 ### 5. TlsClient wiring (existing files)
 
@@ -166,12 +177,14 @@ the outer with H3_NO_ERROR, dispose the socket. Idempotent.
   Action<TlsQuicOptions>? configureOuter = null)`. `address` is `https://host:port`.
 - `TlsQuicOptions.Proxy` (`TlsProxy?`, default null) and its `Snapshot` field. When set, it must
   be `Masque`; any other type throws `ArgumentException` at `Snapshot`.
-- `Http3Connection.DialAsync`: when `configuration.Quic.Proxy` is set, the transport is
+- `Http3Connection.CreateAsync`: when `configuration.Quic.Proxy` is set, the transport is
   `TlsQuicMasqueTransport.ConnectAsync(...)`, `relay` is null (no SOCKS5 liveness wrapper), the
-  target is not resolved locally (`TargetEndPoint` is `IPAddress.Any:443`, an echo value), and
-  `options.Proxy` is ignored for this dial. Otherwise the SOCKS5 and direct paths run unchanged.
-- `options.Proxy` of type `Masque` on any dial throws `NotSupportedException`: "MASQUE carries
-  UDP; set `options.Quic.Proxy`".
+  target is not resolved locally (`TargetEndPoint` is `IPAddress.Any` with the origin's port, an
+  echo value), and `options.Proxy` is ignored for this dial. Otherwise the SOCKS5 and direct
+  paths run unchanged.
+- `HttpConnectionFactory` already throws `NotSupportedException` for proxy types a dial cannot
+  use; a `Masque` value in `options.Proxy` gets its own message there: "MASQUE carries UDP; set
+  `options.Quic.Proxy`".
 - Outer options: `TlsQuicOptions` defaults (the library's default QUIC ClientHello) with PMTUD
   off, both MTUs 1392, datagram transport parameter and setting on; `configureOuter` runs last.
 - Telemetry: `TlsConnectEventKind.MasqueTunnelOpened` (elapsed to 200) and `MasqueTunnelClosed`
@@ -186,8 +199,8 @@ Five new `TlsQuicProxyError` values, all raised as `TlsQuicProxyException`:
 | `MasqueNotOffered` | proxy SETTINGS or transport parameters lack extended CONNECT or datagrams | the missing setting or parameter |
 | `MasqueAuthenticationRejected` | 407 | credentials refused or traffic limit |
 | `MasqueTargetRejected` | 400 | target host and port as sent |
-| `MasqueTunnelRefused` | any other non-200 status | the status |
-| `MasqueTunnelClosed` | tunnel or outer connection ended after 200 | proxy's error code or underlying exception |
+| `MasqueTunnelRefused` | any other non-2xx status | the status |
+| `MasqueTunnelClosed` | tunnel stream or outer connection ended, before or after the response | proxy's error code or underlying exception |
 
 Local misconfiguration (oversize send, wrong proxy type) is an argument exception, not a proxy
 error. No silent downgrade anywhere: an h3 dial that cannot go through MASQUE fails by name.
@@ -212,10 +225,11 @@ Offline, no network:
   `SETTINGS_ENABLE_CONNECT_PROTOCOL`; error without `:scheme`/`:path`.
 - HTTP datagram framing: send prefixes quarter stream id and context id 0; receive delivers
   context 0 to the marked stream, counts and drops other contexts and unmarked streams.
-- Transport: `MaxDatagramPayloadSize` arithmetic at 1392 and at a smaller peer limit; oversize
-  send refused by name; 200/407/400/other mapping; peer without settings; stream reset after
-  200 surfaces `MasqueTunnelClosed` on the next receive; dispose is idempotent. These use the
-  in-memory datagram transports already in `SharpTls.Tests/Quic` with a scripted outer peer.
+- Transport: `MaxDatagramPayloadSize` arithmetic at 1392 (1358), at a peer limit of 1300
+  (accepted, 1295) and of 1100 (refused, `MasqueNotOffered`); oversize send refused by name;
+  2xx/407/400/other mapping; peer without settings; stream reset after the response surfaces
+  `MasqueTunnelClosed` on the next receive; dispose is idempotent. These use the in-memory
+  datagram transports already in `SharpTls.Tests/Quic` with a scripted outer peer.
 - TlsClient: `TlsProxy.Masque` parsing; `Quic.Proxy` of a non-MASQUE type refused; `options.Proxy`
   of MASQUE type refused on TCP; dial picks the MASQUE transport when `Quic.Proxy` is set.
 
@@ -225,8 +239,9 @@ never in the repository:
 - `SpotifyPresetLiveParityTests` assertions (JA3, transport parameter rotation, SETTINGS, header
   order) against fp.impersonate.pro through the tunnel.
 - Three requests on one inner connection through the tunnel.
-- One GET to `https://spclient.wg.spotify.com/` through the tunnel expecting 404: Google-hosted
-  target reached with the account's authorization.
+- One GET to `https://spclient.wg.spotify.com/` through the tunnel: asserts HTTP/3, status 404
+  and a `server: envoy` response header, which is that Google-hosted edge answering. The same
+  dial through the provider's SOCKS5 fails with `RelayDeliveredTlsAlert`.
 - A wrong password expecting `MasqueAuthenticationRejected`.
 
 ## Documentation
@@ -240,7 +255,8 @@ framing, error model, MTU arithmetic) for readers who never see this spec.
 
 Create: `SharpTls/src/SharpTls/Quic/TlsQuicMasqueTransport.cs`, `TlsQuicMasqueOptions.cs`,
 `SharpTls/docs/MASQUE-DATAGRAM-TRANSPORT.md`, tests beside the existing SOCKS5 ones.
-Modify: `TlsQuicConnection.cs`, `TlsQuicApplicationSendPath.cs`, `TlsQuicHttp3Request.cs`,
+Modify: `TlsQuicConnection.cs`, `TlsQuicTransportParameters.cs`, `TlsQuicApplicationSendPath.cs`,
+`TlsQuicHttp3Request.cs`, `TlsQuicHttp3Spec.cs` (`TlsQuicHttp3PseudoHeader.Protocol`),
 `TlsQuicHttp3Connection.cs`, `TlsQuicSocks5Protocol.cs` (enum), `TlsProxy.cs`,
-`TlsQuicOptions.cs`, `Http3Connection.cs`, `TlsConnectEvent.cs`, `PublicAPI.Unshipped.txt`,
-`PublicApi.Shipped.txt`, `USAGE.md`, `SOCKS5-DATAGRAM-TRANSPORT.md`.
+`TlsQuicOptions.cs`, `Http3Connection.cs`, `HttpConnectionFactory.cs`, `TlsConnectEvent.cs`,
+`PublicAPI.Unshipped.txt`, `PublicApi.Shipped.txt`, `USAGE.md`, `SOCKS5-DATAGRAM-TRANSPORT.md`.
