@@ -132,6 +132,16 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     {
         var result = await _relay.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
 
+        // THE 0 -> 1 TRANSITION IS THE EVENT, so the callback fires exactly once however many
+        // datagrams follow. Interlocked because the connection's receive loop and the dialling
+        // thread read this from different threads; the counter is only consulted once the
+        // handshake has finished one way or the other, so a stale read cannot occur where it
+        // would matter.
+        if (Interlocked.Increment(ref _inboundDatagrams) == 1)
+        {
+            OnFirstInboundDatagram?.Invoke();
+        }
+
         // THE RELAY'S FIRST DATAGRAMS SAY WHETHER IT RELAYS UDP AT ALL. A QUIC datagram carries
         // RFC 9000 s17's fixed bit; a seven-byte TLS alert record is what a TCP TLS server
         // answers to bytes that are not a ClientHello, and a UDP relay cannot produce one. Its
@@ -143,16 +153,6 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
         if (!_sawQuicDatagram)
         {
             _sawQuicDatagram = InspectFirstDatagram(buffer.Span[..result.Length]);
-        }
-
-        // THE 0 -> 1 TRANSITION IS THE EVENT, so the callback fires exactly once however many
-        // datagrams follow. Interlocked because the connection's receive loop and the dialling
-        // thread read this from different threads; the counter is only consulted once the
-        // handshake has finished one way or the other, so a stale read cannot occur where it
-        // would matter.
-        if (Interlocked.Increment(ref _inboundDatagrams) == 1)
-        {
-            OnFirstInboundDatagram?.Invoke();
         }
         return result;
     }
