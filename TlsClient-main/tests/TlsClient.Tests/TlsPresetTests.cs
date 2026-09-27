@@ -8,7 +8,7 @@ public sealed class TlsPresetTests
         // ONE FAMILY LEFT, and the claim is the same one: the unversioned alias must point at
         // the current pinned version, so a caller who wrote TlsPresets.Spotify does not silently
         // keep an old capture when a newer one lands.
-        Assert.Same(TlsPresets.Spotify917602050IOS270Http3, TlsPresets.Spotify);
+        Assert.Same(TlsPresets.Spotify918602428IOS270Http3, TlsPresets.Spotify);
     }
 
 #pragma warning disable TLSCLIENT3
@@ -47,7 +47,7 @@ public sealed class TlsPresetTests
         foreach (var (preset, carriesVendor) in new[]
         {
             (TlsPresets.Spotify917602050IOS260Http3, false),
-            (TlsPresets.Spotify917602050IOS270Http3, true),
+            (TlsPresets.Spotify918602428IOS270Http3, true),
         })
         {
             var direct = preset.CreateOptions();
@@ -98,7 +98,7 @@ public sealed class TlsPresetTests
     public void SpotifyIosHttp3_Ios26DiffersOnlyInProfileAndVendorParameter()
     {
         var ios26 = TlsPresets.Spotify917602050IOS260Http3.CreateOptions();
-        var ios27 = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
+        var ios27 = TlsPresets.Spotify918602428IOS270Http3.CreateOptions();
 
         Assert.Same(TlsProfiles.Spotify917602050IOS260Quic, ios26.Profile);
         Assert.Equal(TlsHttpVersionPolicy.Http3Only, ios26.HttpVersionPolicy);
@@ -145,9 +145,9 @@ public sealed class TlsPresetTests
     [Fact]
     public void SpotifyIosHttp3_CarriesTheCapturedQuicAndHeaderImage()
     {
-        var options = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
+        var options = TlsPresets.Spotify918602428IOS270Http3.CreateOptions();
 
-        Assert.Same(TlsProfiles.Spotify917602050IOS270Quic, options.Profile);
+        Assert.Same(TlsProfiles.Spotify918602428IOS270Quic, options.Profile);
 
         // The shape is QUIC's. A TCP dial would impersonate nothing, so the preset pins the
         // policy rather than leaving it to the caller.
@@ -239,6 +239,14 @@ public sealed class TlsPresetTests
                 TlsHttp3PseudoHeader.Path,
             ],
             options.Http3.PseudoHeaderOrder);
+
+        // MEASURED: the QPACK encoder's dynamic table - capacity 4096, inserts on second
+        // use, QPACK streams opened with their first instruction. 2026-09-26 capture, s6.
+        Assert.Equal(4096, options.Http3.QpackEncoderDynamicTableCapacity);
+        Assert.Equal(SharpTls.Quic.TlsQuicQpackInsertPolicy.OnSecondUse, options.Http3.QpackInsertPolicy);
+        Assert.Equal(
+            SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening.Lazy,
+            options.Http3.UnidirectionalStreamOpening);
     }
 
 
@@ -253,7 +261,7 @@ public sealed class TlsPresetTests
         // a session shipped the same order for the session's life: one of seven rather than
         // one of one, and still a constant a server sees twice. Fifty COMPOSITIONS of one
         // spec is the assertion that would have failed then and passes now.
-        var options = TlsPresets.Spotify917602050IOS270Http3.CreateOptions();
+        var options = TlsPresets.Spotify918602428IOS270Http3.CreateOptions();
         var spec = options.Snapshot().Quic.ConnectionSpec;
 
         // Declared, not performed: the entries stay in the captured order and the rotation is

@@ -37,7 +37,7 @@ public sealed class TlsProfileCatalogTests
         using var document = JsonDocument.Parse(firstJson);
         Assert.Equal(TlsProfiles.All.Count, document.RootElement.GetArrayLength());
         Assert.Contains(
-            "| `spotify-9.1.76-ios-27.0-quic` | `Spotify917602050IOS270Quic` |",
+            "| `spotify-9.1.86-ios-27.0-quic` | `Spotify918602428IOS270Quic` |",
             markdown,
             StringComparison.Ordinal);
         Assert.Contains("Spec SHA-256", markdown, StringComparison.Ordinal);

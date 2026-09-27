@@ -100,7 +100,7 @@ var options = new TlsSessionOptions
 {
     // THE TCP ClientHello. Two profiles ship: Modern (the default - SharpTls's conservative
     // TLS 1.3 shape, which negotiates honestly and imitates nothing) and
-    // Spotify917602050IOS270Quic (a capture, QUIC-shaped, for the h3 preset to name).
+    // Spotify918602428IOS270Quic (a capture, QUIC-shaped, for the h3 preset to name).
     // The browser transcriptions are gone; anything you want to look like is a capture you
     // supply through ClientHelloProfiles.Custom. See §6a.
     Profile = TlsProfiles.Modern,
@@ -342,6 +342,15 @@ o.Http3.UnidirectionalStreamOpenOrder =
 o.Http3.QpackHuffmanStringLiterals = false;                // default true
 o.Http3.QpackNameMatchPolicy = TlsQpackNameMatchPolicy.LiteralName;
 
+// The QPACK dynamic table. Default 0 = static-only encoder, every section prefixed 00 00.
+// The Spotify presets set all three to what the phone does: capacity 4096 (bounded by the
+// server's SETTINGS_QPACK_MAX_TABLE_CAPACITY), a pair inserted on its second use after the
+// table went active, and the encoder/decoder streams opened with their first instruction
+// rather than in the opening flight. Section 7 and docs/PRESETS.md say what was measured.
+o.Http3.QpackEncoderDynamicTableCapacity = 4096;
+o.Http3.QpackInsertPolicy = SharpTls.Quic.TlsQuicQpackInsertPolicy.OnSecondUse;
+o.Http3.UnidirectionalStreamOpening = SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening.Lazy;
+
 // GREASE frames on request streams
 o.Http3.SendReservedFramesOnRequestStreams = true;
 
@@ -485,31 +494,37 @@ reproduced by tests in `tests/TlsClient.Tests/` — copy from there when you wir
 ```csharp
 using TlsClient;
 
-var options = TlsPresets.Spotify.CreateOptions();   // Spotify917602050IOS270Http3
+var options = TlsPresets.Spotify.CreateOptions();   // Spotify918602428IOS270Http3
 await using var session = new TlsSession(options);
 
 var request = new HttpRequestMessage(HttpMethod.Get, "https://fp.impersonate.pro/api/http3");
 
 // ORDER MATTERS HERE. The preset declares no header order, so these reach the wire in the order
 // they are added - which is why the credential fields are added in their captured slots rather
-// than at the end. Leave one unset and the rest keep their relative order.
+// than at the end. Leave one unset and the rest keep their relative order. This is the
+// spclient GET image of Spotify 9.1.86.2428 on iOS 27.0, captured 2026-09-26.
+request.AddHeader("spotify-app-version", "9.1.86.2428");
 request.AddHeader("accept", "*/*");
-if (Environment.GetEnvironmentVariable("SPOTIFY_CLIENT_ID") is { } clientId)
-{
-    request.AddHeader("x-client-id", clientId);
-}
-
-request.AddHeader("accept-encoding", "gzip, deflate, br");
-request.AddHeader("priority", "u=3, i");
-request.AddHeader("app-platform", "iOS");
-request.AddHeader("user-agent", "Spotify/9.1.76 iOS/27.0 (iPhone17,2)");
 if (Environment.GetEnvironmentVariable("SPOTIFY_BEARER") is { } bearer)
 {
     request.AddHeader("authorization", "Bearer " + bearer);
 }
 
+request.AddHeader("time-zone", "Europe/Athens");
+request.AddHeader("app-platform", "iOS");
+request.AddHeader("priority", "u=3, i");
 request.AddHeader("accept-language", "en-US,en;q=0.9");
-request.AddHeader("spotify-app-version", "9.1.76.2050");
+request.AddHeader("accept-encoding", "gzip, deflate, br");
+request.AddHeader("user-agent", "Spotify/9.1.86 iOS/27.0 (iPhone17,2)");
+if (Environment.GetEnvironmentVariable("SPOTIFY_CLIENT_ID") is { } clientId)
+{
+    request.AddHeader("x-client-id", clientId);
+}
+
+if (Environment.GetEnvironmentVariable("SPOTIFY_CLIENT_TOKEN") is { } clientToken)
+{
+    request.AddHeader("client-token", clientToken);
+}
 
 var response = await session.SendAsync(request);
 Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
@@ -724,7 +739,7 @@ capture.
 which one you want.** The browser catalogue is gone — the ~50 uTLS transcriptions were removed
 deliberately, because a transcription of someone else's capture is a liability dressed as a
 feature: it ages silently, and nothing tells you when the real client moved on. Two profiles
-ship. `TlsProfiles.Modern` imitates nothing and says so. `Spotify917602050IOS270Quic` is a
+ship. `TlsProfiles.Modern` imitates nothing and says so. `Spotify918602428IOS270Quic` is a
 first-party capture, and it is somebody's device — just not yours.
 
 So this section is not a fallback for when the catalogue misses. It is the normal path.
@@ -787,18 +802,20 @@ drive the ClientHello at all (§3b). Two clients are reproduced exactly and veri
 - **a captured client** — `perk_hash` `7d726b1554d23ae0ffb3e8c533f20a2f`, all four `perk` segments
   matching: HTTP/3 SETTINGS, pseudo-header order, QUIC transport parameters **in wire order**,
   and the connection-ID length pair.
-- **Spotify 9.1.76.2050 on iOS 27.0** (`TlsPresets.Spotify`, §3c) — JA3
+- **Spotify 9.1.86.2428 on iOS 27.0** (`TlsPresets.Spotify`, §3c) — JA3
   `48d08f334704479db85d91df80039756` and JA4 `q13d0311h3_55b375c5d22e_f2a83c8e78ae`, both the
-  captured handset's, decoded from QUIC Initial packets with no keylog.
+  captured handset's, first decoded from the 9.1.76.2050 build's QUIC Initial packets with no
+  keylog and confirmed byte for byte on 9.1.86.2428 with one.
 
-  **Two images exist for this handset and the preset ships one of them.** From the same phone on
-  the same build, captures taken through a proxy show cipher order `0x1302, 0x1303, 0x1301` and
-  carry the vendor transport parameter `0xff080808`; 80 connections captured directly show
-  `0x1302, 0x1301, 0x1303` and no such parameter. The split is real and unexplained — an
-  egress-dependent remote config is the leading guess, untested. The preset takes the proxy
-  values because that is the path this library dials through. Only JA3 moves between the two;
-  JA4 sorts the cipher list, so it hashes to `q13d0311h3_55b375c5d22e_f2a83c8e78ae` either way.
-  The direct-path JA3 was `2f9431e877b01e163774ae4ae0df9ded`.
+  **Two images exist for this app and the OS build picks one.** iOS 27 sends cipher order
+  `0x1302, 0x1303, 0x1301` and carries the vendor transport parameter `0xff080808`; iOS 26
+  sends `0x1302, 0x1301, 0x1303` and no such parameter. This was once thought to be a
+  proxy-versus-direct artefact; it is not — an iOS 26 capture down the same proxy path carries
+  the second image, and a passive no-proxy capture of 9.1.86.2428 on iOS 27 (2026-09-26)
+  carries the first in 33 of 33 QUIC hellos. `TlsPresets.Spotify` is the iOS 27 shape;
+  `Spotify917602050IOS260Http3` is the other. Only JA3 moves between the two; JA4 sorts the
+  cipher list, so it hashes to `q13d0311h3_55b375c5d22e_f2a83c8e78ae` either way. The iOS 26
+  JA3 is `2f9431e877b01e163774ae4ae0df9ded`.
 
 ### Header images measured, and why none of them ship as presets
 
@@ -807,7 +824,39 @@ single path. It is also **not expressible**: there is no header-order knob anywh
 Fields reach the wire in the order you added them, so the images below are the sequences to feed
 to `AddHeader` — not arrays to assign.
 
-`spclient` GET, confirmed from two independent capture paths:
+**Spotify 9.1.86.2428 on iOS 27.0, captured 2026-09-26** — 46 decrypted request streams to
+`spclient.wg.spotify.com` across three HTTP/3 connections. `spclient` GET, with and without a
+body-less credential pair:
+
+```
+spotify-app-version, accept, authorization, time-zone, app-platform, priority,
+accept-language, accept-encoding, user-agent, x-client-id, client-token
+
+spotify-app-version, accept, authorization, time-zone, app-platform, priority,
+accept-encoding, accept-language, user-agent, client-token
+```
+
+`spclient` POST with a body, content fields interleaved exactly as the app placed them:
+
+```
+content-type, spotify-app-version, accept, authorization, time-zone, app-platform, priority,
+accept-language, accept-encoding, content-length, user-agent, x-client-id, client-token
+
+content-type, spotify-app-version, authorization, accept, content-encoding, time-zone,
+app-platform, priority, accept-language, cache-control, accept-encoding, content-length,
+user-agent, x-client-id, client-token
+```
+
+Three things this build does that 9.1.76 did not: `time-zone` is on every request, right
+after `authorization`; `client-token` closes every request, GETs included; and two adjacent
+pairs swap between requests of the SAME kind on the SAME connection — `accept`/`authorization`
+and `accept-language`/`accept-encoding` both appear in both orders. That is the app's own
+header map, not the transport, and a client that always emits one order is one bit more
+regular than the real one. The values behind these names have not been decoded from the
+capture; the version strings in the sample follow the 9.1.76 pattern.
+
+**Spotify 9.1.76.2050**, the images the preset was first verified against. `spclient` GET,
+confirmed from two independent capture paths:
 
 ```
 accept, x-client-id, accept-encoding, priority, app-platform, user-agent, authorization,

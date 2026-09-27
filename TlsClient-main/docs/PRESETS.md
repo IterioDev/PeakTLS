@@ -31,8 +31,8 @@ versioned property when reproducibility matters.
 
 | TlsClient preset | SharpTls TLS profile | Transport | Ordered HTTP/2 SETTINGS | WINDOW_UPDATE increment | Pseudo-header order |
 |---|---|---|---|---:|---|
-| `Spotify917602050IOS270Http2` | `Spotify917602050IOS270Tcp` | TCP, PreferHttp2 | `1:4096; 2:0; 3:100; 4:2097152; 5:16384; 6:4294967295; 8:0` | `15663105` | `m,s,p,a` |
-| `Spotify917602050IOS270Http3` | `Spotify917602050IOS270Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,s,a,p` |
+| `Spotify918602428IOS270Http2` | `Spotify918602428IOS270Tcp` | TCP, PreferHttp2 | `2:0; 4:2097152; 3:100; 9:1` | `10485760` | `m,s,p,a` |
+| `Spotify918602428IOS270Http3` | `Spotify918602428IOS270Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,s,a,p` |
 | `Spotify917602050IOS260Http3` | `Spotify917602050IOS260Quic` | QUIC, Http3Only | HTTP/3, not HTTP/2 — see below | n/a | `m,s,a,p` |
 
 **THREE PRESETS, ONE CLIENT.** The same app dials HTTP/2 over TCP and
@@ -44,18 +44,21 @@ The setting identifiers are the HTTP/2 registry values. The pseudo-header abbrev
 uses `m` = method, `a` = authority, `s` = scheme, and `p` = path. WINDOW_UPDATE values
 are increments, not final receive-window sizes.
 
-The Spotify preset's two settings are deliberately not in ascending identifier order:
+The Spotify h2 preset's four settings are deliberately not in ascending identifier order:
 `SETTINGS_INITIAL_WINDOW_SIZE` (`0x4`) precedes `SETTINGS_MAX_CONCURRENT_STREAMS`
 (`0x3`) exactly as the capture records them, and no other identifier is sent at all —
-no `HEADER_TABLE_SIZE`, no `ENABLE_PUSH`, no `MAX_FRAME_SIZE`, no `MAX_HEADER_LIST_SIZE`,
-no `SETTINGS_ENABLE_CONNECT_PROTOCOL` — and no PRIORITY frames.
+no `HEADER_TABLE_SIZE`, no `MAX_FRAME_SIZE`, no `MAX_HEADER_LIST_SIZE`, no
+`SETTINGS_ENABLE_CONNECT_PROTOCOL`. `0x9` is RFC 9218 `SETTINGS_NO_RFC7540_PRIORITIES`,
+sent as `1`; consistent with it, no PRIORITY frames and no priority flag on any HEADERS.
+SETTINGS, WINDOW_UPDATE and the first HEADERS travel in one TLS record; the SETTINGS
+acknowledgement goes out on its own once the server's SETTINGS arrive.
 
 ## Provenance
 
 The two presets do not have the same kind of evidence behind them, and the difference
 matters when judging how far to trust each.
 
-`Spotify917602050IOS270Http3` is a **first-party passive capture of a real device**.
+`Spotify918602428IOS270Http3` is a **first-party passive capture of a real device**.
 
 `Spotify917602050IOS260Http3` is the same app on **iOS 26**, from one first-party
 capture. THE OS VERSION IN THESE NAMES IS LOAD-BEARING: the two builds send genuinely
@@ -67,20 +70,39 @@ JA4 does not — it sorts the cipher list and cannot see either difference.
 
 This was once documented as a proxy-versus-direct capture artefact. It is not: the iOS 26
 capture came down the same proxy path that produced the iOS 27 image and still carries the
-other shape. Two of the iOS 26 preset's axes are INHERITED from the iOS 27 measurement
-rather than measured — the transport-parameter rotation and the GREASE equality pattern —
-because one hello lands on one of seven rotation offsets whatever the client does, and
-cannot tell a GREASE class pattern from a coincidence. Pin those against your own captures.
+other shape, and the 2026-09-26 capture below — passive, no proxy, iOS 27 — carries the
+iOS 27 shape in 33 of 33 QUIC hellos. Two of the iOS 26 preset's axes are INHERITED from
+the iOS 27 measurement rather than measured — the transport-parameter rotation and the
+GREASE equality pattern — because one hello lands on one of seven rotation offsets whatever
+the client does, and cannot tell a GREASE class pattern from a coincidence. Pin those
+against your own captures.
 
-`Spotify917602050IOS270Http2` is a **transcription of a supplied fingerprint record**, in
-bogdanfinn/tls-client's JSON format, whose collection method is not recorded here. Its TLS
-values — cipher suites, groups, key shares, signature algorithms, extension order — and its
-HTTP/2 SETTINGS, window increment and pseudo-header order are all read from that record.
-Its accuracy is inherited from whoever produced it; pin it against your own capture before
-trusting it. Two details in it are NOT derivable from the record and are called out where
-they are set: the GREASE equality pattern, carried over from the QUIC capture of the same
-app, and the fact that the record's literal GREASE values are per-connection nonces rather
-than fingerprint.
+`Spotify918602428IOS270Http2` was a **transcription of a supplied fingerprint record** in
+bogdanfinn/tls-client's JSON format, whose collection method is not recorded, and is now
+**first-party captured**: the 2026-09-26 pcapng, decrypted with the device's key log, holds
+10 h2 connections of this hello. The record was wrong on two things and right on the rest.
+The TLS 1.3 trio is `0x1302, 0x1303, 0x1301` (17 of 17 hellos of this shape), not the
+`0x1302, 0x1301, 0x1303` it said. The HTTP/2 preface is four settings in the order
+`2, 4, 3, 9` with a `10485760` window increment (10 of 10 connections), not the seven
+settings and `15663105` it said. Both are corrected. The pseudo-header order `m,s,p,a` it
+had right. The GREASE equality pattern, once carried over from the QUIC capture, is now
+measured on the TCP path: 14 of 14 exactly-listed hellos show supported_groups and key_share
+sharing a value and every other slot drawing its own. The app's in-app web view
+(`challenge.spotify.com`, `encore.scdn.co` and friends) dials with WebKit's own, different
+hello; that stack is out of scope here.
+
+The presets are named for the 9.1.86.2428 build because that is the capture every value was
+last verified against; the QUIC shape is unchanged from 9.1.76.2050, so the older build sends
+the same bytes. `Spotify917602050IOS260Http3` keeps its name: iOS 26 was only ever measured on
+9.1.76.
+
+Both presets are dialled for real by `tests/TlsClient.Tests/SpotifyPresetLiveParityTests.cs`
+(run with `TLSCLIENT_LIVE_TESTS=1`): the h3 one against `fp.impersonate.pro/api/http3`, which
+reads back the hello, the transport parameters in wire order, the SETTINGS and the header
+order; the h2 one against `tls3.peet.ws/api/all`, which reads back the TCP hello's JA3 and the
+Akamai-style frame image `2:0;4:2097152;3:100;9:1|10485760|0|m,s,p,a`. Neither endpoint
+reports QPACK encoder behaviour; the dynamic-table encoder is verified offline against the
+capture's bytes and against the loopback peer instead.
 
 | | |
 |---|---|
@@ -97,13 +119,29 @@ than fingerprint.
 Nothing in the preset is inferred from a similar client or copied from another
 fingerprint database. Both hashes are reproduced live against `fp.impersonate.pro`.
 
+A second first-party capture, one app version later, confirmed the QUIC and HTTP/3 shape
+byte for byte and is the source for every TCP-side correction above:
+
+| | |
+|---|---|
+| Device / OS | iPhone17,2, iOS 27.0 (24A437), CFNetwork 3896.100.1.2.1 |
+| App | Spotify 9.1.86.2428 |
+| Method | Passive pcapng plus the device's TLS key log, so both the Initial flight and the 1-RTT HTTP/3 layer decrypt |
+| Date | 2026-09-26 |
+| Sample size | 53 TCP hellos across 33 hosts; 33 QUIC hellos, 86 QUIC connections, 3 with decrypted HTTP/3 |
+| Agrees with the preset | QUIC ClientHello, all seven transport parameters and the vendor `0xff080808` last, the cyclic rotation (5 of 7 offsets seen), HTTP/3 SETTINGS `16383 / 100 / reserved`, `m,s,a,p` |
+| Adds | QPACK encoder dynamic table — see below; the h2 frames, not yet decoded |
+
+The preset's name still says `9.1.76.2050` because that is the capture it was decoded from;
+the app version does not move the wire shape, the OS version does.
+
 **This preset is `Http3Only`.** The shape it carries is QUIC's, and RFC 9001 §8.4 forbids
 several extensions a TCP hello carries, so applying it to a TCP dial would impersonate
 nothing. The same app's HTTP/2 legs are a *different* ClientHello — thirteen cipher suites
 instead of three, a 32-byte `legacy_session_id` where this one is empty, TLS 1.2 in
 `supported_versions`, and the 1.2-era extensions §8.4 forbids over QUIC. Both hellos carry
 the `X25519MLKEM768` hybrid group; that is one of the few things they share. Use
-`Spotify917602050IOS270Http2` for the TCP half — do not derive one from the other.
+`Spotify918602428IOS270Http2` for the TCP half — do not derive one from the other.
 
 ### What is measured
 
@@ -127,17 +165,35 @@ orders, and every one was a *cyclic rotation* of a single sequence — never a s
 would have drawn from 7! = 5040. A fixed order would therefore match one connection in
 seven. `CreateOptions()` redraws the rotation each time.
 
+### Measured since, and now in the preset
+
+- **The HTTP/3 pseudo-header order** is `m,s,a,p` — 41 of 41 proxy captures, and every
+  decrypted request stream of the 2026-09-26 capture.
+- **The unidirectional stream open order** is control, qpack_encoder, qpack_decoder — 4 of
+  4 proxy captures carrying 1-RTT.
+- **The reserved SETTINGS entry is redrawn per connection**, through
+  `TlsHttp3Setting.Drawn`; an earlier revision drew it once per options object.
+- **The QPACK encoder uses its dynamic table**, and the preset reproduces how. Three
+  decrypted connections of the 2026-09-26 capture, 36 inserts: capacity `4096`, announced on
+  the encoder stream once the server's SETTINGS are in (`02 3f e1 1f`, one frame); a
+  (name, value) pair inserted the first time it is encoded after having appeared in an
+  earlier request that was itself encoded with the table active — so the first request
+  after capacity is static-only and a pair seen once is never inserted; inserts with a
+  static name reference where the name is in the static table, a literal name otherwise;
+  Huffman only when strictly shorter; the encoder and decoder streams opened lazily with
+  their first instruction. Three `options.Http3` knobs carry it —
+  `QpackEncoderDynamicTableCapacity = 4096`, `QpackInsertPolicy = OnSecondUse`,
+  `UnidirectionalStreamOpening = Lazy` — and the library defaults leave every other caller
+  on the static-only encoder it had before. No fingerprint endpoint reports QPACK, so the
+  capture and `TlsQuicQpackEncoderPolicyTests`' replay of it are the only witnesses.
+
 ### What is not measured
 
 - **Everything under `Quic.Recovery`** — the congestion controller, pacing, PTO, ACK
   policy. An opening-flight capture cannot see loss behaviour. This is the largest
   remaining behavioural difference and no ClientHello fidelity closes it.
-- **The HTTP/3 pseudo-header order.** The preset sends the library default `m,a,s,p`,
-  which is plausible for a Chromium stack but is not confirmed for this client.
-- **The unidirectional stream open order and the QPACK encoding choices.**
-- **The reserved SETTINGS redraw cadence.** `TlsHttp3Options.Settings` is a list of literal
-  pairs with no drawn slot, so it is redrawn per options object; the real client redraws
-  per connection.
+- **The QPACK Huffman and name-reference policies** beyond what the dynamic-table finding
+  above implies; the instruction bytes are in the capture and have not been decoded.
 - **Whether the client probes its path MTU at all.** Both HTTP/3 presets set
   `Quic.PathMtuDiscovery = false`, against a library default of `true`. That is a fingerprint
   decision first: a probe is a PING-and-PADDING datagram at a size nothing else in the flight
@@ -170,28 +226,36 @@ at all: fields reach the wire in the order the caller added them.
 
 The measured header images are recorded in USAGE.md section 7. Two of them:
 
-| Captured leg | Header order |
-|---|---|
-| `spclient.wg.spotify.com` GET | `accept, x-client-id, accept-encoding, priority, app-platform, user-agent, authorization, accept-language, spotify-app-version` |
-| `login5.spotify.com` POST `/v4/login` | `content-type, accept, priority, accept-encoding, x-retry-count, cache-control, content-length, user-agent, accept-language, client-token` |
+| Captured leg | App | Header order |
+|---|---|---|
+| `spclient.wg.spotify.com` GET | 9.1.86.2428 | `spotify-app-version, accept, authorization, time-zone, app-platform, priority, accept-language, accept-encoding, user-agent, x-client-id, client-token` |
+| `spclient.wg.spotify.com` GET | 9.1.76.2050 | `accept, x-client-id, accept-encoding, priority, app-platform, user-agent, authorization, accept-language, spotify-app-version` |
+| `login5.spotify.com` POST `/v4/login` | 9.1.76.2050 | `content-type, accept, priority, accept-encoding, x-retry-count, cache-control, content-length, user-agent, accept-language, client-token` |
 
-The second is not the first reordered: each carries names the other does not.
-`Content-Type` and `Content-Length` come from the request body, and the captured order
-interleaves them among session headers — `Http3FieldMapperTests` pins that offline, because
-`tls3.peet.ws` reports HTTP/3 field lines in an order that varies between runs and so cannot
-settle it.
+The 9.1.86 image is a different sequence from the 9.1.76 one, not a reordering: it adds
+`time-zone` on every request and `client-token` on plain GETs. The login5 POST is not the
+GET reordered either — each carries names the other does not. `Content-Type` and
+`Content-Length` come from the request body, and the captured order interleaves them among
+session headers — `Http3FieldMapperTests` pins that offline, because `tls3.peet.ws` reports
+HTTP/3 field lines in an order that varies between runs and so cannot settle it. The full
+set of 9.1.86 images, including the pairs whose order moves between requests, is in
+USAGE.md section 7.
 
 Two more honest limits:
 
-- The **User-Agent** is `Spotify/9.1.76 iOS/27.0 (iPhone17,2)` on both HTTP/3 legs. Over
+- The **User-Agent** is `Spotify/9.1.76 iOS/27.0 (iPhone17,2)` on both 9.1.76 HTTP/3 legs.
+  The 9.1.86 capture's header VALUES have not been decoded yet; by the same pattern the
+  string is `Spotify/9.1.86 iOS/27.0 (iPhone17,2)`, and that is what the sample sends. Over
   **HTTP/2** the same app's `login5` leg uses
   `Spotify/917602050 CFNetwork/3892.100.1 Darwin/27.0.0` instead — that string belongs to
-  the TCP path and is not what either h3 preset sends.
-- The **header order** below is the captured h3 `GET` order, and it is a sequence to feed to
-  `AddHeader` rather than an array to assign — the preset carries none. `Authorization` and
-  `X-Client-Id` are per-account credentials; add them at the captured positions shown, because
-  insertion order IS the wire order. `Accept-Language: en-US,en;q=0.9` is the captured device's
-  UI language, not a fingerprint axis: change it freely.
+  the TCP path and is not what either h3 preset sends; the 9.1.86 device reports CFNetwork
+  `3896.100.1.2.1`, so its h2 string is `Spotify/918602428 CFNetwork/3896.100.1.2.1
+  Darwin/27.0.0` by the same pattern.
+- The **header order** is a sequence to feed to `AddHeader` rather than an array to assign
+  — the preset carries none. `Authorization`, `X-Client-Id` and `Client-Token` are
+  per-account credentials; add them at the captured positions shown, because insertion order
+  IS the wire order. `Accept-Language` and `Time-Zone` are the captured device's locale and
+  zone, not fingerprint axes: change them freely.
 
 ## The preface is a script, not a fixed set of settings
 

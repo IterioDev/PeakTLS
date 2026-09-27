@@ -9,7 +9,7 @@ namespace SharpTls.Tests.ClientHello;
 public sealed class SpotifyIosQuicProfileWireTests
 {
     private static byte[] Hello() =>
-        ClientHelloProfiles.Spotify917602050IOS270Quic
+        ClientHelloProfiles.Spotify918602428IOS270Quic
             .BuildDeterministicForTesting("gew4-spclient.spotify.com", [7, 7, 4, 2]);
 
     [Fact]

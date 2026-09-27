@@ -580,10 +580,33 @@ internal sealed class TlsQuicHttp3Request
     /// <exception cref="ArgumentNullException"><paramref name="destination"/> or
     /// <paramref name="spec"/> is <see langword="null"/>.</exception>
     internal bool TryEncode(
-        List<byte> destination, TlsQuicHttp3Spec spec, out TlsQuicHttp3RequestError error)
+        List<byte> destination, TlsQuicHttp3Spec spec, out TlsQuicHttp3RequestError error) =>
+        TryEncodeWithPolicy(destination, spec, policy: null, out _, out error);
+
+    /// <summary>The same encoding, with the header section planned by
+    /// <paramref name="policy"/> when one is given.</summary>
+    /// <remarks>
+    /// <para>THE POLICY PLANS AND DOES NOT COMMIT. <paramref name="plan"/> comes back for the
+    /// caller to hand to <see cref="TlsQuicQpackEncoderPolicy.Commit"/> once the request is
+    /// certain to go; nothing in the policy changes here. With <paramref name="policy"/>
+    /// <see langword="null"/>, or a policy whose table is inactive, the bytes are those of
+    /// <see cref="TryEncode"/>, and <paramref name="plan"/> is <see langword="null"/> or a
+    /// plan with an empty encoder-stream image respectively.</para>
+    /// <para>THE TRAILER SECTION STAYS STATIC-ONLY. The policy is applied to the header
+    /// section, the only one the capture measured; a trailer section that referenced the
+    /// dynamic table would be a second section on the same stream with its own
+    /// acknowledgment, and no capture here shows the imitated client sending trailers.</para>
+    /// </remarks>
+    internal bool TryEncodeWithPolicy(
+        List<byte> destination,
+        TlsQuicHttp3Spec spec,
+        TlsQuicQpackEncoderPolicy? policy,
+        out TlsQuicQpackEncoderPlan? plan,
+        out TlsQuicHttp3RequestError error)
     {
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(spec);
+        plan = null;
 
         if (!TryBuildFieldLines(spec, out var lines, out error))
         {
@@ -620,7 +643,18 @@ internal sealed class TlsQuicHttp3Request
             }
         }
 
-        var (buffer, length) = EncodeFieldSection(spec, lines);
+        byte[] buffer;
+        int length;
+        if (policy is null)
+        {
+            (buffer, length) = EncodeFieldSection(spec, lines);
+        }
+        else
+        {
+            plan = policy.Plan(lines);
+            buffer = plan.FieldSection.ToArray();
+            length = buffer.Length;
+        }
 
         // s7.2.8's reserved frame goes FIRST - the placeholder position, see
         // ReservedRequestStreamFrameType. Written through the ordinary frame writer, so it is

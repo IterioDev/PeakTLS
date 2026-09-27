@@ -470,6 +470,69 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
     /// nothing else does is the shape worth reading.</remarks>
     internal int DuplicatesSuppressed { get; private set; }
 
+    // WHY A PACKET WAS DISCARDED, PER REASON, FOR THE LIFE OF THE CONNECTION. The per-datagram
+    // result carries one `Discarded` count because no caller decides anything per datagram on
+    // the reason; the handshake deadline's message is the one reader that does, and it read
+    // "1 packet(s) discarded (0 for want of keys)" for every reason but one. Hundreds of
+    // megabytes of that line said nothing about whether the server's Initial failed
+    // authentication, arrived with a version this endpoint does not speak, or was a stray
+    // datagram from a relay. This table is what the message reads now, and the first discard
+    // is kept whole enough - reason, level, size, first octet - to tell those apart.
+    private readonly int[] _discardsByReason = new int[Enum.GetValues<TlsQuicDiscardReason>().Length];
+
+    /// <summary>Gets the first discarded packet's reason, or
+    /// <see cref="TlsQuicDiscardReason.None"/> if nothing has been discarded.</summary>
+    internal TlsQuicDiscardReason FirstDiscardReason { get; private set; }
+
+    /// <summary>Gets the first discarded packet's encryption level, when its header named
+    /// one.</summary>
+    internal TlsQuicEncryptionLevel? FirstDiscardLevel { get; private set; }
+
+    /// <summary>Gets the first discarded packet's length in octets.</summary>
+    internal int FirstDiscardLength { get; private set; }
+
+    /// <summary>Gets the first discarded packet's first octet, before any header protection
+    /// removal.</summary>
+    internal byte FirstDiscardFirstByte { get; private set; }
+
+    /// <summary>Gets how many packets were discarded for <paramref name="reason"/>.</summary>
+    internal int DiscardsFor(TlsQuicDiscardReason reason) => _discardsByReason[(int)reason];
+
+    /// <summary>Every reason with a non-zero count, as "Reason x N" fragments for a message.</summary>
+    internal string DescribeDiscards()
+    {
+        var parts = new List<string>();
+        foreach (var reason in Enum.GetValues<TlsQuicDiscardReason>())
+        {
+            if (reason != TlsQuicDiscardReason.None && _discardsByReason[(int)reason] != 0)
+            {
+                parts.Add($"{reason} x{_discardsByReason[(int)reason]}");
+            }
+        }
+
+        if (parts.Count == 0)
+        {
+            return "none";
+        }
+
+        var first = FirstDiscardLevel is { } level ? $"{FirstDiscardReason} at {level}" : $"{FirstDiscardReason}";
+        return $"{string.Join(", ", parts)}; first was {first}, {FirstDiscardLength} bytes, first octet 0x{FirstDiscardFirstByte:X2}";
+    }
+
+    private void NoteDiscard(TlsQuicDiscardReason reason, ReadOnlySpan<byte> packet, TlsQuicEncryptionLevel? level)
+    {
+        _discardsByReason[(int)reason]++;
+        if (FirstDiscardReason != TlsQuicDiscardReason.None)
+        {
+            return;
+        }
+
+        FirstDiscardReason = reason;
+        FirstDiscardLevel = level;
+        FirstDiscardLength = packet.Length;
+        FirstDiscardFirstByte = packet.Length == 0 ? (byte)0 : packet[0];
+    }
+
     /// <summary>Whether read keys are installed at <paramref name="level"/>.</summary>
     internal bool HasReadKeys(TlsQuicEncryptionLevel level) => _keys[(int)level] is not null;
 
@@ -952,6 +1015,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                             AcceptGreasedQuicBit))
                     {
                         discarded++;
+                        NoteDiscard(TlsQuicDiscardReason.ShortHeaderUnparseable, packet.Span, TlsQuicEncryptionLevel.Application);
                         break;
                     }
 
@@ -959,6 +1023,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                             ref firstDestinationConnectionId, shortHeader.DestinationConnectionId))
                     {
                         discarded++;
+                        NoteDiscard(TlsQuicDiscardReason.ConnectionIdMismatchInDatagram, packet.Span, TlsQuicEncryptionLevel.Application);
                         break;
                     }
 
@@ -994,6 +1059,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                         // in the mutation record at the top of the file - deleting the
                         // branch changes no test, which is what unreachable means.
                         discarded++;
+                        NoteDiscard(TlsQuicDiscardReason.LongHeaderUnparseable, packet.Span, null);
                         break;
                     }
 
@@ -1010,6 +1076,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                         // intact and s12.2's "MUST attempt to process the remaining
                         // packets" applies.
                         discarded++;
+                        NoteDiscard(TlsQuicDiscardReason.UnknownVersion, packet.Span, null);
                         return new TlsQuicReceiveResult
                         {
                             Processed = processed,
@@ -1038,6 +1105,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                             ref firstDestinationConnectionId, longHeader.DestinationConnectionId))
                     {
                         discarded++;
+                        NoteDiscard(TlsQuicDiscardReason.ConnectionIdMismatchInDatagram, packet.Span, LevelOf(longHeader.Type));
                         break;
                     }
 
@@ -1132,6 +1200,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             // waiting fixes. See TlsQuicReceiveResult.DiscardedForMissingKeys.
             discarded++;
             discardedForMissingKeys++;
+            NoteDiscard(TlsQuicDiscardReason.MissingKeys, packet, level);
 
             // AND s12.2's OTHER OPTION IS TAKEN AS WELL AS THE DISCARD, WHICH IS NOT A
             // CONTRADICTION: the packet is discarded from THIS pass - it contributes no
@@ -1168,6 +1237,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                 keys.HeaderProtection, packet, packetNumberOffset, out var pnLength))
         {
             discarded++;
+            NoteDiscard(TlsQuicDiscardReason.HeaderProtectionFailed, packet, level);
             return null;
         }
 
@@ -1209,6 +1279,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
         if (ciphertext.Length < AuthenticationTagLength)
         {
             discarded++;
+            NoteDiscard(TlsQuicDiscardReason.ShorterThanTag, packet, level);
             return null;
         }
 
@@ -1265,6 +1336,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                 // could make it free would have an unbounded forgery budget.
                 discarded++;
                 AuthenticationFailures++;
+                NoteDiscard(TlsQuicDiscardReason.NoKeysForKeyPhase, packet, level);
                 return null;
             }
         }
@@ -1296,6 +1368,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
                 // limit is the thing that eventually acts on the total.
                 discarded++;
                 AuthenticationFailures++;
+                NoteDiscard(TlsQuicDiscardReason.AuthenticationFailed, packet, level);
                 return null;
             }
 
@@ -1394,6 +1467,7 @@ internal sealed class TlsQuicPacketReceiver : IDisposable
             // for the same reason it is: no caller has a decision to make per datagram.
             discarded++;
             DuplicatesSuppressed++;
+            NoteDiscard(TlsQuicDiscardReason.Duplicate, packet, level);
 
             // s12.3: "A receiver MUST discard a newly unprotected packet unless it is certain
             // that it has not processed another packet with the same packet number from the

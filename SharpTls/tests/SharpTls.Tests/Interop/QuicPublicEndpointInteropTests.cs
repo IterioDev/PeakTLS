@@ -2142,7 +2142,7 @@ public sealed class QuicPublicEndpointInteropTests
             // profile is built from, so this dial and that profile cannot drift apart. The
             // ALPN and transport parameters it sets are overwritten by the factory
             // afterwards, which is the whole reason the factory exists.
-            Tls = ClientHelloProfiles.ApplySpotify917602050IOS270QuicClientHello,
+            Tls = ClientHelloProfiles.ApplySpotify918602428IOS270QuicClientHello,
         };
 
         return new CustomTlsQuicClient(new CustomTlsQuicClientOptions

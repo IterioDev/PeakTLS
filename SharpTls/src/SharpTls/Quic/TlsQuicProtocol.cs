@@ -72,6 +72,97 @@ public enum TlsQuicQpackHuffmanPolicy
     ShorterOfTheTwo,
 }
 
+/// <summary>When the QPACK encoder inserts a request header into its dynamic table.</summary>
+/// <remarks>
+/// <para>Read by <c>TlsQuicQpackEncoderPolicy</c>, and only once a non-zero
+/// <c>TlsQuicHttp3Spec.QpackEncoderDynamicTableCapacity</c> has met a peer that advertises a
+/// non-zero <c>SETTINGS_QPACK_MAX_TABLE_CAPACITY</c>; with either at zero nothing is ever
+/// inserted whatever this says.</para>
+/// <para>THE ONE MEASURED POLICY IS THE PHONE'S. The 2026-09-26 capture of Spotify 9.1.86.2428
+/// on iOS 27.0 (reference-captures/2026-09-26-spotify-9.1.86-ios27-pcapng.md s6) shows every
+/// one of 36 inserts across three connections obeying <see cref="OnSecondUse"/>, and no pair
+/// used once ever inserted. Other clients index on first use; that policy is not here because
+/// no capture in this repository shows it.</para>
+/// </remarks>
+public enum TlsQuicQpackInsertPolicy
+{
+    /// <summary>Never insert. The table, if any, stays empty and every section is static-only.</summary>
+    Never,
+
+    /// <summary>Insert a (name, value) pair the first time it is encoded after having appeared
+    /// in an earlier request that was itself encoded while the table was active. Requests sent
+    /// before the capacity instruction do not count, so the first request after it is always
+    /// static-only.</summary>
+    OnSecondUse,
+}
+
+/// <summary>When the HTTP/3 client opens its QPACK encoder and decoder streams.</summary>
+/// <remarks>
+/// <para>RFC 9114 s6.2.1 puts the control stream "at the beginning of the connection"; RFC
+/// 9204 s4.2 says nothing about WHEN the two QPACK streams open, only that each side opens at
+/// most one of each. Both members conform. The imitated client opens the encoder stream with
+/// its capacity instruction and the decoder stream with its first decoder instruction
+/// (reference-captures/2026-09-26-spotify-9.1.86-ios27-pcapng.md s6), which is
+/// <see cref="Lazy"/>; a client that opens all three in its first flight is
+/// <see cref="AtConnectionStart"/>.</para>
+/// <para>Read by <c>TlsQuicHttp3Streams.OpenLocalStreams</c>. Under <see cref="Lazy"/> the
+/// relative order of <c>TlsQuicHttp3Spec.UnidirectionalStreamOpenOrder</c> still holds when
+/// two streams open together, and the encoder stream is opened before the decoder stream if
+/// the decoder is needed first, so the stream ids match a client that opened them in
+/// order.</para>
+/// </remarks>
+public enum TlsQuicHttp3UnidirectionalStreamOpening
+{
+    /// <summary>Every stream in the open order, in the opening flight.</summary>
+    AtConnectionStart,
+
+    /// <summary>The control stream in the opening flight; each QPACK stream with its first
+    /// instruction.</summary>
+    Lazy,
+}
+
+/// <summary>Why the packet receiver discarded a packet, for the handshake deadline's
+/// diagnostic and for tests. RFC 9000 s12.2 makes every one of these a drop rather than a
+/// connection error.</summary>
+public enum TlsQuicDiscardReason
+{
+    /// <summary>Nothing has been discarded.</summary>
+    None,
+
+    /// <summary>A short-header packet whose header could not be read.</summary>
+    ShortHeaderUnparseable,
+
+    /// <summary>A long-header packet whose header could not be read.</summary>
+    LongHeaderUnparseable,
+
+    /// <summary>A long-header packet carrying a version this endpoint does not speak;
+    /// the rest of the datagram is dropped with it.</summary>
+    UnknownVersion,
+
+    /// <summary>A packet coalesced behind one with a different Destination Connection ID
+    /// (RFC 9000 s12.2).</summary>
+    ConnectionIdMismatchInDatagram,
+
+    /// <summary>The packet's level had no read keys yet and it could not be retained.</summary>
+    MissingKeys,
+
+    /// <summary>RFC 9001 s5.4 header protection could not be removed.</summary>
+    HeaderProtectionFailed,
+
+    /// <summary>The packet is shorter than an AEAD tag.</summary>
+    ShorterThanTag,
+
+    /// <summary>A 1-RTT packet announcing a key phase this endpoint has no keys for.</summary>
+    NoKeysForKeyPhase,
+
+    /// <summary>The AEAD rejected the packet: wrong keys, corrupted, forged, or a packet
+    /// from some other connection.</summary>
+    AuthenticationFailed,
+
+    /// <summary>A packet number already processed in its space (RFC 9000 s12.3).</summary>
+    Duplicate,
+}
+
 /// <summary>What this endpoint writes into RFC 9000 section 17.4's latency spin bit.</summary>
 /// <remarks>
 /// <para>EVERY MEMBER IS THE SPIN BIT DISABLED, and all three are conformant. s17.4: "Each

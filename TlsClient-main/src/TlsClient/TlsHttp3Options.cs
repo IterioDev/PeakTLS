@@ -173,6 +173,25 @@ public sealed class TlsHttp3Options
     public bool AllowDatagramSettingWithoutTransportParameter { get; set; } =
         SpecDefaults.AllowDatagramSettingWithoutTransportParameter;
 
+    /// <summary>
+    /// Gets or sets the QPACK dynamic table capacity this client's encoder announces, in
+    /// octets. 0, the default, keeps the static-only encoder every connection used before the
+    /// knob existed; the announced value is the smaller of this and the peer's
+    /// <c>SETTINGS_QPACK_MAX_TABLE_CAPACITY</c>.
+    /// </summary>
+    public int QpackEncoderDynamicTableCapacity { get; set; } =
+        SpecDefaults.QpackEncoderDynamicTableCapacity;
+
+    /// <summary>Gets or sets when the QPACK encoder inserts a request header into its
+    /// dynamic table. Inert while <see cref="QpackEncoderDynamicTableCapacity"/> is 0.</summary>
+    public TlsQuicQpackInsertPolicy QpackInsertPolicy { get; set; } =
+        SpecDefaults.QpackInsertPolicy;
+
+    /// <summary>Gets or sets when the QPACK encoder and decoder streams open: in the opening
+    /// flight, or each with its first instruction.</summary>
+    public TlsQuicHttp3UnidirectionalStreamOpening UnidirectionalStreamOpening { get; set; } =
+        SpecDefaults.UnidirectionalStreamOpening;
+
     /// <summary>Builds the SharpTls spec, validating every list and enum on the way.</summary>
     internal TlsQuicHttp3Spec Snapshot()
     {
@@ -204,6 +223,9 @@ public sealed class TlsHttp3Options
             SendReservedFramesOnRequestStreams = SendReservedFramesOnRequestStreams,
             AllowDatagramSettingWithoutTransportParameter =
                 AllowDatagramSettingWithoutTransportParameter,
+            QpackEncoderDynamicTableCapacity = QpackEncoderDynamicTableCapacity,
+            QpackInsertPolicy = QpackInsertPolicy,
+            UnidirectionalStreamOpening = UnidirectionalStreamOpening,
         };
     }
 }

@@ -221,6 +221,12 @@ TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.get -> b
 TlsClient.TlsHttp3Options.AllowDatagramSettingWithoutTransportParameter.set -> void
 TlsClient.TlsHttp3Options.PseudoHeaderOrder.get -> System.Collections.Generic.IList<TlsClient.TlsHttp3PseudoHeader>!
 TlsClient.TlsHttp3Options.PseudoHeaderOrder.set -> void
+TlsClient.TlsHttp3Options.QpackEncoderDynamicTableCapacity.get -> int
+TlsClient.TlsHttp3Options.QpackEncoderDynamicTableCapacity.set -> void
+TlsClient.TlsHttp3Options.QpackInsertPolicy.get -> SharpTls.Quic.TlsQuicQpackInsertPolicy
+TlsClient.TlsHttp3Options.QpackInsertPolicy.set -> void
+TlsClient.TlsHttp3Options.UnidirectionalStreamOpening.get -> SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening
+TlsClient.TlsHttp3Options.UnidirectionalStreamOpening.set -> void
 TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.get -> SharpTls.Quic.TlsQuicQpackHuffmanPolicy
 TlsClient.TlsHttp3Options.QpackHuffmanStringLiterals.set -> void
 TlsClient.TlsHttp3Options.QpackNameMatchPolicy.get -> TlsClient.TlsQpackNameMatchPolicy
@@ -417,15 +423,15 @@ TlsClient.TlsSessionOptions.Quic.get -> TlsClient.TlsQuicOptions!
 static TlsClient.TlsHttp3Setting.Drawn(System.Func<TlsClient.TlsHttp3Setting>! draw) -> TlsClient.TlsHttp3Setting
 static TlsClient.TlsPresets.Spotify.get -> TlsClient.TlsPreset!
 static TlsClient.TlsPresets.Spotify917602050IOS260Http3.get -> TlsClient.TlsPreset!
-static TlsClient.TlsPresets.Spotify917602050IOS270Http3.get -> TlsClient.TlsPreset!
+static TlsClient.TlsPresets.Spotify918602428IOS270Http3.get -> TlsClient.TlsPreset!
 static TlsClient.TlsProfiles.Spotify917602050IOS260Quic.get -> TlsClient.TlsProfile!
-static TlsClient.TlsProfiles.Spotify917602050IOS270Quic.get -> TlsClient.TlsProfile!
+static TlsClient.TlsProfiles.Spotify918602428IOS270Quic.get -> TlsClient.TlsProfile!
 static TlsClient.TlsQuicOptions.ApplyDefaultClientHello(SharpTls.ClientHelloBuilder! builder) -> void
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byte[]! Value)?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Literal(ulong id, System.ReadOnlySpan<byte> value) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Placed(ulong id) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsRequestHeaderExtensions.AddHeader(this System.Net.Http.HttpRequestMessage! request, string! name, string! value) -> void
-static TlsClient.TlsPresets.Spotify917602050IOS270Http2.get -> TlsClient.TlsPreset!
+static TlsClient.TlsPresets.Spotify918602428IOS270Http2.get -> TlsClient.TlsPreset!
 static TlsClient.TlsPresets.SpotifyH2.get -> TlsClient.TlsPreset!
-static TlsClient.TlsProfiles.Spotify917602050IOS270Tcp.get -> TlsClient.TlsProfile!
+static TlsClient.TlsProfiles.Spotify918602428IOS270Tcp.get -> TlsClient.TlsProfile!

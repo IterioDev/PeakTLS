@@ -735,6 +735,10 @@ wired the last four, which C1–C4 had left recording a value and changing no by
 | `QpackNameMatchPolicy` `:473` | `TlsQuicQpackNameMatchPolicy` | **`NameReference`** (`:206-207`) | When a header's *name* matches a static entry but its *value* does not: `NameReference` = RFC 9204 §4.5.4, `LiteralName` = §4.5.6. Different bytes for the same header | **`PLACEHOLDER`** — unseen by the capture (`:462-464`) | in-assembly |
 | `SendReservedFramesOnRequestStreams` `:506` | `bool` | **`false`** | Prefixes the HEADERS frame with one RFC 9114 §7.2.8 reserved (GREASE) frame. bogdanfinn exposes the same dimension as `h3SendGreaseFrames` | **`PLACEHOLDER`** — §7.2.8's frames "MAY be sent on any stream", so both answers conform (`:492-497`) | in-assembly |
 
+| `QpackEncoderDynamicTableCapacity` | `int` | **`0`** — RFC 9204 s3.2.3's static-only encoder | The capacity announced on the encoder stream (min of this and the peer's `SETTINGS_QPACK_MAX_TABLE_CAPACITY`), and with it every insert instruction and every dynamic reference the sections carry | **MEASURED** — `4096` on Spotify 9.1.86.2428 / iOS 27, 3 of 3 connections (reference-captures/2026-09-26-spotify-9.1.86-ios27-pcapng.md s6) | in-assembly |
+| `QpackInsertPolicy` | `TlsQuicQpackInsertPolicy` | **`Never`** | Which pairs the encoder inserts: `OnSecondUse` inserts a pair the first time it is encoded after an earlier active-table use | **MEASURED** — 36 of 36 inserts and every non-insert in the same capture | in-assembly |
+| `UnidirectionalStreamOpening` | `TlsQuicHttp3UnidirectionalStreamOpening` | **`AtConnectionStart`** | Whether the QPACK streams open in the opening flight or each with its first instruction; the packet the capacity travels in | **MEASURED** — `Lazy` in the same capture: control alone in packet 0, encoder with `3f e1 1f`, decoder with its first ICI | in-assembly |
+
 **The flag is the only knob for the reserved frame.** Its N, its payload and its position before
 the HEADERS frame are all placeholders declared on
 `TlsQuicHttp3Request.ReservedRequestStreamFrameType`
@@ -854,6 +858,9 @@ different marker word:
 | `TlsQuicHttp3Spec.QpackHuffmanStringLiterals` | `Quic/TlsQuicHttp3Spec.cs:443` | `true` | C12 |
 | `TlsQuicHttp3Spec.QpackNameMatchPolicy` | `Quic/TlsQuicHttp3Spec.cs:462` | `NameReference` | C12 |
 | `TlsQuicHttp3Spec.SendReservedFramesOnRequestStreams` | `Quic/TlsQuicHttp3Spec.cs:492` | `false` | C12 |
+| `TlsQuicHttp3Spec.QpackEncoderDynamicTableCapacity` | `Quic/TlsQuicHttp3Spec.cs` | `0` — measured `4096` on Spotify iOS 27, set by the preset | 2026-09-26 capture s6 |
+| `TlsQuicHttp3Spec.QpackInsertPolicy` | `Quic/TlsQuicHttp3Spec.cs` | `Never` — measured `OnSecondUse`, set by the preset | 2026-09-26 capture s6 |
+| `TlsQuicHttp3Spec.UnidirectionalStreamOpening` | `Quic/TlsQuicHttp3Spec.cs` | `AtConnectionStart` — measured `Lazy`, set by the preset | 2026-09-26 capture s6 |
 | Reserved request-stream frame's **N, payload and position** | `Quic/TlsQuicHttp3Request.cs:446` | `N = 0`, empty payload, before HEADERS. **Not knobs** — only the on/off flag is | C12 |
 
 The HTTP/3 readout renders seven rows with verdict `not-yet-known-from-the-capture`

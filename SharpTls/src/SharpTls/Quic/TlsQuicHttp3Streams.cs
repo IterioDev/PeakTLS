@@ -62,9 +62,10 @@ internal sealed class TlsQuicHttp3Streams
         //
         // C16 TOOK THE ENCODER STREAM OUT OF THIS FLAG, and the sentence C15 left here - "the
         // peer's encoder stream is still discarded" - is no longer true. It is now parsed, in
-        // TryReadEncoderStream. The merge argued above still holds for what remains: a push
-        // stream, the peer's DECODER stream, a GREASE stream and an unknown type are all
-        // discarded and nothing observes a difference between them.
+        // TryReadEncoderStream. The dynamic-table encoder took the peer's DECODER stream out
+        // too, into TryReadPeerDecoderStream. The merge argued above still holds for what
+        // remains: a push stream, a GREASE stream and an unknown type are all discarded and
+        // nothing observes a difference between them.
         //
         // NOT THE SAME AS "there is no table". A zero advertised capacity leaves Table null and
         // the encoder stream's bytes are dropped in TryReadEncoderStream instead - a different
@@ -138,7 +139,20 @@ internal sealed class TlsQuicHttp3Streams
         // knows better, and this is the only place either is read.
         _encoderStreamCeiling =
             spec.MaximumBufferedEncoderStreamBytes ?? DeriveEncoderStreamCeiling(capacity);
+
+        EncoderPolicy = new TlsQuicQpackEncoderPolicy(spec);
     }
+
+    /// <summary>Gets the QPACK encoder policy for this connection: what our own field
+    /// sections insert and reference, driven by the peer's SETTINGS and decoder stream.</summary>
+    internal TlsQuicQpackEncoderPolicy EncoderPolicy { get; }
+
+    /// <summary>Gets this client's QPACK encoder stream, or <see langword="null"/> before it
+    /// is opened - at <see cref="OpenLocalStreams"/> under
+    /// <see cref="TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart"/>, with its first
+    /// instruction under <see cref="TlsQuicHttp3UnidirectionalStreamOpening.Lazy"/>, never if
+    /// the spec's open order omits it.</summary>
+    internal TlsQuicStream? LocalEncoderStream { get; private set; }
 
     /// <summary>Gets the QUIC stream ids this client opened, in the order it opened
     /// them.</summary>
@@ -250,9 +264,20 @@ internal sealed class TlsQuicHttp3Streams
                     + "opening flight is sent once.");
         }
 
+        // LAZY OPENS THE CONTROL STREAM ALONE. The imitated client's first 1-RTT packet
+        // carries the control stream's SETTINGS and nothing else; its encoder stream appears
+        // with the capacity instruction once the peer's SETTINGS are in, its decoder stream
+        // with the first decoder instruction (reference-captures/2026-09-26-spotify-9.1.86-
+        // ios27-pcapng.md s6). EnsureEncoderStream and EnsureDecoderStream open those two.
+        var lazy = _spec.UnidirectionalStreamOpening == TlsQuicHttp3UnidirectionalStreamOpening.Lazy;
         var bytes = new List<byte>();
         foreach (var streamType in _spec.UnidirectionalStreamOpenOrder)
         {
+            if (lazy && streamType != TlsQuicHttp3StreamType.Control)
+            {
+                continue;
+            }
+
             bytes.Clear();
             QuicVariableLengthInteger.Write(bytes, (ulong)streamType);
             if (streamType == TlsQuicHttp3StreamType.Control)
@@ -267,11 +292,123 @@ internal sealed class TlsQuicHttp3Streams
             {
                 LocalControlStream = stream;
             }
+            else if (streamType == TlsQuicHttp3StreamType.QpackEncoder)
+            {
+                LocalEncoderStream = stream;
+            }
             else if (streamType == TlsQuicHttp3StreamType.QpackDecoder)
             {
                 LocalDecoderStream = stream;
             }
         }
+
+        // The peer's SETTINGS may already be in - nothing orders them against this call - in
+        // which case the capacity instruction has been waiting for a stream to go out on.
+        TrySendCapacity();
+    }
+
+    // ============================================================================
+    // RFC 9204 s4.3's encoder instructions, sent on the s4.2 encoder stream
+    // ============================================================================
+
+    /// <summary>Writes encoder instructions the policy produced, opening the encoder stream
+    /// with them under <see cref="TlsQuicHttp3UnidirectionalStreamOpening.Lazy"/>.</summary>
+    /// <remarks>An empty image sends nothing and opens nothing: the imitated client's
+    /// encoder stream appears with its first instruction, never bare.</remarks>
+    /// <exception cref="InvalidOperationException">The spec's open order omits the encoder
+    /// stream, or <see cref="OpenLocalStreams"/> has not run. Both are this endpoint's
+    /// configuration, not the peer's doing.</exception>
+    internal void SendEncoderInstructions(ReadOnlyMemory<byte> instructions)
+    {
+        if (instructions.IsEmpty)
+        {
+            return;
+        }
+
+        if (LocalEncoderStream is null)
+        {
+            EnsureEncoderStream(instructions);
+            return;
+        }
+
+        // NO FIN, for RFC 9204 s4.2's reason: "The sender MUST NOT close either of these
+        // streams".
+        _streams.Send(LocalEncoderStream, instructions);
+    }
+
+    // Hands the peer's SETTINGS to the policy once, and only once this endpoint's opening
+    // flight has gone: under Lazy the capacity instruction opens the encoder stream, and an
+    // encoder stream opened before the control stream would take the control stream's id.
+    private void TrySendCapacity()
+    {
+        if (_localStreamIds.Count == 0 || !PeerSettingsReceived)
+        {
+            return;
+        }
+
+        SendEncoderInstructions(EncoderPolicy.OnPeerSettings(
+            TlsQuicHttp3Settings.Value(PeerSettings, TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier) ?? 0,
+            TlsQuicHttp3Settings.Value(PeerSettings, TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier) ?? 0));
+    }
+
+    // Opens the encoder stream with `firstInstruction` behind its type byte, in ONE send -
+    // the capture's `02 3f e1 1f` is one STREAM frame. Empty is legal here and used by
+    // EnsureDecoderStream to keep the stream ids in the open order's sequence.
+    private void EnsureEncoderStream(ReadOnlyMemory<byte> firstInstruction)
+    {
+        if (LocalEncoderStream is not null)
+        {
+            return;
+        }
+
+        LocalEncoderStream = OpenLazily(TlsQuicHttp3StreamType.QpackEncoder, firstInstruction.Span);
+    }
+
+    // Opens the decoder stream with its first instruction behind the type byte. The encoder
+    // stream is opened first if it is still closed, so that a decoder instruction that
+    // happens to be due before our capacity goes out - a peer whose encoder stream is read
+    // before its SETTINGS - still leaves the ids at control, encoder, decoder as on the phone.
+    private void EnsureDecoderStream(ReadOnlySpan<byte> firstInstruction)
+    {
+        if (LocalDecoderStream is not null)
+        {
+            return;
+        }
+
+        if (_spec.UnidirectionalStreamOpenOrder.IndexOf(TlsQuicHttp3StreamType.QpackEncoder)
+            < _spec.UnidirectionalStreamOpenOrder.IndexOf(TlsQuicHttp3StreamType.QpackDecoder))
+        {
+            EnsureEncoderStream(ReadOnlyMemory<byte>.Empty);
+        }
+
+        LocalDecoderStream = OpenLazily(TlsQuicHttp3StreamType.QpackDecoder, firstInstruction);
+    }
+
+    private TlsQuicStream OpenLazily(TlsQuicHttp3StreamType streamType, ReadOnlySpan<byte> firstInstruction)
+    {
+        if (_localStreamIds.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "RFC 9114 s6.2.1's control stream opens first. Call OpenLocalStreams before "
+                    + "anything that needs a QPACK stream.");
+        }
+
+        if (!_spec.UnidirectionalStreamOpenOrder.Contains(streamType))
+        {
+            throw new InvalidOperationException(
+                $"This spec's UnidirectionalStreamOpenOrder omits the {streamType} stream, and "
+                    + "RFC 9204 s4.2 makes that a deliberate configuration - so there is no "
+                    + "stream to carry the instruction. Add the type to the order, or leave "
+                    + "the capacity at zero.");
+        }
+
+        var bytes = new List<byte>();
+        QuicVariableLengthInteger.Write(bytes, (ulong)streamType);
+        bytes.AddRange(firstInstruction);
+        var stream = _streams.OpenUnidirectional();
+        _streams.Send(stream, bytes.ToArray());
+        _localStreamIds.Add(stream.Id);
+        return stream;
     }
 
     // ============================================================================
@@ -349,7 +486,14 @@ internal sealed class TlsQuicHttp3Streams
         // endpoint to acknowledge on a stream it chose never to open has made the same mistake
         // whichever way the suppression happens to fall, and a check that only fires half the
         // time is a check that gets found in production.
-        if (LocalDecoderStream is null)
+        //
+        // UNDER LAZY THE STREAM MAY LEGITIMATELY NOT EXIST YET: it opens with the first
+        // instruction that is actually sent, in Emit, so the check here is that it COULD open -
+        // the opening flight has gone and the open order names the stream.
+        if (LocalDecoderStream is null
+            && (_localStreamIds.Count == 0
+                || _spec.UnidirectionalStreamOpening != TlsQuicHttp3UnidirectionalStreamOpening.Lazy
+                || !_spec.UnidirectionalStreamOpenOrder.Contains(TlsQuicHttp3StreamType.QpackDecoder)))
         {
             throw new InvalidOperationException(
                 "RFC 9204 s4.2: the decoder stream may be omitted only \"if its decoder sets the "
@@ -378,10 +522,19 @@ internal sealed class TlsQuicHttp3Streams
             return false;
         }
 
+        // Lazy's first instruction opens the stream and travels behind its type byte, in one
+        // send - the capture's decoder stream opens as `03 06`, type and Insert Count
+        // Increment together.
+        if (LocalDecoderStream is null)
+        {
+            EnsureDecoderStream(instruction.AsSpan(0, written));
+            return true;
+        }
+
         // NO FIN, for RFC 9204 s4.2's reason: "The sender MUST NOT close either of these
         // streams" - and a decoder stream that closes leaves the peer's encoder unable to
         // learn anything further about our table.
-        _streams.Send(LocalDecoderStream!, instruction.AsMemory(0, written));
+        _streams.Send(LocalDecoderStream, instruction.AsMemory(0, written));
         return true;
     }
 
@@ -551,6 +704,14 @@ internal sealed class TlsQuicHttp3Streams
             return true;
         }
 
+        // The peer's DECODER stream: s4.4's feedback about our own encoder's table. Read
+        // whether or not we ever sent a capacity - a peer that acknowledges a section we never
+        // sent has made s4.4.1's error either way.
+        if (state.StreamType == (ulong)TlsQuicHttp3StreamType.QpackDecoder)
+        {
+            return TryReadPeerDecoderStream(state, out error);
+        }
+
         // NO SECOND `if (state.Ignoring)` HERE, and its absence is deliberate. A stream that
         // was just marked ignored has had its buffer cleared, so this call parses nothing and
         // answers Incomplete. An earlier draft had the redundant check; the sweep killed
@@ -659,7 +820,10 @@ internal sealed class TlsQuicHttp3Streams
         // whole backlog and sends one Increment for it. s2.2.2.3 makes that timing the
         // decoder's to choose: "the decoder chooses when to emit Insert Count Increment
         // instructions".
-        if (LocalDecoderStream is null)
+        //
+        // THE TEST IS "HAS THE OPENING FLIGHT GONE", NOT "IS THERE A DECODER STREAM": under
+        // Lazy the decoder stream opens with the very Increment this read produces.
+        if (_localStreamIds.Count == 0)
         {
             return true;
         }
@@ -686,6 +850,72 @@ internal sealed class TlsQuicHttp3Streams
         // TryProcessPeerStream's own "NO SECOND if (state.Ignoring)" note applies.
         SendInsertCountIncrement(Table.InsertCount);
 
+        return true;
+    }
+
+    // RFC 9204 s4.4's decoder instructions, as the PEER sends them about OUR encoder's table.
+    // The first octet's top bits select the instruction: `1xxxxxxx` Section Acknowledgment
+    // (7-bit stream id), `01xxxxxx` Stream Cancellation (6-bit), `00xxxxxx` Insert Count
+    // Increment (6-bit). Each is one prefixed integer, so a partial one is at most
+    // MaximumIntegerEncodedLength octets - the ceiling for what may sit unparsed.
+    //
+    // s4.4.1, s4.4.3 and s6: an acknowledgment for a stream with no outstanding section, an
+    // increment of zero, and an increment past the Insert Count are all
+    // QPACK_DECODER_STREAM_ERROR. A cancellation for a stream with nothing recorded is not
+    // (s4.4.2 lets a decoder cancel a stream that used no dynamic entry). Every fault below
+    // is the peer's, hence a code and never a throw.
+    private bool TryReadPeerDecoderStream(PeerStreamState state, out ulong error)
+    {
+        error = (ulong)TlsQuicHttp3ErrorCode.None;
+        var span = CollectionsMarshal.AsSpan(state.Unparsed);
+        var consumed = 0;
+
+        while (consumed < span.Length)
+        {
+            var first = span[consumed];
+            var acknowledgment = (first & 0b1000_0000) != 0;
+            var cancellation = !acknowledgment && (first & 0b0100_0000) != 0;
+            var prefixBits = acknowledgment ? 7 : 6;
+
+            if (!TlsQuicQpackPrimitives.TryDecodeInteger(
+                    span[consumed..], prefixBits, out var value, out var used, out var integerError))
+            {
+                if (integerError == TlsQuicQpackError.Truncated)
+                {
+                    break;
+                }
+
+                error = TlsQuicQpackEncoderTable.QpackDecoderStreamError;
+                return false;
+            }
+
+            var accepted = acknowledgment
+                ? EncoderPolicy.TryAcknowledgeSection(value)
+                : cancellation
+                    ? CancelAlwaysAccepted(value)
+                    : EncoderPolicy.TryIncrementKnownReceived(value);
+            if (!accepted)
+            {
+                error = TlsQuicQpackEncoderTable.QpackDecoderStreamError;
+                return false;
+            }
+
+            consumed += used;
+        }
+
+        state.Unparsed.RemoveRange(0, consumed);
+        if (state.Unparsed.Count > TlsQuicQpackPrimitives.MaximumIntegerEncodedLength)
+        {
+            error = TlsQuicQpackEncoderTable.QpackDecoderStreamError;
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool CancelAlwaysAccepted(ulong streamId)
+    {
+        EncoderPolicy.CancelStream(streamId);
         return true;
     }
 
@@ -738,19 +968,22 @@ internal sealed class TlsQuicHttp3Streams
             // connections on a rule the RFC declined to enforce. A second encoder stream simply
             // feeds the same table, which is what a duplicate would do anyway.
         }
+        else if (streamType == (ulong)TlsQuicHttp3StreamType.QpackDecoder)
+        {
+            // THE PEER'S DECODER STREAM IS READ NOW. It used to be discarded here because this
+            // client's encoder was static-only and s4.4's instructions referred to state that
+            // did not exist. TlsQuicQpackEncoderPolicy exists, so they refer to its table - and
+            // to nothing when the capacity is zero, which s4.4.1 and s4.4.3 make the peer's
+            // error rather than something to ignore. Its bytes go to TryReadPeerDecoderStream.
+        }
         else
         {
-            // EVERY OTHER TYPE, WITH NO BRANCH BETWEEN THEM. A push stream, the peer's QPACK
-            // DECODER stream, an s6.2.3 reserved (GREASE) stream and a type from an extension
-            // nobody here implements all end up here, and this task does exactly the same
-            // thing with all four: takes s6.2's second answer, "discard incoming data without
-            // further processing", which is also the answer that satisfies "The recipient MUST
-            // NOT consider unknown stream types to be a connection error of any kind."
-            //
-            // THE PEER'S DECODER STREAM IS STILL DISCARDED AND THAT IS NOT AN OVERSIGHT. s4.4's
-            // instructions acknowledge OUR encoder's dynamic table, and this client's encoder
-            // is static-only - TlsQuicQpackEncoder never inserts - so a Section Acknowledgment
-            // or an Insert Count Increment from the peer refers to state that does not exist.
+            // EVERY OTHER TYPE, WITH NO BRANCH BETWEEN THEM. A push stream, an s6.2.3 reserved
+            // (GREASE) stream and a type from an extension nobody here implements all end up
+            // here, and this task does exactly the same thing with all three: takes s6.2's
+            // second answer, "discard incoming data without further processing", which is also
+            // the answer that satisfies "The recipient MUST NOT consider unknown stream types
+            // to be a connection error of any kind."
             state.Ignoring = true;
             state.Unparsed.Clear();
         }
@@ -821,6 +1054,11 @@ internal sealed class TlsQuicHttp3Streams
 
             PeerSettings = settings;
             PeerSettingsReceived = true;
+
+            // RFC 9204 s3.2.3: the peer's SETTINGS_QPACK_MAX_TABLE_CAPACITY is what our
+            // encoder's capacity is bounded by, and the imitated client's capacity instruction
+            // goes out in the packet after those SETTINGS arrive.
+            TrySendCapacity();
             return true;
         }
 

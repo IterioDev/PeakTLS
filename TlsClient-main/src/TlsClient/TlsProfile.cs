@@ -109,20 +109,21 @@ public static class TlsProfiles
             ClientHelloProfiles.ModernTls13);
 
     /// <summary>
-    /// Gets the passively-captured Spotify 9.1.76.2050 on iOS 27.0 (iPhone17,2) QUIC profile.
+    /// Gets the passively-captured Spotify 9.1.86.2428 on iOS 27.0 (iPhone17,2) QUIC profile.
     /// Unlike the other built-ins this is not a uTLS transcription: it is decoded from the
-    /// Initial CRYPTO frames of 80 first-party captured connections.
+    /// Initial CRYPTO frames of 80 first-party captured connections of the 9.1.76.2050 build and
+    /// confirmed byte-identical on 9.1.86.2428.
     /// <para>QUIC only. Over h3 this is NOT what drives the ClientHello — RFC 9001 §8.4 gives
     /// QUIC its own, configured through <see cref="TlsQuicOptions.ConfigureClientHello"/>,
     /// which <c>TlsPresets.Spotify</c> wires to the same shape. This profile exists so the
     /// preset's <see cref="TlsPreset.Profile"/> names the client it impersonates rather than
     /// an unrelated browser.</para>
     /// </summary>
-    public static TlsProfile Spotify917602050IOS270Quic { get; } =
+    public static TlsProfile Spotify918602428IOS270Quic { get; } =
         TlsProfile.CreateBuiltIn(
-            "spotify-9.1.76-ios-27.0-quic",
-            nameof(ClientHelloProfiles.Spotify917602050IOS270Quic),
-            ClientHelloProfiles.Spotify917602050IOS270Quic);
+            "spotify-9.1.86-ios-27.0-quic",
+            nameof(ClientHelloProfiles.Spotify918602428IOS270Quic),
+            ClientHelloProfiles.Spotify918602428IOS270Quic);
 
     /// <summary>
     /// Gets the passively-captured Spotify 9.1.76.2050 on iOS 26 (iPhone17,2) QUIC profile,
@@ -130,7 +131,7 @@ public static class TlsProfiles
     /// </summary>
     /// <remarks>The same app on the older OS, and a genuinely different hello: cipher order
     /// 0x1302, 0x1301, 0x1303 and no vendor transport parameter, where
-    /// <see cref="Spotify917602050IOS270Quic"/> has 0x1302, 0x1303, 0x1301 and carries one.
+    /// <see cref="Spotify918602428IOS270Quic"/> has 0x1302, 0x1303, 0x1301 and carries one.
     /// JA3 splits, JA4 does not. Decoded from ONE capture against that one's 80 — see the
     /// SharpTls profile's remarks for which of its fields are inherited rather than
     /// measured.</remarks>
@@ -141,18 +142,19 @@ public static class TlsProfiles
             ClientHelloProfiles.Spotify917602050IOS260Quic);
 
     /// <summary>
-    /// Gets the TCP ClientHello of the same Spotify 9.1.76.2050 iOS build — the hello its
+    /// Gets the TCP ClientHello of the same Spotify 9.1.86.2428 iOS 27.0 build — the hello its
     /// HTTP/2 legs dial with, paired with <see cref="TlsPresets.SpotifyH2"/>.
     /// </summary>
-    /// <remarks>Transcribed from a supplied fingerprint record rather than decoded from a
-    /// first-party capture, unlike <see cref="Spotify917602050IOS270Quic"/>. Thirteen cipher
-    /// suites to that one's three, and a different extension set; the two are not derivable
-    /// from each other.</remarks>
-    public static TlsProfile Spotify917602050IOS270Tcp { get; } =
+    /// <remarks>Transcribed from a supplied fingerprint record, then confirmed and corrected
+    /// against a first-party pcapng capture of the same app at 9.1.86.2428 on iOS 27.0 — see
+    /// the SharpTls profile's remarks for the one axis the record had wrong. Thirteen cipher
+    /// suites to the QUIC hello's three, and a different extension set; the two are not
+    /// derivable from each other.</remarks>
+    public static TlsProfile Spotify918602428IOS270Tcp { get; } =
         TlsProfile.CreateBuiltIn(
-            "spotify-9.1.76-ios-27.0-tcp",
-            nameof(ClientHelloProfiles.Spotify917602050IOS270Tcp),
-            ClientHelloProfiles.Spotify917602050IOS270Tcp);
+            "spotify-9.1.86-ios-27.0-tcp",
+            nameof(ClientHelloProfiles.Spotify918602428IOS270Tcp),
+            ClientHelloProfiles.Spotify918602428IOS270Tcp);
 
     /// <summary>Gets every built-in TlsClient profile in stable name order.</summary>
     /// <remarks>FOUR ENTRIES, AND THAT IS THE WHOLE CATALOGUE - one honest shape, the two halves
@@ -167,7 +169,7 @@ public static class TlsProfiles
         {
             Modern,
             Spotify917602050IOS260Quic,
-            Spotify917602050IOS270Quic,
-            Spotify917602050IOS270Tcp,
+            Spotify918602428IOS270Quic,
+            Spotify918602428IOS270Tcp,
         });
 }

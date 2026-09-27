@@ -79,32 +79,40 @@ namespace SharpTls.Quic;
 //
 // ============================================================================
 
-// RFC 9204 s4.5's field line representations, encoding side, STATIC REFERENCES ONLY. See
+// RFC 9204 s4.5's field line representations, encoding side, plus the s4.3 encoder
+// instructions and the dynamic representations the encoder policy drives. See
 // reference-captures/rfc9204-section4.5-field-line-representations.txt and
 // reference-captures/rfc9204-appendix-b-encoding-and-decoding-examples.txt.
 //
-// Three of the six representations are reachable from here and three are not, and the split
-// is structural rather than a policy this class enforces with a check:
+// TWO ARMS, AND TryEncodeFieldLine IS STILL THE STATIC ONE. It picks among three
+// representations by what the STATIC table holds and never emits a dynamic reference:
 //
 //   s4.5.2 Indexed Field Line              - emitted, always with T = 1
 //   s4.5.4 Literal With Name Reference     - emitted, always with T = 1
 //   s4.5.6 Literal With Literal Name       - emitted, has no table reference at all
-//   s4.5.3 Indexed With Post-Base Index    - NOT emitted; post-Base indexing is dynamic-only
-//   s4.5.5 Literal With Post-Base Name Ref - NOT emitted; likewise
-//   s4.5.2/s4.5.4 with T = 0               - NOT emitted; T is a literal 1 in both writers
 //
-// WHY THERE IS NO DYNAMIC ARM. RFC 9204 s3.2.3: "When the maximum table capacity is zero,
-// the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any encoder
-// instructions on the encoder stream." s5 makes SETTINGS_QPACK_MAX_TABLE_CAPACITY default
-// to zero, and s3.2.3 makes the peer's maximum "0 until the encoder processes a SETTINGS
-// frame with a non-zero value". So an encoder that never touches the dynamic table is the
-// CONFORMING DEFAULT, not a degraded mode.
+// The dynamic arm - s4.3.1 Set Dynamic Table Capacity, s4.3.2 Insert With Name Reference,
+// s4.3.3 Insert With Literal Name, s4.5.2 with T = 0 and s4.5.3 Indexed With Post-Base Index -
+// is the set of writers below TryEncodeString, reached only through
+// TlsQuicQpackEncoderPolicy, and only once the peer's SETTINGS have advertised a non-zero
+// SETTINGS_QPACK_MAX_TABLE_CAPACITY and the spec asked for a table. s4.5.5's post-base NAME
+// reference and s4.3.4's Duplicate are not written by anything: the imitated client never
+// sends either (reference-captures/2026-09-26-spotify-9.1.86-ios27-pcapng.md s6).
 //
-// The field section prefix is therefore a constant two zero octets: s4.5.1.1's transform
+// WHY THE STATIC ARM IS STILL THE DEFAULT. RFC 9204 s3.2.3: "When the maximum table capacity
+// is zero, the encoder MUST NOT insert entries into the dynamic table and MUST NOT send any
+// encoder instructions on the encoder stream." s5 makes SETTINGS_QPACK_MAX_TABLE_CAPACITY
+// default to zero, and s3.2.3 makes the peer's maximum "0 until the encoder processes a
+// SETTINGS frame with a non-zero value". So an encoder that never touches the dynamic table
+// is the CONFORMING DEFAULT, not a degraded mode, and TlsQuicHttp3Spec's capacity knob
+// defaults to zero for the same reason.
+//
+// The static arm's field section prefix is a constant two zero octets: s4.5.1.1's transform
 // maps Required Insert Count 0 to an encoded 0, and s4.5.1.2 says "A field section that was
 // encoded without references to the dynamic table can use any value for the Base; setting
 // Delta Base to zero is one of the most efficient encodings" - Sign 0, Delta Base 0. RFC
-// 9204 Appendix B.1 shows exactly those two octets in front of its one field line.
+// 9204 Appendix B.1 shows exactly those two octets in front of its one field line. The
+// dynamic arm's prefix is the general s4.5.1 form, written by the three-argument overload.
 //
 // ON THE TWO POLICY FLAGS. `huffman` and `preferNameReference` are PARAMETERS, not
 // constants, because the plan's task C1 owns them: "QPACK encoder policy: Huffman on or off
@@ -141,6 +149,29 @@ internal static class TlsQuicQpackEncoder
     private const int NameLiteralPrefixBits = 4;
     private const int ValueLiteralPrefixBits = 8;
 
+    // THE DYNAMIC ARM'S PATTERNS, from reference-captures/rfc9204-section4.3 and s4.5.
+    //
+    //   s4.3.1 Set Dynamic Table Capacity   '001' + 5-bit capacity
+    //   s4.3.2 Insert With Name Reference   '1' + T + 6-bit name index; T = 1 here, always,
+    //                                        because the imitated client never references a
+    //                                        dynamic NAME (s6 of the capture doc)
+    //   s4.3.3 Insert With Literal Name     '01' + H + 5-bit name length, then the value
+    //   s4.5.2 with T = 0                   '1' + '0' + 6-bit relative index
+    //   s4.5.3 Indexed With Post-Base Index '0001' + 4-bit post-base index
+    //   s4.5.1 prefix                       8-bit Encoded Required Insert Count, then
+    //                                        Sign + 7-bit Delta Base
+    private const byte SetDynamicTableCapacityPattern = 0b0010_0000;
+    private const byte InsertWithNameReferenceStaticPattern = 0b1100_0000;
+    private const byte InsertWithLiteralNamePattern = 0b0100_0000;
+    private const byte IndexedFieldLineDynamicPattern = 0b1000_0000;
+    private const byte IndexedFieldLinePostBasePattern = 0b0001_0000;
+    private const byte DeltaBaseSignBit = 0b1000_0000;
+    private const int SetDynamicTableCapacityPrefixBits = 5;
+    private const int InsertNameLiteralPrefixBits = 6;
+    private const int PostBaseIndexPrefixBits = 4;
+    private const int RequiredInsertCountPrefixBits = 8;
+    private const int DeltaBasePrefixBits = 7;
+
     // The two-octet prefix of RFC 9204 s4.5.1, which in this arm is `00 00`. Written through
     // the integer codec rather than as two literal zeroes so that the encoding of "zero at
     // an 8-bit prefix" and "zero at a 7-bit prefix behind a clear Sign bit" is the codec's
@@ -163,6 +194,143 @@ internal static class TlsQuicQpackEncoder
         written = count + baseCount;
         return true;
     }
+
+    // The general s4.5.1 prefix. s4.5.1.1: "EncInsertCount = (ReqInsertCount mod (2 *
+    // MaxEntries)) + 1" for a non-zero count, 0 otherwise, where "MaxEntries = floor(
+    // MaxTableCapacity / 32)" and MaxTableCapacity is the DECODER's advertised maximum -
+    // the caller passes the peer-derived number, never our chosen capacity. s4.5.1.2: Sign
+    // set and "DeltaBase = ReqInsertCount - Base - 1" when Base < ReqInsertCount, else Sign
+    // clear and "DeltaBase = Base - ReqInsertCount".
+    internal static bool TryEncodeFieldSectionPrefix(
+        ulong requiredInsertCount,
+        ulong @base,
+        ulong maxEntries,
+        Span<byte> destination,
+        out int written)
+    {
+        written = 0;
+        if (requiredInsertCount != 0 && maxEntries == 0)
+        {
+            // Unreachable through the policy - a table with entries has a non-zero MaxEntries -
+            // and asserted rather than relied on, because the alternative is a divide by zero
+            // that would name nothing.
+            throw new ArgumentOutOfRangeException(
+                nameof(maxEntries),
+                "A non-zero Required Insert Count needs a non-zero MaxEntries (RFC 9204 s4.5.1.1).");
+        }
+
+        ulong encoded = requiredInsertCount == 0
+            ? 0
+            : (requiredInsertCount % (2 * maxEntries)) + 1;
+        if (!TlsQuicQpackPrimitives.TryEncodeInteger(
+                encoded, RequiredInsertCountPrefixBits, 0, destination, out int count))
+        {
+            return false;
+        }
+
+        bool negative = @base < requiredInsertCount;
+        ulong delta = negative ? requiredInsertCount - @base - 1 : @base - requiredInsertCount;
+        if (!TlsQuicQpackPrimitives.TryEncodeInteger(
+                delta,
+                DeltaBasePrefixBits,
+                negative ? DeltaBaseSignBit : (byte)0,
+                destination[count..],
+                out int baseCount))
+        {
+            return false;
+        }
+
+        written = count + baseCount;
+        return true;
+    }
+
+    // s4.3.1. Capture: `3f e1 1f` for 4096.
+    internal static bool TryEncodeSetDynamicTableCapacity(
+        ulong capacity, Span<byte> destination, out int written) =>
+        TlsQuicQpackPrimitives.TryEncodeInteger(
+            capacity,
+            SetDynamicTableCapacityPrefixBits,
+            SetDynamicTableCapacityPattern,
+            destination,
+            out written);
+
+    // s4.3.2 with T = 1: the name is a static-table row, the value a string literal.
+    internal static bool TryEncodeInsertWithStaticNameReference(
+        int staticIndex,
+        ReadOnlySpan<byte> value,
+        TlsQuicQpackHuffmanPolicy huffman,
+        Span<byte> destination,
+        out int written)
+    {
+        written = 0;
+        if (!TlsQuicQpackPrimitives.TryEncodeInteger(
+                (ulong)staticIndex,
+                IndexedFieldLinePrefixBits,
+                InsertWithNameReferenceStaticPattern,
+                destination,
+                out int headerLength))
+        {
+            return false;
+        }
+
+        if (!TryEncodeString(value, ValueLiteralPrefixBits, 0, huffman, destination[headerLength..], out int valueLength))
+        {
+            return false;
+        }
+
+        written = headerLength + valueLength;
+        return true;
+    }
+
+    // s4.3.3: '01' + H + 5-bit name length, name, then the value as an 8-bit prefix literal.
+    internal static bool TryEncodeInsertWithLiteralName(
+        ReadOnlySpan<byte> name,
+        ReadOnlySpan<byte> value,
+        TlsQuicQpackHuffmanPolicy huffman,
+        Span<byte> destination,
+        out int written)
+    {
+        written = 0;
+        if (!TryEncodeString(
+                name,
+                InsertNameLiteralPrefixBits,
+                InsertWithLiteralNamePattern,
+                huffman,
+                destination,
+                out int nameLength))
+        {
+            return false;
+        }
+
+        if (!TryEncodeString(value, ValueLiteralPrefixBits, 0, huffman, destination[nameLength..], out int valueLength))
+        {
+            return false;
+        }
+
+        written = nameLength + valueLength;
+        return true;
+    }
+
+    // s4.5.2 with T = 0. The caller has already converted the absolute index to
+    // s3.2.5's relative one: Base - absolute - 1.
+    internal static bool TryEncodeIndexedDynamic(
+        ulong relativeIndex, Span<byte> destination, out int written) =>
+        TlsQuicQpackPrimitives.TryEncodeInteger(
+            relativeIndex,
+            IndexedFieldLinePrefixBits,
+            IndexedFieldLineDynamicPattern,
+            destination,
+            out written);
+
+    // s4.5.3. The caller has converted to s3.2.6's post-base index: absolute - Base.
+    internal static bool TryEncodeIndexedPostBase(
+        ulong postBaseIndex, Span<byte> destination, out int written) =>
+        TlsQuicQpackPrimitives.TryEncodeInteger(
+            postBaseIndex,
+            PostBaseIndexPrefixBits,
+            IndexedFieldLinePostBasePattern,
+            destination,
+            out written);
 
     // One field line. Picks among s4.5.2, s4.5.4 and s4.5.6 by what the static table holds:
     //

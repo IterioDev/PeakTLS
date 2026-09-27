@@ -22,6 +22,6 @@ public sealed class TlsProfileTests
     public static TheoryData<TlsProfile> BrowserProfiles => new()
     {
         TlsProfiles.Modern,
-        TlsProfiles.Spotify917602050IOS270Quic,
+        TlsProfiles.Spotify918602428IOS270Quic,
     };
 }

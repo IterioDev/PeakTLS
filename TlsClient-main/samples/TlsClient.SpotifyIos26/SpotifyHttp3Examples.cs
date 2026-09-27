@@ -24,7 +24,13 @@ namespace TlsClient.Samples;
 /// <summary>Worked GET / POST / PUT over HTTP/3 with a session-wide SOCKS5 proxy.</summary>
 public static class SpotifyHttp3Examples
 {
-    private const string UserAgent = "Spotify/9.1.76 iOS/27.0 (iPhone17,2)";
+    // Spotify 9.1.86.2428 on iOS 27.0, the build the 2026-09-26 capture recorded. The header
+    // VALUES were not decoded from that capture; these follow the 9.1.76 strings' pattern.
+    private const string AppVersion = "9.1.86.2428";
+    private const string UserAgent = "Spotify/9.1.86 iOS/27.0 (iPhone17,2)";
+
+    // The captured device's zone. Sent on every request; not a fingerprint axis, change freely.
+    private const string TimeZone = "Europe/Athens";
 
     /// <summary>
     /// One session, one proxy, for the whole of its life. <c>options.Proxy</c> is set once and
@@ -57,12 +63,18 @@ public static class SpotifyHttp3Examples
         return new TlsSession(options);
     }
 
-    /// <summary>A GET. Insertion order is the wire order; nothing else is needed.</summary>
+    /// <summary>A GET in the 9.1.86 spclient image. Insertion order is the wire order;
+    /// nothing else is needed.</summary>
+    /// <remarks>Two adjacent pairs — <c>accept</c>/<c>authorization</c> and
+    /// <c>accept-language</c>/<c>accept-encoding</c> — appear in both orders across the
+    /// captured requests of this kind. This is one of the captured orders; the other is one
+    /// swap away. See docs/USAGE.md section 7.</remarks>
     public static Task<TlsResponse> GetProfileAsync(
         TlsSession session,
         string url,
         string bearerToken,
         string clientId,
+        string clientToken,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -72,15 +84,17 @@ public static class SpotifyHttp3Examples
         // :authority and no host field is needed. On HTTP/1.1 or HTTP/2, add "host" yourself
         // at the position you want it: RFC 9112 section 3.2 makes an absent one malformed.
         var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.AddHeader("spotify-app-version", AppVersion);
         request.AddHeader("accept", "*/*");
-        request.AddHeader("x-client-id", clientId);
-        request.AddHeader("accept-encoding", "gzip, deflate, br");
-        request.AddHeader("priority", "u=3, i");
-        request.AddHeader("app-platform", "iOS");
-        request.AddHeader("user-agent", UserAgent);
         request.AddHeader("authorization", "Bearer " + bearerToken);
+        request.AddHeader("time-zone", TimeZone);
+        request.AddHeader("app-platform", "iOS");
+        request.AddHeader("priority", "u=3, i");
         request.AddHeader("accept-language", "en-US,en;q=0.9");
-        request.AddHeader("spotify-app-version", "9.1.76.2050");
+        request.AddHeader("accept-encoding", "gzip, deflate, br");
+        request.AddHeader("user-agent", UserAgent);
+        request.AddHeader("x-client-id", clientId);
+        request.AddHeader("client-token", clientToken);
 
         return session.SendAsync(request, cancellationToken);
     }
@@ -92,6 +106,9 @@ public static class SpotifyHttp3Examples
     /// <c>cache-control</c> and <c>user-agent</c>. The <c>content-length</c> VALUE is a
     /// placeholder — the real one is recomputed from the body — so only its position here
     /// matters. A body with no <c>content-length</c> or <c>transfer-encoding</c> added throws.
+    /// <para>This is the 9.1.76 login5 image. The 9.1.86 capture carried login5 over HTTP/2,
+    /// so its h3 login image is not re-measured; the 9.1.86 spclient POST images are in
+    /// docs/USAGE.md section 7.</para>
     /// </remarks>
     public static Task<TlsResponse> PostLoginAsync(
         TlsSession session,

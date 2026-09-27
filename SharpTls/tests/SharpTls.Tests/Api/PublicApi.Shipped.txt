@@ -171,12 +171,12 @@ T: public static class SharpTls.ClientHelloProfiles
   M: public static SharpTls.ClientHelloProfile Custom(System.Action<SharpTls.ClientHelloBuilder> configure)
   M: public static SharpTls.ClientHelloProfile FromSpec(SharpTls.ClientHelloSpec spec)
   M: public static System.Void ApplySpotify917602050IOS260QuicClientHello(SharpTls.ClientHelloBuilder builder)
-  M: public static System.Void ApplySpotify917602050IOS270QuicClientHello(SharpTls.ClientHelloBuilder builder)
-  M: public static System.Void ApplySpotify917602050IOS270TcpClientHello(SharpTls.ClientHelloBuilder builder)
+  M: public static System.Void ApplySpotify918602428IOS270QuicClientHello(SharpTls.ClientHelloBuilder builder)
+  M: public static System.Void ApplySpotify918602428IOS270TcpClientHello(SharpTls.ClientHelloBuilder builder)
   P: public SharpTls.ClientHelloProfile ModernTls13 { get; }
   P: public SharpTls.ClientHelloProfile Spotify917602050IOS260Quic { get; }
-  P: public SharpTls.ClientHelloProfile Spotify917602050IOS270Quic { get; }
-  P: public SharpTls.ClientHelloProfile Spotify917602050IOS270Tcp { get; }
+  P: public SharpTls.ClientHelloProfile Spotify918602428IOS270Quic { get; }
+  P: public SharpTls.ClientHelloProfile Spotify918602428IOS270Tcp { get; }
 T: public sealed class SharpTls.ClientHelloSpec
   P: public SharpTls.ClientHelloGreasePolicy? GreasePolicy { get; }
   P: public SharpTls.Quic.TlsQuicTransportParameters? QuicTransportParameters { get; }
@@ -564,6 +564,18 @@ T: public readonly struct SharpTls.Quic.TlsQuicDatagramReceiveResult
   P: public System.Net.IPEndPoint RemoteEndPoint { get; }
 T: public sealed class SharpTls.Quic.TlsQuicDiscardKeysEvent : SharpTls.Quic.TlsQuicEvent
   P: public SharpTls.Quic.TlsQuicEncryptionLevel Level { get; }
+T: public enum SharpTls.Quic.TlsQuicDiscardReason : System.Int32
+  F: public const SharpTls.Quic.TlsQuicDiscardReason AuthenticationFailed = SharpTls.Quic.TlsQuicDiscardReason.AuthenticationFailed
+  F: public const SharpTls.Quic.TlsQuicDiscardReason ConnectionIdMismatchInDatagram = SharpTls.Quic.TlsQuicDiscardReason.ConnectionIdMismatchInDatagram
+  F: public const SharpTls.Quic.TlsQuicDiscardReason Duplicate = SharpTls.Quic.TlsQuicDiscardReason.Duplicate
+  F: public const SharpTls.Quic.TlsQuicDiscardReason HeaderProtectionFailed = SharpTls.Quic.TlsQuicDiscardReason.HeaderProtectionFailed
+  F: public const SharpTls.Quic.TlsQuicDiscardReason LongHeaderUnparseable = SharpTls.Quic.TlsQuicDiscardReason.LongHeaderUnparseable
+  F: public const SharpTls.Quic.TlsQuicDiscardReason MissingKeys = SharpTls.Quic.TlsQuicDiscardReason.MissingKeys
+  F: public const SharpTls.Quic.TlsQuicDiscardReason NoKeysForKeyPhase = SharpTls.Quic.TlsQuicDiscardReason.NoKeysForKeyPhase
+  F: public const SharpTls.Quic.TlsQuicDiscardReason None = SharpTls.Quic.TlsQuicDiscardReason.None
+  F: public const SharpTls.Quic.TlsQuicDiscardReason ShortHeaderUnparseable = SharpTls.Quic.TlsQuicDiscardReason.ShortHeaderUnparseable
+  F: public const SharpTls.Quic.TlsQuicDiscardReason ShorterThanTag = SharpTls.Quic.TlsQuicDiscardReason.ShorterThanTag
+  F: public const SharpTls.Quic.TlsQuicDiscardReason UnknownVersion = SharpTls.Quic.TlsQuicDiscardReason.UnknownVersion
 T: public sealed class SharpTls.Quic.TlsQuicEarlyDataContext
   P: public System.Byte[] TicketIdentity { get; }
   P: public System.String NegotiatedAlpn { get; }
@@ -586,6 +598,9 @@ T: public sealed class SharpTls.Quic.TlsQuicHandshakeCompletedEvent : SharpTls.Q
   P: public SharpTls.Protocol.NamedGroup Group { get; }
   P: public SharpTls.Protocol.TlsCipherSuite CipherSuite { get; }
   P: public System.String NegotiatedAlpn { get; }
+T: public enum SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening : System.Int32
+  F: public const SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening AtConnectionStart = SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart
+  F: public const SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening Lazy = SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening.Lazy
 T: public sealed class SharpTls.Quic.TlsQuicInitialSecrets : System.IDisposable
   M: public SharpTls.Quic.TlsQuicPacketProtectionKeys DeriveClientPacketProtectionKeys(SharpTls.Quic.TlsQuicVersion version)
   M: public SharpTls.Quic.TlsQuicPacketProtectionKeys DeriveServerPacketProtectionKeys(SharpTls.Quic.TlsQuicVersion version)
@@ -617,6 +632,9 @@ T: public enum SharpTls.Quic.TlsQuicQpackHuffmanPolicy : System.Int32
   F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy Always = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.Always
   F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy Never = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.Never
   F: public const SharpTls.Quic.TlsQuicQpackHuffmanPolicy ShorterOfTheTwo = SharpTls.Quic.TlsQuicQpackHuffmanPolicy.ShorterOfTheTwo
+T: public enum SharpTls.Quic.TlsQuicQpackInsertPolicy : System.Int32
+  F: public const SharpTls.Quic.TlsQuicQpackInsertPolicy Never = SharpTls.Quic.TlsQuicQpackInsertPolicy.Never
+  F: public const SharpTls.Quic.TlsQuicQpackInsertPolicy OnSecondUse = SharpTls.Quic.TlsQuicQpackInsertPolicy.OnSecondUse
 T: public enum SharpTls.Quic.TlsQuicSecretDirection : System.Int32
   F: public const SharpTls.Quic.TlsQuicSecretDirection Read = SharpTls.Quic.TlsQuicSecretDirection.Read
   F: public const SharpTls.Quic.TlsQuicSecretDirection Write = SharpTls.Quic.TlsQuicSecretDirection.Write

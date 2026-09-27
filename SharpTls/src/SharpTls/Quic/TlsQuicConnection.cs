@@ -5195,7 +5195,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             + "handshake failed before the buffer could be drained. "
             + "THIS IS A TIMEOUT, NOT A RETRANSMISSION: A3 is deferred, so nothing here "
             + "resents a lost packet and there is nothing to resend - recovering from one "
-            + "means starting a new attempt at the process level.");
+            + "means starting a new attempt at the process level. "
+            + $"DISCARD REASONS: {_receiver.DescribeDiscards()}. AuthenticationFailed on the "
+            + "server's first packet means its Initial keys were derived from a Destination "
+            + "Connection ID this attempt did not send, or the datagram belongs to another "
+            + "connection - through a SOCKS5 relay, a UDP association reused across "
+            + "connections looks exactly like that. ShortHeaderUnparseable or a short first "
+            + "octet with 0x40 set before any packet was processed is a stateless reset or "
+            + "a stray, which this attempt cannot tell apart before the handshake.");
 
     private async ValueTask<TlsQuicDatagramReceiveResult> ReceiveWithinDeadlineAsync(
         byte[] buffer, CancellationToken cancellationToken)

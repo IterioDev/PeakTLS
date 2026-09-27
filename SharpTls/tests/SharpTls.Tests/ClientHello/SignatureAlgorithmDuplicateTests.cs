@@ -212,7 +212,7 @@ public sealed class SignatureAlgorithmDuplicateTests
         // tests above could still pass on a hand-built builder while the shipped one regressed.
         // The Spotify iOS QUIC capture carries ten entries with 0x0805 twice.
         var codepoints = ReadSigalgCodepoints(
-            ClientHelloProfiles.Spotify917602050IOS270Quic
+            ClientHelloProfiles.Spotify918602428IOS270Quic
                 .BuildDeterministicForTesting("example.com", [7, 7, 4, 2]));
 
         Assert.Equal(10, codepoints.Length);

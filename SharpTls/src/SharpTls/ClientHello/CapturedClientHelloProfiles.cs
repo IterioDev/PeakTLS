@@ -10,10 +10,12 @@ namespace SharpTls;
 public static partial class ClientHelloProfiles
 {
     /// <summary>
-    /// Gets the QUIC ClientHello of Spotify 9.1.76.2050 on iOS 27.0, iPhone17,2, as recorded
-    /// on the wire. Decoded from the Initial CRYPTO frames of 80 client connections to
-    /// <c>*.spotify.com</c> across two hotspot captures — no proxy, no keylog, because RFC 9001
-    /// s5.2 derives Initial keys from the clear-text Destination Connection ID. JA4
+    /// Gets the QUIC ClientHello of Spotify 9.1.86.2428 on iOS 27.0, iPhone17,2, as recorded
+    /// on the wire. First decoded from the Initial CRYPTO frames of 80 client connections of
+    /// the 9.1.76.2050 build to <c>*.spotify.com</c> across two hotspot captures — no proxy, no
+    /// keylog, because RFC 9001 s5.2 derives Initial keys from the clear-text Destination
+    /// Connection ID — then found byte-identical in 33 of 33 hellos of a 2026-09-26 passive
+    /// capture of 9.1.86.2428, which is the build the name carries. JA4
     /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>, reproduced live.
     /// <para>
     /// JA3 is <c>48d08f334704479db85d91df80039756</c>. A second image,
@@ -38,18 +40,18 @@ public static partial class ClientHelloProfiles
     /// QUIC. Do not derive one from the other.
     /// </para>
     /// </summary>
-    public static ClientHelloProfile Spotify917602050IOS270Quic { get; } =
-        Custom(ApplySpotify917602050IOS270QuicClientHello);
+    public static ClientHelloProfile Spotify918602428IOS270Quic { get; } =
+        Custom(ApplySpotify918602428IOS270QuicClientHello);
 
     /// <summary>
-    /// Applies the Spotify 9.1.76.2050 iOS 27.0 QUIC ClientHello shape to a builder.
+    /// Applies the Spotify 9.1.86.2428 iOS 27.0 QUIC ClientHello shape to a builder.
     /// </summary>
     /// <param name="builder">The builder to configure.</param>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
     /// <remarks>Public because a QUIC session configures its ClientHello through a builder
     /// callback rather than through a <see cref="ClientHelloProfile"/> — the profile above and
     /// that callback have to be the same shape, so they are the same method.</remarks>
-    public static void ApplySpotify917602050IOS270QuicClientHello(ClientHelloBuilder builder) =>
+    public static void ApplySpotify918602428IOS270QuicClientHello(ClientHelloBuilder builder) =>
         ApplySpotifyIosQuicClientHello(
             builder,
             [
@@ -64,7 +66,7 @@ public static partial class ClientHelloProfiles
     /// Decoded from the Initial CRYPTO frames of a first-party capture to
     /// <c>login5.spotify.com</c>. JA3 <c>2f9431e877b01e163774ae4ae0df9ded</c>, JA4
     /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c> — the same JA4 as
-    /// <see cref="Spotify917602050IOS270Quic"/>, which sorts the cipher list and cannot see the
+    /// <see cref="Spotify918602428IOS270Quic"/>, which sorts the cipher list and cannot see the
     /// difference.
     /// <para>
     /// TWO DIFFERENCES FROM THE iOS 27 PROFILE, AND NOTHING ELSE. The cipher order is 0x1302,
@@ -238,15 +240,20 @@ public static partial class ClientHelloProfiles
     }
 
     /// <summary>
-    /// Gets the TCP ClientHello of Spotify 9.1.76.2050 on iOS 27.0, iPhone17,2 — the hello its
-    /// HTTP/2 legs dial with, where <see cref="Spotify917602050IOS270Quic"/> is the QUIC one.
+    /// Gets the TCP ClientHello of Spotify 9.1.86.2428 on iOS 27.0, iPhone17,2 — the hello its
+    /// HTTP/2 legs dial with, where <see cref="Spotify918602428IOS270Quic"/> is the QUIC one.
     /// </summary>
     /// <remarks>
-    /// <para>TRANSCRIBED, NOT CAPTURED HERE, and that distinction is what this catalogue is
-    /// organised around. The QUIC profile above is decoded from first-party pcapng; this one is
-    /// read from a fingerprint record supplied in bogdanfinn/tls-client's JSON format, whose
-    /// collection method is not recorded. Everything below is derivable from that record except
-    /// where a comment says otherwise. Pin it against your own capture before trusting it.</para>
+    /// <para>FIRST-PARTY CAPTURED SINCE 2026-09-26, TRANSCRIBED BEFORE THAT. This shape was
+    /// first read from a fingerprint record in bogdanfinn/tls-client's JSON format, whose
+    /// collection method was never recorded. A passive pcapng capture of 9.1.86.2428 on iOS
+    /// 27.0 (iPhone17,2) then showed it on 10 of the app's 15 TCP connections —
+    /// <c>clienttoken</c>, <c>spclient.wg</c>, <c>gew1-spclient</c>, <c>login5</c>,
+    /// <c>links.tospotify.com</c>, <c>audio-fa.scdn.co</c>, <c>image-cdn-ak.spotifycdn.com</c>.
+    /// The record was right on every axis but one: the TLS 1.3 trio is <c>0x1302, 0x1303,
+    /// 0x1301</c>, the QUIC order, not the <c>0x1302, 0x1301, 0x1303</c> the record carried.
+    /// Corrected here. The other five connections are the in-app web view's WebKit stack — a
+    /// different hello, out of scope for this catalogue.</para>
     /// <para>THIRTEEN CIPHER SUITES TO THE QUIC HELLO'S THREE, a 32-byte legacy_session_id where
     /// QUIC sends an empty one, TLS 1.2 in supported_versions, and the 1.2-era extensions RFC
     /// 9001 s8.4 forbids over QUIC — extended_master_secret, renegotiation_info and
@@ -257,23 +264,22 @@ public static partial class ClientHelloProfiles
     /// complete on. That is what the real client's bytes say, and the app negotiates 1.3 in
     /// practice; an endpoint answering 1.2 fails closed rather than downgrading.</para>
     /// </remarks>
-    public static ClientHelloProfile Spotify917602050IOS270Tcp { get; } =
-        Custom(ApplySpotify917602050IOS270TcpClientHello);
+    public static ClientHelloProfile Spotify918602428IOS270Tcp { get; } =
+        Custom(ApplySpotify918602428IOS270TcpClientHello);
 
-    /// <summary>Applies the Spotify 9.1.76.2050 iOS TCP ClientHello shape to a builder.</summary>
+    /// <summary>Applies the Spotify 9.1.86.2428 iOS 27.0 TCP ClientHello shape to a builder.</summary>
     /// <param name="builder">The builder to configure.</param>
     /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
-    public static void ApplySpotify917602050IOS270TcpClientHello(ClientHelloBuilder builder)
+    public static void ApplySpotify918602428IOS270TcpClientHello(ClientHelloBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
         _ = builder
-            // INFERRED FROM THE QUIC CAPTURE OF THE SAME APP, NOT FROM THE RECORD. A JA3 string
-            // records that a GREASE slot is present, never whether two slots drew the SAME
-            // value, so the equality pattern is unmeasurable from this source. The 80-connection
-            // QUIC capture of this build showed supported_groups and key_share sharing a value
-            // while every other slot drew its own; one BoringSSL generator produces both hellos,
-            // so that pattern is carried over. Recapture if it matters to you.
+            // MEASURED ON THE TCP PATH NOW, INFERRED FROM QUIC BEFORE. The record could not
+            // show whether two GREASE slots drew the same value; the 2026-09-26 capture's 14
+            // exactly-listed TCP hellos all show supported_groups and key_share sharing one value
+            // while cipher_suites, supported_versions and the two extension slots each draw
+            // their own, agreeing only at the 1-in-16 chance rate. Same pattern as the QUIC hello.
             .WithGrease(ClientHelloGreasePolicy.CreateWithSecondaryExtension(0, 1, 2, 2, 3, 4))
             .WithSecondaryGreaseExtension([0x00])
             .WithGreaseKeyShareBody([0x00])
@@ -283,11 +289,14 @@ public static partial class ClientHelloProfiles
             // is one of the things that keeps the two JA3s apart.
             .WithSessionId(null)
 
-            // The three 1.3 suites lead, then the ten 1.2 suites in the record's order.
+            // The three 1.3 suites lead — 0x1302, 0x1303, 0x1301, the same trio order as the
+            // QUIC hello, in 17 of 17 captured hellos of this shape. The transcribed record had
+            // 0x1301 second; that was the record's error, not a build difference. Then the ten
+            // 1.2 suites, ECDSA and RSA interleaved per key size, in the captured order.
             .WithCipherSuites(
                 TlsCipherSuite.TlsAes256GcmSha384,
-                TlsCipherSuite.TlsAes128GcmSha256,
                 TlsCipherSuite.TlsChaCha20Poly1305Sha256,
+                TlsCipherSuite.TlsAes128GcmSha256,
                 TlsCipherSuite.TlsEcdheEcdsaWithAes256GcmSha384,
                 TlsCipherSuite.TlsEcdheRsaWithAes256GcmSha384,
                 TlsCipherSuite.TlsEcdheEcdsaWithAes128GcmSha256,
@@ -306,7 +315,8 @@ public static partial class ClientHelloProfiles
                 NamedGroup.Secp384r1,
                 NamedGroup.Secp521r1)
 
-            // Two real shares, matching the record's keyShareCurves: the hybrid and X25519.
+            // Two real shares, 1216 and 32 bytes behind the 1-byte GREASE entry — key_share is
+            // 1263 bytes in every captured hello.
             .WithKeyShares(NamedGroup.X25519MlKem768, NamedGroup.X25519)
 
             // GREASE, 1.3, 1.2 — the 1.2 entry is why the JA3 version field reads 771.
@@ -331,8 +341,11 @@ public static partial class ClientHelloProfiles
 
             .WithAlpn("h2", "http/1.1")
 
-            // The record's extension order, all fifteen slots. Six have no built-in kind and go
-            // out as raw bodies; the three the QUIC hello also carries use the same bytes.
+            // The captured extension order, all fifteen slots, identical in 53 of 53 TCP hellos.
+            // Six have no built-in kind and go out as raw bodies; the three the QUIC hello also
+            // carries use the same bytes. Payload lengths match the capture: status_request 5,
+            // compress_certificate 3, renegotiation_info 1, ec_point_formats 2, SCT and
+            // extended_master_secret 0, first GREASE extension 0 and the second 1.
             .WithExtensionLayout(
                 ClientHelloExtensionSpec.BuiltIn(ClientHelloExtensionKind.Grease),
                 ClientHelloExtensionSpec.BuiltIn(ClientHelloExtensionKind.ServerName),

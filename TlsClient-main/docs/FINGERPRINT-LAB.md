@@ -40,7 +40,7 @@ rather than silently weakened.
 ## Strict JSON interchange
 
 ```csharp
-string json = TlsClientHello.ExportJson(TlsProfiles.Spotify917602050IOS270Tcp);
+string json = TlsClientHello.ExportJson(TlsProfiles.Spotify918602428IOS270Tcp);
 TlsProfile restored = TlsClientHello.ImportJson("reviewed-profile", json);
 ```
 
@@ -53,7 +53,7 @@ and input limits. JSON contains reusable offer policy only, never connection sec
 ```csharp
 byte[] testSeed = SHA256.HashData("my-fixture-v1"u8);
 TlsClientHelloSnapshot snapshot = TlsClientHello.BuildSnapshotForTesting(
-    TlsProfiles.Spotify917602050IOS270Tcp,
+    TlsProfiles.Spotify918602428IOS270Tcp,
     "fixture.example",
     testSeed,
     TlsHttpVersionPolicy.PreferHttp2);
@@ -95,7 +95,7 @@ TlsHttpBehaviorProfile behavior = TlsHttpBehaviorProfile.Capture(
 string json = behavior.ExportJson();
 TlsHttpBehaviorProfile restored = TlsHttpBehaviorProfile.ImportJson(json);
 
-var target = new TlsSessionOptions { Profile = TlsProfiles.Spotify917602050IOS270Tcp };
+var target = new TlsSessionOptions { Profile = TlsProfiles.Spotify918602428IOS270Tcp };
 restored.ApplyTo(target);
 ```
 

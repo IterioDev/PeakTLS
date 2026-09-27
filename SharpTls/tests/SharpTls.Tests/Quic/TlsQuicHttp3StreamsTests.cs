@@ -442,11 +442,14 @@ public sealed class TlsQuicHttp3StreamsTests
         //
         // C16 TOOK THE ENCODER STREAM OUT OF THIS TEST. Type 0x02 used to be here beside
         // 0x03 and is now parsed as s4.3 instructions - see ThePeersEncoderStreamDrivesThe
-        // DynamicTable. The DECODER stream is still discarded, for the reason
-        // TryTakeStreamType gives: s4.4's instructions acknowledge OUR encoder's dynamic
-        // table, and this client's encoder is static-only. 0x21 stands in for the unknown
-        // types s6.2's "MUST NOT consider unknown stream types to be a connection error"
-        // covers, so the merged flag still has two members to merge.
+        // DynamicTable. THE DYNAMIC-TABLE ENCODER TOOK THE DECODER STREAM OUT OF THE DISCARD
+        // ARM TOO: its bytes are s4.4 instructions now (TryReadPeerDecoderStream), so the
+        // bytes below are Stream Cancellations - `01xxxxxx` - for streams with nothing
+        // outstanding, which s4.4.2 makes legal no-ops. The assertion for that stream is
+        // therefore "instructions, not frames": the same 0x00 0x01 0xff that would be a DATA
+        // frame ahead of SETTINGS is never seen by the frame parser. 0x21 stands in for the
+        // unknown types s6.2's "MUST NOT consider unknown stream types to be a connection
+        // error" covers.
         //
         // THE SECOND DELIVERY IS WHAT MAKES THE DROP OBSERVABLE. Bytes that arrive after the
         // type varint has been consumed are the ones an implementation that merely skipped
@@ -456,13 +459,13 @@ public sealed class TlsQuicHttp3StreamsTests
         var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
 
         Deliver(set, PeerUni0, [0x21, 0x00, 0x01, 0xff]);
-        Deliver(set, PeerUni1, [0x03, 0x00, 0x01, 0xff]);
+        Deliver(set, PeerUni1, [0x03, 0x44, 0x45, 0x46]);
         Assert.True(http3.TryProcessPeerStreams(out var first));
         Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, first);
 
-        // A SECOND DELIVERY ON EACH, still dropped, still not parsed as frames.
+        // A SECOND DELIVERY ON EACH, still dropped / still instructions, still not frames.
         Deliver(set, PeerUni0, [0x00, 0x01, 0xff], offset: 4);
-        Deliver(set, PeerUni1, [0x00, 0x01, 0xff], offset: 4);
+        Deliver(set, PeerUni1, [0x47, 0x48, 0x49], offset: 4);
         Assert.True(http3.TryProcessPeerStreams(out var second));
         Assert.Equal((ulong)TlsQuicHttp3ErrorCode.None, second);
 
@@ -1457,8 +1460,12 @@ public sealed class TlsQuicHttp3StreamsTests
     // s4.4's instructions acknowledge OUR encoder's dynamic table, and this client's encoder
     // is static-only. A test that only checked "0x02 is kept" would pass against an
     // implementation that kept 0x03 too.
+    //
+    // 0x03 LEFT THIS THEORY WITH THE DYNAMIC-TABLE ENCODER. The peer's decoder stream is now
+    // parsed as s4.4 instructions (TryReadPeerDecoderStream), and these bytes read as one -
+    // the capacity instruction's 0x3f is a Stream Cancellation - so its row lives in
+    // ThePeersDecoderStreamDrivesTheEncoderPolicy instead.
     [Theory]
-    [InlineData(0x03)]
     [InlineData(0x01)]
     [InlineData(0x21)]
     public void EveryOtherPeerStreamTypeIsStillDiscarded(byte streamType)
@@ -1555,6 +1562,237 @@ public sealed class TlsQuicHttp3StreamsTests
     // a non-zero SETTINGS_QPACK_MAX_TABLE_CAPACITY without asking for one. SharpTls ships no
     // persona now and the default is empty - RFC 9114 s7.2.4's "zero or more parameters" -
     // which is the right default and a useless fixture for a table test.
+    // ------------------------------------------------------------------
+    // The dynamic-table encoder's half of this layer: the encoder stream, lazy opening, and
+    // the peer's decoder stream. docs/superpowers/specs/2026-09-27-qpack-dynamic-table-
+    // encoder-design.md s3.4; the byte images are the capture's (reference doc s6).
+    // ------------------------------------------------------------------
+
+    private static TlsQuicHttp3Spec SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening opening) => new()
+    {
+        Settings = TestHttp3Settings.DatagramCapable,
+        QpackEncoderDynamicTableCapacity = 4096,
+        QpackInsertPolicy = TlsQuicQpackInsertPolicy.OnSecondUse,
+        UnidirectionalStreamOpening = opening,
+    };
+
+    // A peer control stream carrying SETTINGS with QPACK_MAX_TABLE_CAPACITY 4096 (a 2-byte
+    // varint, 0x5000) and QPACK_BLOCKED_STREAMS 16 - the server's answer in the capture, less
+    // the two entries this layer does not read.
+    private static readonly byte[] PeerSettingsCapacity4096 =
+        [0x00, 0x04, 0x05, 0x01, 0x50, 0x00, 0x07, 0x10];
+
+    private static string Hex(ReadOnlyMemory<byte> bytes) => Convert.ToHexString(bytes.Span);
+
+    [Fact]
+    public void LazyOpeningSendsOnlyTheControlStreamAtStart()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.Lazy), set);
+
+        http3.OpenLocalStreams();
+        var frames = set.TakePendingFrames();
+
+        var frame = Assert.Single(frames);
+        Assert.Equal(2UL, frame.StreamId);
+        Assert.Equal(0x00, frame.Data.Span[0]);
+        Assert.Null(http3.LocalEncoderStream);
+        Assert.Null(http3.LocalDecoderStream);
+    }
+
+    [Fact]
+    public void ThePeersSettingsOpenTheEncoderStreamWithTheCapacityInstruction()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.Lazy), set);
+        http3.OpenLocalStreams();
+        set.TakePendingFrames();
+
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0UL, error);
+
+        // The capture's `02 3f e1 1f`: type byte and Set Dynamic Table Capacity 4096 in ONE
+        // frame, on the second client-initiated unidirectional stream.
+        var frame = Assert.Single(set.TakePendingFrames());
+        Assert.Equal(6UL, frame.StreamId);
+        Assert.Equal("023FE11F", Hex(frame.Data));
+        Assert.NotNull(http3.LocalEncoderStream);
+        Assert.True(http3.EncoderPolicy.CapacitySent);
+    }
+
+    [Fact]
+    public void PeerSettingsThatArriveBeforeTheOpeningFlightProduceTheCapacityAfterIt()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.Lazy), set);
+
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out _));
+        Assert.Empty(set.TakePendingFrames());
+        Assert.False(http3.EncoderPolicy.CapacitySent);
+
+        http3.OpenLocalStreams();
+        var frames = set.TakePendingFrames();
+
+        Assert.Equal(2, frames.Count);
+        Assert.Equal(2UL, frames[0].StreamId);
+        Assert.Equal(6UL, frames[1].StreamId);
+        Assert.Equal("023FE11F", Hex(frames[1].Data));
+    }
+
+    [Fact]
+    public void UnderAtConnectionStartTheCapacityTravelsOnTheAlreadyOpenEncoderStream()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart), set);
+        http3.OpenLocalStreams();
+        var opening = set.TakePendingFrames();
+        Assert.Equal(3, opening.Count);
+        Assert.Equal("02", Hex(opening[1].Data));
+        Assert.NotNull(http3.LocalEncoderStream);
+
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out _));
+
+        var frame = Assert.Single(set.TakePendingFrames());
+        Assert.Equal(6UL, frame.StreamId);
+        Assert.Equal("3FE11F", Hex(frame.Data));
+    }
+
+    [Fact]
+    public void ACapacityOfZeroOnEitherSideOpensNoEncoderStreamUnderLazy()
+    {
+        // Ours is zero: the library default spec, lazily opened.
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(
+            new TlsQuicHttp3Spec
+            {
+                Settings = TestHttp3Settings.DatagramCapable,
+                UnidirectionalStreamOpening = TlsQuicHttp3UnidirectionalStreamOpening.Lazy,
+            },
+            set);
+        http3.OpenLocalStreams();
+        set.TakePendingFrames();
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out _));
+        Assert.Empty(set.TakePendingFrames());
+        Assert.Null(http3.LocalEncoderStream);
+
+        // Theirs is zero: a peer SETTINGS frame with no QPACK_MAX_TABLE_CAPACITY at all.
+        var other = Set();
+        var lazy = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.Lazy), other);
+        lazy.OpenLocalStreams();
+        other.TakePendingFrames();
+        Deliver(other, PeerUni0, [0x00, 0x04, 0x00]);
+        Assert.True(lazy.TryProcessPeerStreams(out _));
+        Assert.Empty(other.TakePendingFrames());
+        Assert.Null(lazy.LocalEncoderStream);
+        Assert.False(lazy.EncoderPolicy.CapacitySent);
+    }
+
+    [Fact]
+    public void TheDecoderStreamOpensLazilyWithItsFirstInstructionAndAfterTheEncoderStream()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.Lazy), set);
+        http3.OpenLocalStreams();
+        set.TakePendingFrames();
+
+        // The peer's encoder stream inserts one entry before its SETTINGS are processed, so
+        // our Insert Count Increment is due while our own capacity has not gone out yet.
+        Deliver(set, PeerUni1, [0x02, .. SetCapacity(4096), .. Insert("x-a", "1")]);
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0UL, error);
+
+        var frames = set.TakePendingFrames();
+        Assert.Equal(2, frames.Count);
+        Assert.Equal(6UL, frames[0].StreamId);      // the encoder stream first, bare
+        Assert.Equal("02", Hex(frames[0].Data));
+        Assert.Equal(10UL, frames[1].StreamId);     // then the decoder stream with its ICI
+        Assert.Equal("0301", Hex(frames[1].Data));
+        Assert.NotNull(http3.LocalDecoderStream);
+
+        // The capacity, when it comes, rides the encoder stream that already exists.
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out _));
+        var capacity = Assert.Single(set.TakePendingFrames());
+        Assert.Equal(6UL, capacity.StreamId);
+        Assert.Equal("3FE11F", Hex(capacity.Data));
+    }
+
+    [Fact]
+    public void ThePeersDecoderStreamDrivesTheEncoderPolicy()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(SpotifyQpackSpec(TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart), set);
+        http3.OpenLocalStreams();
+        Deliver(set, PeerUni0, PeerSettingsCapacity4096);
+        Assert.True(http3.TryProcessPeerStreams(out _));
+
+        var policy = http3.EncoderPolicy;
+        List<(byte[], byte[])> lines =
+        [
+            ("x-a"u8.ToArray(), "1"u8.ToArray()),
+            ("x-b"u8.ToArray(), "2"u8.ToArray()),
+        ];
+        policy.Commit(policy.Plan(lines), 0);
+        var plan = policy.Plan(lines);
+        policy.Commit(plan, 4);
+        Assert.Equal(2UL, plan.RequiredInsertCount);
+        Assert.Equal(1, policy.Table!.BlockedStreamCount);
+
+        // s4.4.1 Section Acknowledgment for stream 4: `1xxxxxxx` with 4.
+        Deliver(set, PeerUni1, [0x03, 0x84]);
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0UL, error);
+        Assert.Equal(2UL, policy.Table.KnownReceivedCount);
+        Assert.Equal(0, policy.Table.BlockedStreamCount);
+
+        // s4.4.2 Stream Cancellation for a stream with nothing outstanding: legal, a no-op.
+        Deliver(set, PeerUni1, [0x44], offset: 2);
+        Assert.True(http3.TryProcessPeerStreams(out error));
+        Assert.Equal(0UL, error);
+
+        // s4.4.3 Insert Count Increment of zero: QPACK_DECODER_STREAM_ERROR.
+        Deliver(set, PeerUni1, [0x00], offset: 3);
+        Assert.False(http3.TryProcessPeerStreams(out error));
+        Assert.Equal(0x0202UL, error);
+    }
+
+    [Fact]
+    public void ASectionAcknowledgmentForAStreamWithNothingOutstandingIsThePeersError()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
+        http3.OpenLocalStreams();
+
+        Deliver(set, PeerUni0, [0x03, 0x84]);
+
+        Assert.False(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0x0202UL, error);
+    }
+
+    [Fact]
+    public void APartialDecoderInstructionWaitsAndAnOverlongOneIsRefused()
+    {
+        var set = Set();
+        var http3 = new TlsQuicHttp3Streams(HarnessSpec(), set);
+        http3.OpenLocalStreams();
+
+        // A Section Acknowledgment whose 7-bit prefix is full and whose continuation has not
+        // arrived: nothing concluded, nothing failed.
+        Deliver(set, PeerUni0, [0x03, 0xFF]);
+        Assert.True(http3.TryProcessPeerStreams(out var error));
+        Assert.Equal(0UL, error);
+
+        // Twelve continuation octets with the high bit set: past MaximumIntegerEncodedLength,
+        // which is the one ceiling this stream has.
+        Deliver(set, PeerUni0, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80], offset: 2);
+        Assert.False(http3.TryProcessPeerStreams(out error));
+        Assert.Equal(0x0202UL, error);
+    }
+
     private static TlsQuicHttp3Spec HarnessSpec() =>
         new() { Settings = TestHttp3Settings.DatagramCapable };
 

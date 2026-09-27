@@ -20,7 +20,7 @@ public sealed class SpotifyIosQuicCaptureParityTests
     public void TheProfileReproducesTheCapturedHelloByteForByte()
     {
         var captured = Convert.FromHexString(CapturedHelloHex);
-        var built = ClientHelloProfiles.Spotify917602050IOS270Quic
+        var built = ClientHelloProfiles.Spotify918602428IOS270Quic
             .BuildDeterministicForTesting("login5.spotify.com", [7, 7, 4, 2]);
 
         // Length first: it is the one assertion whose failure message is readable, and a profile
@@ -64,7 +64,7 @@ public sealed class SpotifyIosQuicCaptureParityTests
     {
         var ios26 = ClientHelloProfiles.Spotify917602050IOS260Quic
             .BuildDeterministicForTesting("login5.spotify.com", [7, 7, 4, 2]);
-        var ios27 = ClientHelloProfiles.Spotify917602050IOS270Quic
+        var ios27 = ClientHelloProfiles.Spotify918602428IOS270Quic
             .BuildDeterministicForTesting("login5.spotify.com", [7, 7, 4, 2]);
 
         Assert.Equal(10, ios27.Length - ios26.Length);

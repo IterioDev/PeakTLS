@@ -576,7 +576,9 @@ internal sealed class TlsQuicHttp3Connection
     /// <para>THE ORDER IS DELIBERATE: everything that can refuse runs BEFORE
     /// <see cref="TlsQuicStreamSet.OpenBidirectional"/>, because that call spends an ordinal
     /// and RFC 9000 s3.2 makes a spent ordinal a stream the peer opens implicitly - a hole
-    /// nothing would ever send to.</para>
+    /// nothing would ever send to. The QPACK plan is committed only after it, for the same
+    /// shape of reason: an insert the peer is never told of is a table the two ends disagree
+    /// about (<see cref="TlsQuicQpackEncoderPolicy"/>).</para>
     /// </remarks>
     /// <param name="request">The request to encode.</param>
     /// <param name="refusal">Why nothing was opened, or
@@ -623,8 +625,12 @@ internal sealed class TlsQuicHttp3Connection
             return null;
         }
 
+        // PLANNED, NOT COMMITTED. The QPACK policy decides here what this request inserts and
+        // references, and nothing below this line changes the table until the stream is open:
+        // every refusal between here and OpenBidirectional leaves the peer never having been
+        // told of an insert it will not receive.
         var frame = new List<byte>();
-        if (!request.TryEncode(frame, _spec, out malformed))
+        if (!request.TryEncodeWithPolicy(frame, _spec, _streams.EncoderPolicy, out var plan, out malformed))
         {
             refusal = TlsQuicHttp3RequestRefusal.Malformed;
             return null;
@@ -677,6 +683,19 @@ internal sealed class TlsQuicHttp3Connection
         }
 
         var stream = _connection.Streams.OpenBidirectional();
+
+        // COMMIT, THEN THE ENCODER STREAM, THEN THE REQUEST. RFC 9204 s2.1.1's references are
+        // recorded under the stream id the section will travel on, and the insert
+        // instructions are queued on the encoder stream BEFORE the HEADERS frame so that they
+        // precede it in send order - the imitated client's insert block is the packet before
+        // its HEADERS. Whether the packetiser keeps them in separate packets is its own
+        // choice; the ORDER is fixed here.
+        if (plan is not null)
+        {
+            _streams.EncoderPolicy.Commit(plan, stream.Id);
+            _streams.SendEncoderInstructions(plan.EncoderStreamBytes);
+        }
+
         _connection.Streams.Send(stream, frame.ToArray(), fin: true);
 
         // request.Method IS PASSED, and it is the one place it can be. RFC 9110 s6.4.1's

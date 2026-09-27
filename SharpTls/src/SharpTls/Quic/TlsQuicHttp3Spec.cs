@@ -214,6 +214,13 @@ internal sealed class TlsQuicHttp3Spec
     /// checkable rather than copied.</remarks>
     internal const ulong H3DatagramIdentifier = 0x33;
 
+    /// <summary>The largest <see cref="QpackEncoderDynamicTableCapacity"/> accepted: what a
+    /// four-byte varint carries, 2^30 - 1.</summary>
+    /// <remarks>Not a capture value. A capacity is a varint that runs to 2^62 - 1 on the wire;
+    /// this library bounds the knob to an int-sized number, and no client this repository has
+    /// measured announces more than 4096.</remarks>
+    internal const int MaximumQpackEncoderDynamicTableCapacity = (1 << 30) - 1;
+
     /// <summary>The three unidirectional streams RFC 9114 s6.2 requires an endpoint to be
     /// able to open, in the order this client opens them.</summary>
     /// <remarks>PLACEHOLDER. See <see cref="UnidirectionalStreamOpenOrder"/>.</remarks>
@@ -340,6 +347,10 @@ internal sealed class TlsQuicHttp3Spec
         CapturePseudoHeaderOrder;
     private readonly TlsQuicQpackNameMatchPolicy _qpackNameMatchPolicy =
         TlsQuicQpackNameMatchPolicy.NameReference;
+    private readonly int _qpackEncoderDynamicTableCapacity;
+    private readonly TlsQuicQpackInsertPolicy _qpackInsertPolicy = TlsQuicQpackInsertPolicy.Never;
+    private readonly TlsQuicHttp3UnidirectionalStreamOpening _unidirectionalStreamOpening =
+        TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart;
     private readonly int _maximumBufferedControlStreamBytes =
         DefaultMaximumBufferedControlStreamBytes;
     private readonly int? _maximumBufferedEncoderStreamBytes;
@@ -722,6 +733,86 @@ internal sealed class TlsQuicHttp3Spec
     /// TlsQuicHttp3RequestTests.TheReservedFrameIsPresentOnlyWhenTheSpecAsks.</para>
     /// </remarks>
     internal bool SendReservedFramesOnRequestStreams { get; init; }
+
+    /// <summary>Gets the dynamic table capacity this client's QPACK encoder announces, in
+    /// octets, or 0 for the static-only encoder.</summary>
+    /// <remarks>
+    /// <para>DEFAULT 0, AND THAT IS RFC 9204's OWN DEFAULT, NOT A PLACEHOLDER. s3.2.3: with a
+    /// maximum table capacity of zero "the encoder MUST NOT insert entries into the dynamic
+    /// table and MUST NOT send any encoder instructions on the encoder stream", and s5 makes
+    /// the peer's maximum default to zero. A client that never touches its dynamic table is
+    /// the conforming default; every request it sends carries the constant <c>00 00</c> prefix
+    /// that every section this library sent before this knob existed carried.</para>
+    /// <para>The announced capacity is the smaller of this and the peer's
+    /// <c>SETTINGS_QPACK_MAX_TABLE_CAPACITY</c> (s3.2.3 forbids more), sent once the peer's
+    /// SETTINGS arrive. The measured client announces 4096 against a server advertising
+    /// 4096; what it does against a larger maximum is unmeasured, so a preset that pins 4096
+    /// is stating the measurement, not its ceiling.</para>
+    /// <para>Read by <see cref="TlsQuicQpackEncoderPolicy"/>.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Negative, or past the 2^30 - 1 a
+    /// four-byte varint can carry.</exception>
+    internal int QpackEncoderDynamicTableCapacity
+    {
+        get => _qpackEncoderDynamicTableCapacity;
+        init
+        {
+            if (value < 0 || value > MaximumQpackEncoderDynamicTableCapacity)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(QpackEncoderDynamicTableCapacity),
+                    value,
+                    "A QPACK dynamic table capacity is a variable-length integer; this "
+                        + "library bounds it to what four bytes carry, 0 to 2^30 - 1.");
+            }
+
+            _qpackEncoderDynamicTableCapacity = value;
+        }
+    }
+
+    /// <summary>Gets when the QPACK encoder inserts a request header into its dynamic
+    /// table.</summary>
+    /// <remarks>Default <see cref="TlsQuicQpackInsertPolicy.Never"/>, for the reason
+    /// <see cref="QpackEncoderDynamicTableCapacity"/> defaults to 0. Read by
+    /// <see cref="TlsQuicQpackEncoderPolicy"/>; inert while the capacity is 0.</remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Not a defined
+    /// <see cref="TlsQuicQpackInsertPolicy"/>.</exception>
+    internal TlsQuicQpackInsertPolicy QpackInsertPolicy
+    {
+        get => _qpackInsertPolicy;
+        init
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(QpackInsertPolicy), value, "Not a defined insert policy.");
+            }
+
+            _qpackInsertPolicy = value;
+        }
+    }
+
+    /// <summary>Gets when this client opens its QPACK encoder and decoder streams.</summary>
+    /// <remarks>Default <see cref="TlsQuicHttp3UnidirectionalStreamOpening.AtConnectionStart"/>,
+    /// which is what every connection this library opened before the knob existed did; the
+    /// measured client is <see cref="TlsQuicHttp3UnidirectionalStreamOpening.Lazy"/>. Read by
+    /// <see cref="TlsQuicHttp3Streams.OpenLocalStreams"/>.</remarks>
+    /// <exception cref="ArgumentOutOfRangeException">Not a defined
+    /// <see cref="TlsQuicHttp3UnidirectionalStreamOpening"/>.</exception>
+    internal TlsQuicHttp3UnidirectionalStreamOpening UnidirectionalStreamOpening
+    {
+        get => _unidirectionalStreamOpening;
+        init
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(UnidirectionalStreamOpening), value, "Not a defined stream opening.");
+            }
+
+            _unidirectionalStreamOpening = value;
+        }
+    }
 
     /// <summary>Gets how many bytes of the peer's control stream this endpoint will hold
     /// unparsed before closing the connection with H3_EXCESSIVE_LOAD.</summary>

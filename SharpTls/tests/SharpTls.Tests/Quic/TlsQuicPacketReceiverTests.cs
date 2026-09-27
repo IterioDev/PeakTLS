@@ -59,6 +59,47 @@ public sealed class TlsQuicPacketReceiverTests
 
     // ---------------------------------------------------------------- A.3, leg 1
 
+    // The handshake deadline's message reads these. A.3's server Initial with its last octet
+    // flipped is a packet the AEAD rejects - the shape a stray or a differently-keyed Initial
+    // has on the wire - and it must be named as such, at its level, with its size and first
+    // octet, rather than folded into "1 packet(s) discarded".
+    [Fact]
+    public void ADiscardIsRecordedWithItsReasonLevelSizeAndFirstOctet()
+    {
+        using var keys = ServerInitialKeys();
+        using var receiver = new TlsQuicPacketReceiver(Version1, destinationConnectionIdLength: 0);
+        InstallInitial(receiver, keys);
+
+        Assert.Equal(TlsQuicDiscardReason.None, receiver.FirstDiscardReason);
+        Assert.Equal("none", receiver.DescribeDiscards());
+
+        var datagram = Convert.FromHexString(TlsQuicPacketProtectionTests.A3FullProtectedPacketHex);
+        datagram[^1] ^= 0xFF;
+        var recorder = new Recorder(new TlsQuicCryptoStreamReassembler(4096));
+
+        var result = receiver.Receive(datagram, recorder.Handle);
+
+        Assert.Equal(0, result.Processed);
+        Assert.Equal(1, result.Discarded);
+        Assert.Equal(TlsQuicDiscardReason.AuthenticationFailed, receiver.FirstDiscardReason);
+        Assert.Equal(TlsQuicEncryptionLevel.Initial, receiver.FirstDiscardLevel);
+        Assert.Equal(datagram.Length, receiver.FirstDiscardLength);
+        Assert.Equal(datagram[0], receiver.FirstDiscardFirstByte);
+        Assert.Equal(1, receiver.DiscardsFor(TlsQuicDiscardReason.AuthenticationFailed));
+        Assert.Equal(
+            $"AuthenticationFailed x1; first was AuthenticationFailed at Initial, {datagram.Length} bytes, first octet 0x{datagram[0]:X2}",
+            receiver.DescribeDiscards());
+
+        // A second discard of another kind counts but does not displace the first.
+        var stray = new byte[24];
+        stray[0] = 0x40;
+        receiver.Receive(stray, recorder.Handle);
+        Assert.Equal(1, receiver.DiscardsFor(TlsQuicDiscardReason.MissingKeys));
+        Assert.Equal(TlsQuicDiscardReason.AuthenticationFailed, receiver.FirstDiscardReason);
+        // Reasons list in enum order; "first was" keeps arrival order.
+        Assert.StartsWith("MissingKeys x1, AuthenticationFailed x1; first was AuthenticationFailed at Initial", receiver.DescribeDiscards());
+    }
+
     [Fact]
     public void AppendixA3ServerInitialDecryptsAndItsCryptoFrameReachesTheReassembler()
     {

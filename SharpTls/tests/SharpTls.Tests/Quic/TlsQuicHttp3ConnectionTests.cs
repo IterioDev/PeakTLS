@@ -1952,6 +1952,77 @@ public sealed partial class TlsQuicConnectionTests
         return frames;
     }
 
+    // ------------------------------------------------------------------------
+    // The dynamic-table encoder against the loopback peer. Design s3.5: the peer's SETTINGS
+    // open our encoder stream with the capacity, the first request after that is still
+    // static, and the next one sends its inserts on the encoder stream BEFORE its HEADERS.
+    // ------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TheSecondUseRequestSendsItsInsertsOnTheEncoderStreamBeforeItsHeaders()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var harness = await Harness.CreateAsync(
+            cancellation.Token,
+            spec: new TlsQuicHttp3Spec
+            {
+                QpackEncoderDynamicTableCapacity = 4096,
+                QpackInsertPolicy = TlsQuicQpackInsertPolicy.OnSecondUse,
+                UnidirectionalStreamOpening = TlsQuicHttp3UnidirectionalStreamOpening.Lazy,
+            });
+
+        // Before the peer's SETTINGS: the request goes alone, and no encoder stream exists.
+        var before = harness.Peer.ReceivedStreamFrames.Count;
+        Assert.NotNull(harness.Http3.TryOpenRequest(Request(path: "/one"), out _, out _));
+        await harness.FlushAsync(cancellation.Token);
+        var first = harness.Peer.ReceivedStreamFrames.Skip(before).ToList();
+        Assert.Single(first);
+        Assert.Equal(FirstRequestStreamId, first[0].StreamId);
+        Assert.Null(harness.Http3.Streams.LocalEncoderStream);
+
+        await harness.PeerSendsAsync(
+            cancellation.Token,
+            PeerControl(
+                new TlsQuicHttp3Setting(TlsQuicHttp3Spec.QpackMaxTableCapacityIdentifier, 4096),
+                new TlsQuicHttp3Setting(TlsQuicHttp3Spec.QpackBlockedStreamsIdentifier, 16)));
+        Assert.True(harness.Http3.Streams.EncoderPolicy.CapacitySent);
+
+        // The first request after capacity: static-only, behind the capacity instruction
+        // that opened the encoder stream - the capture's `02 3f e1 1f` on stream 6.
+        before = harness.Peer.ReceivedStreamFrames.Count;
+        Assert.NotNull(harness.Http3.TryOpenRequest(Request(path: "/one"), out _, out _));
+        await harness.FlushAsync(cancellation.Token);
+        var second = harness.Peer.ReceivedStreamFrames.Skip(before).ToList();
+        Assert.Equal(2, second.Count);
+        Assert.Equal(6UL, second[0].StreamId);
+        Assert.Equal("023FE11F", Convert.ToHexString(second[0].Data));
+        Assert.Equal(SecondRequestStreamId, second[1].StreamId);
+        Assert.Equal(0x00, HeadersPayload(second[1].Data)[0]);
+
+        // The second use: the inserts travel on the encoder stream, in send order before the
+        // HEADERS frame whose Required Insert Count now names them.
+        before = harness.Peer.ReceivedStreamFrames.Count;
+        Assert.NotNull(harness.Http3.TryOpenRequest(Request(path: "/one"), out _, out _));
+        await harness.FlushAsync(cancellation.Token);
+        var third = harness.Peer.ReceivedStreamFrames.Skip(before).ToList();
+        Assert.Equal(2, third.Count);
+        Assert.Equal(6UL, third[0].StreamId);
+        Assert.Equal(0xC0, third[0].Data[0]);                      // Insert With Name Reference, static 0: :authority
+        Assert.Equal(8UL, third[1].StreamId);
+        Assert.NotEqual(0x00, HeadersPayload(third[1].Data)[0]);   // a non-zero Required Insert Count
+        Assert.Equal(1, harness.Http3.Streams.EncoderPolicy.Table!.BlockedStreamCount);
+    }
+
+    private static byte[] HeadersPayload(byte[] streamData)
+    {
+        var offset = 0;
+        Assert.Equal(
+            TlsQuicHttp3FrameReadStatus.Complete,
+            TlsQuicHttp3Frames.TryRead(streamData, ref offset, out var type, out var payload, out _));
+        Assert.Equal((ulong)TlsQuicHttp3FrameType.Headers, type);
+        return payload.ToArray();
+    }
+
     private sealed class Harness : IDisposable
     {
         private readonly TestPki _pki;

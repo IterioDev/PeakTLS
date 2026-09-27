@@ -58,10 +58,11 @@ public sealed class TlsPreset
 public static class TlsPresets
 {
     /// <summary>
-    /// Gets the passively-captured Spotify 9.1.76.2050 on iOS 27.0 (iPhone17,2) HTTP/3 preset.
-    /// Its provenance differs from the other built-ins: it is decoded from the QUIC Initial
-    /// CRYPTO frames of 80 first-party captured connections to <c>*.spotify.com</c>, with the
-    /// HTTP/3 SETTINGS taken from proxy captures of the same handset. Reproduces the phone's
+    /// Gets the passively-captured Spotify 9.1.86.2428 on iOS 27.0 (iPhone17,2) HTTP/3 preset.
+    /// Decoded from the QUIC Initial CRYPTO frames of 80 first-party captured connections of the
+    /// 9.1.76.2050 build to <c>*.spotify.com</c>, with the HTTP/3 SETTINGS taken from proxy
+    /// captures of the same handset, then confirmed byte for byte — hello, transport parameters,
+    /// SETTINGS — in a 2026-09-26 key-logged passive capture of 9.1.86.2428. Reproduces the phone's
     /// JA3 <c>48d08f334704479db85d91df80039756</c> and JA4
     /// <c>q13d0311h3_55b375c5d22e_f2a83c8e78ae</c>. A second image hashes to
     /// <c>2f9431e877b01e163774ae4ae0df9ded</c>: a different cipher order that always travels with
@@ -88,9 +89,9 @@ public static class TlsPresets
     /// <see cref="TlsQuicOptions.Recovery"/>, and the QPACK encoding choices.</para>
     /// </summary>
 #pragma warning disable TLSCLIENT3 // Http3Only: these presets exist to carry a QUIC shape.
-    public static TlsPreset Spotify917602050IOS270Http3 { get; } = new(
-        "spotify-9.1.76-ios-27.0-h3",
-        TlsProfiles.Spotify917602050IOS270Quic,
+    public static TlsPreset Spotify918602428IOS270Http3 { get; } = new(
+        "spotify-9.1.86-ios-27.0-h3",
+        TlsProfiles.Spotify918602428IOS270Quic,
         static _ => { },
 
         TlsHttpVersionPolicy.Http3Only,
@@ -103,7 +104,7 @@ public static class TlsPresets
     /// </summary>
     /// <remarks>
     /// <para>THE TLS SHAPE IS THE ONLY THING THAT MOVES. Against
-    /// <see cref="Spotify917602050IOS270Http3"/>: cipher order 0x1302, 0x1301, 0x1303 and no
+    /// <see cref="Spotify918602428IOS270Http3"/>: cipher order 0x1302, 0x1301, 0x1303 and no
     /// vendor <c>0xff080808</c> transport parameter. Every QUIC packet dimension — connection-id
     /// lengths, packet-number length, 1200-byte Initial padding, the 999-byte CRYPTO budget, the
     /// varint widths — and the whole HTTP/3 layer — SETTINGS, the reserved-identifier draw, the
@@ -127,16 +128,18 @@ public static class TlsPresets
 #pragma warning restore TLSCLIENT3
 
     /// <summary>
-    /// Gets the HTTP/2 half of the same Spotify 9.1.76.2050 iOS 27.0 client: the TCP
+    /// Gets the HTTP/2 half of the same Spotify 9.1.86.2428 iOS 27.0 client: the TCP
     /// ClientHello its h2 legs dial with, plus the HTTP/2 SETTINGS, connection-window
     /// increment and pseudo-header order recorded alongside it.
     /// </summary>
     /// <remarks>
-    /// <para>TRANSCRIBED, NOT FIRST-PARTY CAPTURED, which is the opposite of
-    /// <see cref="Spotify917602050IOS270Http3"/> and is the distinction docs/PRESETS.md is
-    /// organised around. It is read from a fingerprint record supplied in bogdanfinn/tls-client's
-    /// JSON format, whose collection method is not recorded. Pin it against your own capture
-    /// before trusting it.</para>
+    /// <para>FIRST-PARTY CAPTURED SINCE 2026-09-26, TRANSCRIBED BEFORE THAT. Both halves were
+    /// first read from a fingerprint record in bogdanfinn/tls-client's JSON format; a pcapng of
+    /// the same app at 9.1.86.2428 on iOS 27.0, decrypted with the device's key log, then
+    /// showed the record wrong on the TLS 1.3 trio order AND on the whole HTTP/2 preface — four
+    /// settings where it said seven, a 10485760 window increment where it said 15663105. Both
+    /// are corrected; the pseudo-header order <c>m,s,p,a</c> it had right. docs/PRESETS.md
+    /// carries the capture's numbers.</para>
     /// <para>PreferHttp2 rather than Http2Only ON PURPOSE: the hello offers
     /// <c>http/1.1</c> after <c>h2</c>, so pinning h2 would misrepresent a client that accepts
     /// the fallback. The app negotiates TLS 1.3 in practice, which matters because the hello
@@ -146,49 +149,68 @@ public static class TlsPresets
     /// the wire only when <c>request.AddHeader</c> put it there, in the order it was added.
     /// The captured header images live in docs/USAGE.md.</para>
     /// </remarks>
-    public static TlsPreset Spotify917602050IOS270Http2 { get; } = new(
-        "spotify-9.1.76-ios-27.0-h2",
-        TlsProfiles.Spotify917602050IOS270Tcp,
+    public static TlsPreset Spotify918602428IOS270Http2 { get; } = new(
+        "spotify-9.1.86-ios-27.0-h2",
+        TlsProfiles.Spotify918602428IOS270Tcp,
         ConfigureSpotifyIosHttp2,
         TlsHttpVersionPolicy.PreferHttp2);
 
     /// <summary>Gets the current SharpTls Spotify-family preset.</summary>
-    public static TlsPreset Spotify => Spotify917602050IOS270Http3;
+    public static TlsPreset Spotify => Spotify918602428IOS270Http3;
 
     /// <summary>Gets the current Spotify-family HTTP/2 preset.</summary>
-    public static TlsPreset SpotifyH2 => Spotify917602050IOS270Http2;
+    public static TlsPreset SpotifyH2 => Spotify918602428IOS270Http2;
 
     /// <summary>Applies the recorded HTTP/2 shape of the Spotify iOS client.</summary>
     private static void ConfigureSpotifyIosHttp2(TlsHttp2Options http2)
     {
-        // THE PREFACE IS A SCRIPT AND THE ORDER IS THE FINGERPRINT. These seven settings are in
-        // the record's declared order, which is ascending here but is not required to be and is
-        // not treated as sortable. Identifier 0x8 is RFC 8441 ENABLE_CONNECT_PROTOCOL; the
-        // record calls it UNKNOWN_SETTING_8 because its own table has no name for it, and
-        // sending it with value 0 is a real client declining extended CONNECT explicitly rather
-        // than by omission - which is itself a distinguisher, so it is kept.
+        // THE PREFACE IS A SCRIPT AND THE ORDER IS THE FINGERPRINT. Four settings, NOT in
+        // ascending identifier order - 0x4 before 0x3 - and not treated as sortable. Measured
+        // in 10 of 10 decrypted h2 connections of the 2026-09-26 capture (Spotify 9.1.86.2428,
+        // iOS 27.0), identical on every host this hello dials. The transcribed record this used
+        // to carry had seven settings (0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x8) and a 15663105
+        // window increment; none of that is what the client sends. 0x9 is RFC 9218
+        // SETTINGS_NO_RFC7540_PRIORITIES = 1, and the client sends no PRIORITY frames and no
+        // priority flag on HEADERS, consistent with it.
+        //
+        // ONE RECORD: SETTINGS, WINDOW_UPDATE and the first HEADERS travel in a single TLS
+        // record in every capture, and the SETTINGS acknowledgement goes out on its own once
+        // the server's SETTINGS arrive - the Standalone default.
         http2.Preface =
         [
             new TlsHttp2SettingsFrame
             {
                 Settings =
                 [
-                    new TlsHttp2SettingValue(0x1, 4_096),          // HEADER_TABLE_SIZE
                     new TlsHttp2SettingValue(0x2, 0),              // ENABLE_PUSH
-                    new TlsHttp2SettingValue(0x3, 100),            // MAX_CONCURRENT_STREAMS
                     new TlsHttp2SettingValue(0x4, 2_097_152),      // INITIAL_WINDOW_SIZE
-                    new TlsHttp2SettingValue(0x5, 16_384),         // MAX_FRAME_SIZE
-                    new TlsHttp2SettingValue(0x6, uint.MaxValue),  // MAX_HEADER_LIST_SIZE
-                    new TlsHttp2SettingValue(0x8, 0),              // ENABLE_CONNECT_PROTOCOL
+                    new TlsHttp2SettingValue(0x3, 100),            // MAX_CONCURRENT_STREAMS
+                    new TlsHttp2SettingValue(0x9, 1),              // NO_RFC7540_PRIORITIES
                 ],
             },
-            new TlsHttp2WindowUpdateFrame { Increment = 15_663_105 },
+            new TlsHttp2WindowUpdateFrame { Increment = 10_485_760 },
         ];
 
-        // m, s, p, a — NOT the m, a, s, p the QUIC half sends. RFC 9113 section 8.3 fixes no
+        // m, s, p, a — NOT the m, s, a, p the QUIC half sends. RFC 9113 section 8.3 fixes no
         // order among the pseudo-headers, so the choice is pure fingerprint and the two halves
-        // of this client genuinely differ.
+        // of this client genuinely differ. Confirmed on every h2 request of the capture.
         http2.PseudoHeaderOrder = [":method", ":scheme", ":path", ":authority"];
+
+        // HPACK: incremental indexing for everything the static table cannot match exactly
+        // (the library default), except that :path, content-length and if-none-match go out
+        // as literals WITHOUT indexing and authorization as NEVER indexed. Measured on every
+        // request of the app-stack h2 connections in the capture; the second and later
+        // requests then reference the inserted entries by index, which the default already
+        // produces. The three no-index names are the request-side members of nghttp2's
+        // built-in no-index list (:path, age, content-length, etag, if-modified-since,
+        // if-none-match, location, set-cookie), which is the library CFNetwork encodes with;
+        // only the three the capture shows are declared, the rest would be inference. The
+        // library's own never-indexed cookie default is left in place: no app-stack request
+        // carries a cookie.
+        http2.Hpack.PerHeader[":path"] = TlsHpackRepresentation.LiteralWithoutIndexing;
+        http2.Hpack.PerHeader["content-length"] = TlsHpackRepresentation.LiteralWithoutIndexing;
+        http2.Hpack.PerHeader["if-none-match"] = TlsHpackRepresentation.LiteralWithoutIndexing;
+        http2.Hpack.PerHeader["authorization"] = TlsHpackRepresentation.LiteralNeverIndexed;
     }
 
     private static TlsQuicTransportParameterEntry[] SpotifyTransportParameters() =>
@@ -205,7 +227,7 @@ public static class TlsPresets
     private static void ConfigureSpotifyIos270Quic(TlsSessionOptions options) =>
         ConfigureSpotifyIosQuic(
             options,
-            ClientHelloProfiles.ApplySpotify917602050IOS270QuicClientHello,
+            ClientHelloProfiles.ApplySpotify918602428IOS270QuicClientHello,
             vendorTransportParameter: true);
 
     private static void ConfigureSpotifyIos260Quic(TlsSessionOptions options) =>
@@ -356,6 +378,18 @@ public static class TlsPresets
             TlsHttp3PseudoHeader.Authority,
             TlsHttp3PseudoHeader.Path,
         ];
+
+        // MEASURED: THE QPACK ENCODER USES ITS DYNAMIC TABLE, AND HOW. Three decrypted
+        // connections of the 2026-09-26 capture (reference doc s6): capacity 4096, announced
+        // once the server's SETTINGS are in and equal to the server's maximum every time; a
+        // pair inserted on its second use after the table became active, never on its first;
+        // the encoder stream opened with the capacity instruction and the decoder stream with
+        // its first instruction, never in the opening flight. No fingerprint endpoint reports
+        // any of this, so a live check cannot see it; the capture is the only witness.
+        options.Http3.QpackEncoderDynamicTableCapacity = 4096;
+        options.Http3.QpackInsertPolicy = SharpTls.Quic.TlsQuicQpackInsertPolicy.OnSecondUse;
+        options.Http3.UnidirectionalStreamOpening =
+            SharpTls.Quic.TlsQuicHttp3UnidirectionalStreamOpening.Lazy;
     }
 
     /// <summary>
