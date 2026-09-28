@@ -33,7 +33,7 @@
       and a package reference would silently keep resolving the unpatched 0.9.0-preview.5.
     -->
     <ProjectReference Include="..\..\..\SharpTls\src\SharpTls\SharpTls.csproj" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
