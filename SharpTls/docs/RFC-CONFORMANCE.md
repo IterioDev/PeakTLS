@@ -592,12 +592,16 @@ recording because the protection is structural rather than intentional**: adding
 constant to `TlsCipherSuite` for any reason would silently remove it. A reader looking for an
 explicit RFC 8701 check will not find one, and should not conclude the rule is unmet.
 
-### QUIC datagrams — send side satisfied by refusal
+### QUIC datagrams — send side narrowed, no longer satisfied by construction
 
-`Quic/TlsQuicFrames.cs:912-922` refuses to write a DATAGRAM frame at all, with the refusal
-pinned by `TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne` and
-the RFC 9221 §3 sentence quoted beside it. Every send-side DATAGRAM MUST is therefore satisfied
-by construction.
+`Quic/TlsQuicFrames.cs` now writes RFC 9221 §4 DATAGRAM frames in their 0x31 (length-bearing)
+form; it still refuses the 0x30 (length-less) form, pinned by
+`TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten`. Nothing yet queues a DATAGRAM to
+send, so the RFC 9221 §3 MUST NOT quoted beside the old refusal ("An endpoint MUST NOT send
+DATAGRAM frames until it has received the max_datagram_frame_size transport parameter with a
+non-zero value during the handshake") is not currently violated, but it is no longer satisfied
+by construction the way it was before this writer existed - a future sender must gate on the
+peer's advertised value itself.
 
 The receive side was NOT, and is now (**FIXED**, `d6ffad4`). RFC 9221 §3 requires
 PROTOCOL_VIOLATION on a DATAGRAM frame received without having advertised support and on one
@@ -648,7 +652,7 @@ for the rule it satisfies:
 |---|---|---|
 | RFC 8701 — reject GREASE values a server negotiates | `Enum.IsDefined(typeof(TlsCipherSuite), ...)`, an exact TLS 1.3 version match, and the HRR offered-group check | Adding a GREASE constant to `TlsCipherSuite` for any reason |
 | RFC 9000 §12.4 — a frame type MUST use the shortest encoding | `TlsQuicFrames.WriteFrame` calls the minimal varint overload and has no width parameter | Giving `WriteFrame` a width parameter, which the file's own comment anticipates |
-| RFC 9221 — every send-side DATAGRAM rule | The codec refuses to write a DATAGRAM frame at all, pinned by `WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne` | Adding a DATAGRAM write path without re-reading §3 |
+| RFC 9221 — every send-side DATAGRAM rule | 0x31 (length-bearing) DATAGRAM frames are written by `TlsQuicFrames.WriteFrame` (pinned by `ADatagramFrameRoundTripsInItsLengthBearingForm`); the 0x30 (length-less) form is refused (pinned by `TheLengthLessDatagramFormIsNeverWritten`); the send-side ceiling is the peer's advertised `max_datagram_frame_size`, enforced by the sender. See "QUIC datagrams" above | A caller queuing a DATAGRAM to send without gating on the peer's advertised `max_datagram_frame_size` |
 
 These are recorded because a reader looking for the explicit check will not find one and could
 wrongly file a MISSING — which is the same failure mode as the five near-misses, arriving from
