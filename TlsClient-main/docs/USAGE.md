@@ -233,6 +233,12 @@ options.Proxy = TlsProxy.Socks5("socks5://pr.oxylabs.io:7777", user, pass);     
 options.Quic.Proxy = TlsProxy.Masque("https://masque.oxylabs.io:50000", user, pass); // h3, UDP
 ```
 
+With the same username on both, the session is bound through MASQUE before its first SOCKS5
+connect (one tunnel opens and closes, about a second, once per session; connect event
+`MasqueSessionBound`; `options.Quic.BindSessionThroughMasque` turns it off). A session first used
+through the SOCKS5 front lands on an exit that cannot carry UDP; one first used through MASQUE
+carries h3 and, on the same exit IP, h2.
+
 A MASQUE tunnel closing mid-life — the proxy's own connection failing after the association was
 established — reaches the caller the same way a dead SOCKS5 relay does: a `TlsQuicProxyException`
 with `Error == MasqueTunnelClosed`, raised on the next request rather than out of band, and

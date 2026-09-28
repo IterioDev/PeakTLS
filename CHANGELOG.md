@@ -119,6 +119,10 @@ All notable changes to both packages in this repository are documented here, Sha
   datagrams below the outer frame budget. A TLS alert record answering the inner Initial through
   the tunnel (an exit that writes UDP into TCP TLS) is `RelayDeliveredTlsAlert` at once, without
   tunnel retries.
+- A sticky proxy session shared by `options.Proxy` and `options.Quic.Proxy` (same username) is
+  bound through MASQUE before its first TCP proxy connect (`Quic.BindSessionThroughMasque`,
+  default on; connect event `MasqueSessionBound`), because a session first used through the
+  SOCKS5 front lands on an exit that cannot carry UDP.
 - Spotify 9.1.86 / iOS 27 presets (`spotify-9.1.86-ios-27.0-h3`, `-h2`) with the QPACK
   dynamic table, the h2 preface and HPACK policy from the capture.
 - SOCKS5: the authentication reply `VER 0x05` is tolerated; CONNECT and UDP ASSOCIATE

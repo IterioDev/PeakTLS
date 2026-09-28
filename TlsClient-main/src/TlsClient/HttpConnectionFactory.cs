@@ -12,6 +12,7 @@ internal static class HttpConnectionFactory
         Tls13SessionCache tls13SessionCache,
         DnsEndpointResolver dnsResolver,
         Socks5AssociationGate associationGate,
+        MasqueSessionBinding masqueBinding,
         CancellationToken cancellationToken)
     {
         // HTTP/3 forks before the TCP transport is dialled: QUIC opens its own UDP socket
@@ -30,8 +31,14 @@ internal static class HttpConnectionFactory
                 tls13SessionCache,
                 dnsResolver,
                 associationGate,
+                masqueBinding,
                 cancellationToken).ConfigureAwait(false);
         }
+
+        // A sticky session the TCP proxy shares with a MASQUE proxy is bound through MASQUE
+        // before its first TCP use; see MasqueSessionBinding for the measurement behind it.
+        await masqueBinding.EnsureBoundAsync(origin, proxy, configuration, cancellationToken)
+            .ConfigureAwait(false);
 
         var transport = await SharpTlsTransport.ConnectAsync(
             origin,

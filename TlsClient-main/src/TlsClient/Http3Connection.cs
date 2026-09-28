@@ -228,10 +228,12 @@ internal sealed class Http3Connection : IHttpConnection
         Tls13SessionCache tls13SessionCache,
         DnsEndpointResolver dnsResolver,
         Socks5AssociationGate associationGate,
+        MasqueSessionBinding masqueBinding,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(origin);
         ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(masqueBinding);
         ArgumentNullException.ThrowIfNull(tls13SessionCache);
         ArgumentNullException.ThrowIfNull(dnsResolver);
         ArgumentNullException.ThrowIfNull(associationGate);
@@ -261,6 +263,7 @@ internal sealed class Http3Connection : IHttpConnection
                 configuration,
                 factory,
                 tls13SessionCache,
+                masqueBinding,
                 connectionId,
                 cancellationToken).ConfigureAwait(false);
         }
@@ -435,30 +438,11 @@ internal sealed class Http3Connection : IHttpConnection
         TlsSessionConfiguration configuration,
         TlsQuicClientHelloProfileFactory factory,
         Tls13SessionCache tls13SessionCache,
+        MasqueSessionBinding masqueBinding,
         Guid connectionId,
         CancellationToken cancellationToken)
     {
-        // Only the proxy sees the outer connection: the library's default QUIC shape with
-        // PMTUD off and SETTINGS_H3_DATAGRAM on, then the proxy's own ConfigureOuterQuic hook.
-        var outer = TlsQuicOptions.CreateMasqueOuter(masque.ConfigureOuterQuic)
-            .Snapshot(TlsQuicOptions.CreateMasqueOuterHttp3());
-        var credentials = masque.GetCredentials()!;
-        var options = new TlsQuicMasqueOptions
-        {
-            ProxyEndPoint = new DnsEndPoint(masque.Address.IdnHost, masque.EffectivePort),
-            TargetHost = origin.IdnHost,
-            TargetPort = origin.Port,
-            // Never resolved and never compared: the inner connection sends to it and nothing
-            // reads a received datagram's source, so the unspecified address will do.
-            TargetEndPoint = new IPEndPoint(IPAddress.Any, origin.Port),
-            Username = credentials.UserName,
-            Password = credentials.Password,
-            OuterSpec = outer.ConnectionSpec,
-            OuterHttp3Spec = outer.Http3Spec,
-            ConfigureOuterClientHello = outer.ConfigureClientHello,
-            HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
-            InnerDatagramCeiling = masque.MaxInnerDatagramPayload,
-        };
+        var options = MasqueOptionsFor(origin, masque, configuration);
 
         // A TUNNEL THE PROXY ENDS DURING THE INNER HANDSHAKE IS DIALLED AGAIN, up to
         // MaximumAssociationAttempts tunnels in all, the same count that governs a SOCKS5
@@ -503,7 +487,7 @@ internal sealed class Http3Connection : IHttpConnection
 
             try
             {
-                return await DialInnerAsync(
+                var connection = await DialInnerAsync(
                     origin,
                     configuration,
                     factory,
@@ -515,6 +499,10 @@ internal sealed class Http3Connection : IHttpConnection
                     HandshakeTimeout(configuration),
                     connectionId,
                     cancellationToken).ConfigureAwait(false);
+
+                // An h3 dial that came up bound the session on the MASQUE side by itself.
+                masqueBinding.MarkBound(masque);
+                return connection;
             }
             catch (Exception exception)
             {
@@ -542,6 +530,75 @@ internal sealed class Http3Connection : IHttpConnection
                 throw;
             }
         }
+    }
+
+    /// <summary>The MASQUE tunnel options for <paramref name="origin"/> through
+    /// <paramref name="masque"/>: only the proxy sees the outer connection, so it takes the
+    /// library's default QUIC shape with PMTUD off and SETTINGS_H3_DATAGRAM on, then the proxy's
+    /// own ConfigureOuterQuic hook.</summary>
+    internal static TlsQuicMasqueOptions MasqueOptionsFor(
+        Uri origin,
+        TlsProxy masque,
+        TlsSessionConfiguration configuration)
+    {
+        var outer = TlsQuicOptions.CreateMasqueOuter(masque.ConfigureOuterQuic)
+            .Snapshot(TlsQuicOptions.CreateMasqueOuterHttp3());
+        var credentials = masque.GetCredentials()!;
+        return new TlsQuicMasqueOptions
+        {
+            ProxyEndPoint = new DnsEndPoint(masque.Address.IdnHost, masque.EffectivePort),
+            TargetHost = origin.IdnHost,
+            TargetPort = origin.Port,
+            // Never resolved and never compared: the inner connection sends to it and nothing
+            // reads a received datagram's source, so the unspecified address will do.
+            TargetEndPoint = new IPEndPoint(IPAddress.Any, origin.Port),
+            Username = credentials.UserName,
+            Password = credentials.Password,
+            OuterSpec = outer.ConnectionSpec,
+            OuterHttp3Spec = outer.Http3Spec,
+            ConfigureOuterClientHello = outer.ConfigureClientHello,
+            HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
+            InnerDatagramCeiling = masque.MaxInnerDatagramPayload,
+        };
+    }
+
+    /// <summary>Binds a sticky proxy session on the MASQUE side: opens one CONNECT-UDP tunnel to
+    /// <paramref name="origin"/> and closes it, reporting the outcome as
+    /// <see cref="TlsConnectEventKind.MasqueSessionBound"/>. See
+    /// <see cref="MasqueSessionBinding"/> for why the order of first use matters.</summary>
+    internal static async Task PrimeMasqueSessionAsync(
+        Uri origin,
+        TlsProxy masque,
+        TlsSessionConfiguration configuration,
+        CancellationToken cancellationToken)
+    {
+        var connectionId = Guid.NewGuid();
+        var startedAt = Stopwatch.GetTimestamp();
+        try
+        {
+            var tunnel = await TlsQuicMasqueTransport.ConnectAsync(
+                MasqueOptionsFor(origin, masque, configuration), cancellationToken).ConfigureAwait(false);
+            await tunnel.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueSessionBound,
+                origin.IdnHost,
+                origin.Port,
+                elapsed: Stopwatch.GetElapsedTime(startedAt),
+                exception: exception);
+            throw;
+        }
+        TlsConnectTelemetry.Emit(
+            configuration.ConnectObserver,
+            connectionId,
+            TlsConnectEventKind.MasqueSessionBound,
+            origin.IdnHost,
+            origin.Port,
+            elapsed: Stopwatch.GetElapsedTime(startedAt));
     }
 
     /// <summary>One inner dial over <paramref name="transport"/>: connection options, the

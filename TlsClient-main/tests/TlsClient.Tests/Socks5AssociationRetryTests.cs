@@ -160,6 +160,7 @@ public sealed class Socks5AssociationRetryTests
             new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             new Socks5AssociationGate(),
+            new MasqueSessionBinding(),
             CancellationToken.None).AsTask());
         var elapsed = Stopwatch.GetElapsedTime(started);
 
@@ -289,6 +290,7 @@ public sealed class Socks5AssociationRetryTests
             new SharpTls.Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             gate ?? new Socks5AssociationGate(),
+            new MasqueSessionBinding(),
             CancellationToken.None);
     }
 }

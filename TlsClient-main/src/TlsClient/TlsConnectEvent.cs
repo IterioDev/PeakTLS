@@ -169,6 +169,21 @@ public enum TlsConnectEventKind
     /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
     /// </remarks>
     MasqueTunnelClosed = 18,
+
+    /// <summary>A sticky proxy session shared by the TCP proxy and the MASQUE proxy was bound
+    /// through MASQUE before its first TCP proxy connect: one tunnel to the origin opened and
+    /// closed. <see cref="TlsConnectEvent.Elapsed"/> is what that cost;
+    /// <see cref="TlsConnectEvent.Exception"/> is set when the binding failed, in which case
+    /// the TCP connect went ahead unbound and a later h3 dial reports its own failure.</summary>
+    /// <remarks>
+    /// <para>WHY IT EXISTS: measured against Oxylabs residential proxies, a session first used
+    /// through the SOCKS5 front lands on an exit that cannot carry UDP and every MASQUE tunnel
+    /// on it dies; one first used through MASQUE carries both h3 and, on the same exit IP, h2.
+    /// See <see cref="TlsQuicOptions.BindSessionThroughMasque"/>.</para>
+    /// <para>Emitted at most once per session identity (proxy username) per
+    /// <see cref="TlsSession"/>.</para>
+    /// </remarks>
+    MasqueSessionBound = 19,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

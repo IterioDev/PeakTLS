@@ -28,6 +28,53 @@ public sealed class MasqueLiveTests
         return options;
     }
 
+    /// <summary>sphynx's shape: one sticky session id on the SOCKS5 proxy for h2 and on the
+    /// MASQUE proxy for h3, with the h2 request first. Without the MASQUE-first binding this
+    /// failed 10 sessions out of 10 on 2026-09-28 (a TCP TLS alert answering the inner Initial);
+    /// with it, both hops share one exit. Needs TLSCLIENT_LIVE_SOCKS5 as well
+    /// (socks5://user:pass@host:port, same account).</summary>
+    [Fact]
+    public async Task ASessionUsedOverSocks5FirstStillCarriesHttp3()
+    {
+        if (Options() is not { } options
+            || Environment.GetEnvironmentVariable("TLSCLIENT_LIVE_SOCKS5") is not { } socksUrl)
+        {
+            return;
+        }
+        var socks = new Uri(socksUrl);
+        var masqueUser = options.Quic.Proxy!.GetCredentials()!.UserName;
+        var fresh = System.Text.RegularExpressions.Regex.Replace(
+            masqueUser, @"sessid-\d+", $"sessid-{Random.Shared.NextInt64(1_000_000_000, 9_999_999_999)}");
+        var password = options.Quic.Proxy.GetCredentials()!.Password;
+        var masque = TlsProxy.Masque(
+            $"https://{new Uri(Environment.GetEnvironmentVariable("TLSCLIENT_LIVE_MASQUE")!).Host}:50000",
+            fresh,
+            password);
+
+        var events = new List<TlsConnectEventKind>();
+        var h2 = TlsPresets.SpotifyH2.CreateOptions();
+        h2.Proxy = TlsProxy.Socks5($"socks5://{socks.Host}:{socks.Port}", fresh, password);
+        h2.Quic.Proxy = masque;
+        h2.ConnectObserver = e => { lock (events) { events.Add(e.Kind); } };
+        h2.Timeout = TimeSpan.FromSeconds(30);
+        await using (var session = new TlsSession(h2))
+        {
+            var response = await session.SendAsync(new HttpRequestMessage(HttpMethod.Get, "https://ip.oxylabs.io/json"));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(HttpVersion.Version20, response.HttpVersion);
+        }
+        Assert.Contains(TlsConnectEventKind.MasqueSessionBound, events);
+
+        var h3 = TlsPresets.Spotify.CreateOptions();
+        h3.Quic.Proxy = masque;
+        h3.Timeout = TimeSpan.FromSeconds(30);
+        await using var session3 = new TlsSession(h3);
+        var request = new HttpRequestMessage(HttpMethod.Get, "https://spclient.wg.spotify.com/");
+        request.AddHeader("user-agent", "Spotify/9.1.86 iOS/27.0 (iPhone17,2)");
+        var answer = await session3.SendAsync(request);
+        Assert.Equal(HttpVersion.Version30, answer.HttpVersion);
+    }
+
     [Fact]
     public async Task TheTargetSeesTheHandsetThroughTheTunnel()
     {

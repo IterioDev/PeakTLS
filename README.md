@@ -311,6 +311,14 @@ options.Proxy = TlsProxy.Socks5("socks5://proxy.example:1080", user, pass);     
 options.Quic.Proxy = TlsProxy.Masque("https://masque.example:50000", user, pass);   // h3
 ```
 
+When both carry the same username (one sticky session on the provider's side), the session is
+bound through MASQUE before its first TCP proxy connect: one tunnel to the origin opens and
+closes, about a second, once per session, reported as `MasqueSessionBound`. Measured against
+Oxylabs residential proxies, a session first used through the SOCKS5 front lands on an exit that
+cannot carry UDP and every later MASQUE tunnel dies with a TCP TLS alert, 10 sessions of 10; one
+first used through MASQUE carries h3 and then h2 over SOCKS5 on the same exit IP, 8 of 8.
+`options.Quic.BindSessionThroughMasque = false` turns the binding off.
+
 ### MASQUE
 
 ```csharp

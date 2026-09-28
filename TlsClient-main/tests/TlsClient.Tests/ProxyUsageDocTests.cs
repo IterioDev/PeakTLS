@@ -78,6 +78,7 @@ public sealed class ProxyUsageDocTests
                 new Tls13SessionCache(),
                 new DnsEndpointResolver(configuration),
                 new Socks5AssociationGate(),
+                new MasqueSessionBinding(),
                 CancellationToken.None).AsTask());
 
         Assert.Contains($"through a {type} proxy", error.Message, StringComparison.Ordinal);
@@ -106,6 +107,7 @@ public sealed class ProxyUsageDocTests
                 new Tls13SessionCache(),
                 new DnsEndpointResolver(configuration),
                 new Socks5AssociationGate(),
+                new MasqueSessionBinding(),
                 CancellationToken.None).AsTask());
 
         Assert.IsNotType<NotSupportedException>(error);

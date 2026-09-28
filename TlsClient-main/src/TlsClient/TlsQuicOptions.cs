@@ -371,6 +371,23 @@ public sealed class TlsQuicOptions
     /// <see cref="TlsProxy.Masque"/>. TCP requests never use it.</summary>
     public TlsProxy? Proxy { get; set; }
 
+    /// <summary>Gets or sets whether a sticky proxy session shared by
+    /// <see cref="TlsSessionOptions.Proxy"/> and <see cref="Proxy"/> (the same username on
+    /// both) is bound through the MASQUE proxy before the session's first TCP proxy connect.
+    /// The default is true.</summary>
+    /// <remarks>
+    /// <para>THE ORDER OF FIRST USE DECIDES THE EXIT. Measured 2026-09-28 against Oxylabs
+    /// residential proxies: a session first used through the SOCKS5 front landed on an exit
+    /// that answered every later MASQUE tunnel with a TCP TLS alert or a closed stream, 10 of
+    /// 10; a session first used through MASQUE carried h3 and then h2 over SOCKS5 on the same
+    /// exit IP, 8 of 8. With this on, the first TCP proxy connect of such a session waits for
+    /// one tunnel to the same origin to open and close, about a second, once per session, and
+    /// reports it as <see cref="TlsConnectEventKind.MasqueSessionBound"/>.</para>
+    /// <para>Off, or when the two proxies carry different usernames, nothing is primed and the
+    /// two hops bind independently.</para>
+    /// </remarks>
+    public bool BindSessionThroughMasque { get; set; } = true;
+
     /// <summary>
     /// Gets or sets how long a request on a proxied HTTP/3 connection may wait while its RFC
     /// 1928 section 7 UDP association relays nothing at all, before the association is judged
@@ -817,7 +834,8 @@ public sealed class TlsQuicOptions
             AssociationLivenessDeadline,
             MaximumAssociationAttempts,
             AssociationSilenceDeadline,
-            Proxy);
+            Proxy,
+            BindSessionThroughMasque);
     }
 }
 
@@ -837,4 +855,5 @@ internal sealed record TlsQuicConfiguration(
     TimeSpan AssociationLivenessDeadline,
     int MaximumAssociationAttempts,
     TimeSpan AssociationSilenceDeadline,
-    TlsProxy? Proxy);
+    TlsProxy? Proxy,
+    bool BindSessionThroughMasque);

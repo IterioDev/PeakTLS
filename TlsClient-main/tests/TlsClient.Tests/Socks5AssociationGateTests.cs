@@ -128,6 +128,7 @@ public sealed class Socks5AssociationGateTests
             new Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             new Socks5AssociationGate(),
+            new MasqueSessionBinding(),
             CancellationToken.None).AsTask());
 
         Assert.DoesNotContain(
@@ -291,6 +292,7 @@ public sealed class Socks5AssociationGateTests
             new Tls13SessionCache(),
             new DnsEndpointResolver(configuration),
             gate,
+            new MasqueSessionBinding(),
             CancellationToken.None);
     }
 }

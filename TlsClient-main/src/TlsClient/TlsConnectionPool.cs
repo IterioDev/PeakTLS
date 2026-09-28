@@ -34,6 +34,11 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
     // keep two proxies' pooled connections apart - so per-request proxy overrides, which this
     // pool supports, take their own slot and never wait on each other.
     private readonly Socks5AssociationGate _associationGate = new();
+
+    // Same scope, same reason: whether a sticky session has been bound through MASQUE is a
+    // fact about this session's dials, and the username that identifies the session is known
+    // only from the proxies this session was given.
+    private readonly MasqueSessionBinding _masqueBinding = new();
     private readonly HttpConnectAsync _connect;
     private readonly SemaphoreSlim _poolGate = new(1, 1);
     private readonly SemaphoreSlim _poolChanged = new(0, int.MaxValue);
@@ -64,6 +69,7 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
             _tls13SessionCache,
             _dnsResolver,
             _associationGate,
+            _masqueBinding,
             cancellationToken);
 
     public int Tls13SessionCount => _tls13SessionCache.Count;
