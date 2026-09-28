@@ -20,7 +20,7 @@ internal sealed class TlsQuicMasqueOptions
     /// <summary>Echoed in every receive result; the inner connection never compares it.</summary>
     public required IPEndPoint TargetEndPoint { get; init; }
 
-    /// <summary>The proxy account's user name, sent as HTTP Basic credentials in
+    /// <summary>The proxy account's user name, sent as HTTP Basic credentials (RFC 7617) in
     /// <c>proxy-authorization</c> (RFC 9110 s11.7.2).</summary>
     public required string Username { get; init; }
 
