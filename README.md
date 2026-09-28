@@ -293,7 +293,10 @@ TCP and QUIC have separate, independent proxy slots:
 Many residential SOCKS5 proxies accept UDP ASSOCIATE and then write the payload into a TCP
 connection to the destination. QUIC cannot cross them: the TLS server there answers the
 first Initial with a TLS alert, and the dial fails at once with
-`TlsQuicProxyError.RelayDeliveredTlsAlert`. Use h2 through such a proxy, or MASQUE. Over a
+`TlsQuicProxyError.RelayDeliveredTlsAlert`. Use h2 through such a proxy, or MASQUE. The same
+thing happens behind some residential exits of a MASQUE proxy: the tunnel opens, the inner
+Initial goes in, and a 7-byte TLS alert comes back. That is the same error, named at once
+without the tunnel retries, and only a different proxy session (a different exit) helps. Over a
 real SOCKS5 relay, h3 origin DNS still resolves on this host.
 
 SOCKS5 supports no-auth and RFC 1929 username/password, and accepts an authentication reply

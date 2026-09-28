@@ -24,8 +24,10 @@ public enum TlsQuicProxyError
     AssociationTerminated,
 
     /// <summary>The relay answered a QUIC datagram with a TLS alert record, which only a TCP
-    /// TLS server produces: the proxy writes UDP ASSOCIATE payload into a TCP connection to the
-    /// destination port, so it cannot carry QUIC at all.</summary>
+    /// TLS server produces: the proxy, or the exit behind a MASQUE proxy session, writes the
+    /// UDP payload into a TCP connection to the destination port, so it cannot carry QUIC at
+    /// all. Nothing on this side changes that; a different proxy session (a different exit)
+    /// may.</summary>
     RelayDeliveredTlsAlert,
 
     /// <summary>The MASQUE proxy's SETTINGS or transport parameters lack extended CONNECT
@@ -40,6 +42,44 @@ public enum TlsQuicProxyError
     MasqueTunnelRefused,
     /// <summary>The tunnel stream or the outer connection ended, before or after the response; the message carries the proxy's error code or the underlying failure.</summary>
     MasqueTunnelClosed,
+}
+
+/// <summary>What a relayed datagram says about the relay: shared by the SOCKS5 liveness
+/// transport and the MASQUE tunnel, which face the same fake-UDP exits.</summary>
+internal static class TlsQuicRelayDiagnostics
+{
+    /// <summary>RFC 8446 s5.1's record header with ContentType alert (21), a legacy version of
+    /// 0x0300 to 0x0304 and a length of 2, then an alert level of warning or fatal: OpenSSL and
+    /// BoringSSL answer any first record that is not TLS with exactly <c>15 03 01 00 02 02 46</c>,
+    /// fatal <c>protocol_version</c>. A QUIC packet is never seven bytes, so the match cannot
+    /// mistake one.</summary>
+    internal static bool IsTlsAlertRecord(ReadOnlySpan<byte> datagram) =>
+        datagram.Length == 7
+        && datagram[0] == 0x15
+        && datagram[1] == 0x03
+        && datagram[2] <= 0x04
+        && datagram[3] == 0x00
+        && datagram[4] == 0x02
+        && datagram[5] is 1 or 2;
+
+    /// <summary>The alert's level and description by RFC 8446 s6 name, for a message.</summary>
+    internal static string DescribeAlert(ReadOnlySpan<byte> record)
+    {
+        var level = record[5] == 2 ? "fatal" : "warning";
+        var description = record[6] switch
+        {
+            0 => "close_notify",
+            10 => "unexpected_message",
+            20 => "bad_record_mac",
+            40 => "handshake_failure",
+            47 => "illegal_parameter",
+            50 => "decode_error",
+            70 => "protocol_version",
+            80 => "internal_error",
+            _ => $"description {record[6]}",
+        };
+        return $"{level} {description}";
+    }
 }
 
 /// <summary>A SOCKS5 proxy failure or a MASQUE CONNECT-UDP tunnel failure. Distinct from

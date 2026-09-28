@@ -470,6 +470,28 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task ATlsAlertRecordThroughTheTunnelIsARelayThatCannotCarryQuic()
+    {
+        // A field log of 2026-09-28: the answer to the inner Initial was 15 03 01 00 02 02 46,
+        // TLS fatal protocol_version, which only a TCP TLS server produces. The exit behind
+        // that MASQUE session wrote the datagram into a TCP connection, exactly as the SOCKS5
+        // relays did, and the verdict is the same one, given before any tunnel retry.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        await harness.Peer.SendOneRttRawFrameAsync(
+            DatagramFrame(0x00, 0x00, 0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46), ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Equal(TlsQuicProxyError.RelayDeliveredTlsAlert, error.Error);
+        Assert.Contains("15030100020246", error.Message);
+        Assert.Contains("protocol_version", error.Message);
+        Assert.Contains("different proxy session", error.Message);
+    }
+
+    [Fact]
     public async Task AShortDatagramBeforeTheTunnelEndsIsShownAsTheProxysOwnAnswer()
     {
         // A field log of 2026-09-28: two 1200-byte Initials in, one 7-byte datagram back, FIN.

@@ -143,6 +143,7 @@ All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException
 | `MasqueNotOffered` | the proxy's SETTINGS or transport parameters lack extended CONNECT, HTTP/3 datagrams, or enough datagram capacity for a 1200-byte inner Initial |
 | `MasqueAuthenticationRejected` | the CONNECT-UDP response is 407 |
 | `MasqueTargetRejected` | the CONNECT-UDP response is 400 |
+| `RelayDeliveredTlsAlert` | the answer to the inner Initial through the tunnel is a TLS alert record (`15 03 01 00 02 02 46`, fatal protocol_version): the exit behind this proxy session wrote the datagram into a TCP TLS connection, so no inner packet will cross it and no second tunnel on the same session reaches a different exit. Named at once, without the tunnel retries |
 | `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status, or the dial missed its deadline in any of the four steps (the message names the stage) |
 | `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout. The message says how long the tunnel lived and how many datagrams crossed it each way; datagrams in and none back is an exit that cannot carry UDP to the target, cured by a fresh proxy session rather than a retry of the same one |
 

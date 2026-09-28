@@ -182,11 +182,5 @@ internal sealed class Socks5LivenessTransport : ITlsQuicDatagramTransport
     /// BoringSSL answer any first record that is not TLS with exactly <c>15 03 01 00 02 02 46</c>,
     /// fatal <c>protocol_version</c>.</summary>
     internal static bool IsTlsAlertRecord(ReadOnlySpan<byte> datagram) =>
-        datagram.Length == 7
-        && datagram[0] == 0x15
-        && datagram[1] == 0x03
-        && datagram[2] <= 0x04
-        && datagram[3] == 0x00
-        && datagram[4] == 0x02
-        && datagram[5] is 1 or 2;
+        TlsQuicRelayDiagnostics.IsTlsAlertRecord(datagram);
 }

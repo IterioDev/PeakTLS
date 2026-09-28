@@ -741,12 +741,30 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                         _droppedOversize++;
                         continue;
                     }
-                    _inbound.Writer.TryWrite(datagram[cursor..]);
-                    _receivedFromTunnel++;
-                    Remember(_receivedSizes, datagram.Length - cursor);
-                    if (datagram.Length - cursor <= ShortDatagramLength)
+                    var payload = datagram[cursor..];
+                    if (TlsQuicRelayDiagnostics.IsTlsAlertRecord(payload))
                     {
-                        _lastShortReceived = datagram[cursor..];
+                        // The verdict the SOCKS5 relay gives, given here: only a TCP TLS server
+                        // answers a QUIC Initial with a TLS alert record, so the exit behind this
+                        // proxy session wrote the inner datagram into a TCP connection. No inner
+                        // packet will ever cross it, and no second tunnel on the same session
+                        // reaches a different exit.
+                        throw new TlsQuicProxyException(
+                            TlsQuicProxyError.RelayDeliveredTlsAlert,
+                            "The target answered the inner QUIC Initial with a TLS alert record "
+                                + $"({Convert.ToHexString(payload)}: "
+                                + $"{TlsQuicRelayDiagnostics.DescribeAlert(payload)}). Only a TCP TLS "
+                                + "server produces that record, so the exit behind this proxy session "
+                                + "writes UDP payloads into a TCP connection to the target port and "
+                                + "cannot carry QUIC. Nothing on this side changes that; a different "
+                                + "proxy session reaches a different exit.");
+                    }
+                    _inbound.Writer.TryWrite(payload);
+                    _receivedFromTunnel++;
+                    Remember(_receivedSizes, payload.Length);
+                    if (payload.Length <= ShortDatagramLength)
+                    {
+                        _lastShortReceived = payload;
                     }
                 }
 
