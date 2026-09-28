@@ -493,6 +493,11 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
     internal List<(ulong StreamId, ulong Offset, byte[] Data, bool Fin)> ReceivedStreamFrames
     { get; } = [];
 
+    /// <summary>Every RFC 9221 DATAGRAM frame payload this peer has opened, in arrival order,
+    /// copied off the decrypt scratch. Not cleared per pump, like
+    /// <see cref="ReceivedStreamFrames"/>.</summary>
+    internal List<byte[]> ReceivedDatagrams { get; } = [];
+
     /// <summary>How many pieces of CRYPTO stream this peer has handed to its TLS
     /// endpoint.</summary>
     /// <remarks>
@@ -1322,6 +1327,11 @@ internal sealed class LoopbackQuicPeer : IAsyncDisposable
                         frame.Offset,
                         frame.Data.ToArray(),
                         TlsQuicStreamFrames.IsFin(frame.RawType)));
+                }
+
+                if (frame.Type == TlsQuicFrameType.Datagram)
+                {
+                    ReceivedDatagrams.Add(frame.Data.ToArray());
                 }
 
                 if (frame.Type == TlsQuicFrameType.PathResponse)

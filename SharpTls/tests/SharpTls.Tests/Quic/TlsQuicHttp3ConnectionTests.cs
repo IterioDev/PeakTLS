@@ -2075,7 +2075,8 @@ public sealed partial class TlsQuicConnectionTests
             TlsQuicHttp3Spec? spec = null,
             IReadOnlyList<TlsQuicTransportParameter>? flowControl = null,
             bool openLocalStreams = true,
-            ulong? maxDatagramFrameSize = 65536)
+            ulong? maxDatagramFrameSize = 65536,
+            TlsQuicConnectionSpec? connectionSpec = null)
         {
             var pki = TestPki.Create();
             var credential = Credential(pki);
@@ -2087,7 +2088,7 @@ public sealed partial class TlsQuicConnectionTests
             // refuses, so this line is the harness saying what it means rather than the harness
             // opting out of the check.
             var connection = Connection(
-                clientTransport, serverTransport, pki,
+                clientTransport, serverTransport, pki, connectionSpec,
                 maxDatagramFrameSize: maxDatagramFrameSize);
             var server = Server(
                 credential, connection.OriginalDestinationConnectionId, flowControl: flowControl);

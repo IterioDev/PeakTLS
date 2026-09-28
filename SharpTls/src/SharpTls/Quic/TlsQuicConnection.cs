@@ -1057,6 +1057,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // connection and then processes. A connection with no h3 layer above it never advertises
     // max_datagram_frame_size through a shipped preset without one either.
     private readonly List<byte[]> _receivedDatagrams = [];
+
+    // RFC 9221 s5.4 lets a sender delay or drop when it cannot send; this library delays. The
+    // bound is small on purpose: an inner QUIC stack behind a MASQUE tunnel keeps its own send
+    // pacing, so a queue that fills means the OUTER path is congested and the right answer is
+    // backpressure, not memory.
+    private const int DatagramQueueBound = 64;
+    private readonly Queue<byte[]> _datagramsToSend = new();
+
     private byte[] _destinationConnectionId = [];
 
     // RFC 9000 s7.2's "a valid Initial packet from the server": the Source Connection ID off a
@@ -1344,6 +1352,60 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal int DatagramPayloadBudget => Math.Min(
         CurrentMaxDatagramSize - _options.Transport.DatagramOverhead,
         _options.Transport.MaxDatagramPayloadSize);
+
+    /// <summary>Gets how many DATAGRAM frame payloads wait for <see cref="SendPendingAsync"/>.
+    /// </summary>
+    internal int QueuedDatagrams => _datagramsToSend.Count;
+
+    /// <summary>The largest DATAGRAM frame payload one 1-RTT packet at the current path MTU
+    /// carries: the packet budget minus the short header, DCID, largest packet number, AEAD tag,
+    /// frame type and a two-byte length, further bounded by the peer's
+    /// <c>max_datagram_frame_size</c> (which counts type and length, RFC 9221 s3).</summary>
+    internal int MaximumDatagramFramePayload
+    {
+        get
+        {
+            const int typeAndLength = 3;
+            if (PeerMaxDatagramFrameSize is not { } peer)
+            {
+                return 0;
+            }
+            var packet = DatagramPayloadBudget - OneRttPacketOverhead - typeAndLength;
+            var byPeer = (int)Math.Min(peer, int.MaxValue) - typeAndLength;
+            return Math.Max(0, Math.Min(packet, byPeer));
+        }
+    }
+
+    /// <summary>Queues one DATAGRAM frame payload; <see langword="false"/> means the queue is
+    /// full and the caller must wait for <see cref="SendPendingAsync"/> to drain it.</summary>
+    /// <param name="payload">The frame's payload, copied before this returns.</param>
+    /// <returns><see langword="true"/> when the payload was queued.</returns>
+    /// <exception cref="InvalidOperationException">The peer accepts no DATAGRAM frames.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The payload exceeds
+    /// <see cref="MaximumDatagramFramePayload"/>.</exception>
+    internal bool TryQueueDatagram(ReadOnlyMemory<byte> payload)
+    {
+        if (PeerMaxDatagramFrameSize is null)
+        {
+            throw new InvalidOperationException(
+                "The peer advertised no max_datagram_frame_size (RFC 9221 s3), so it accepts no "
+                + "DATAGRAM frames on this connection.");
+        }
+        var ceiling = MaximumDatagramFramePayload;
+        if (payload.Length > ceiling)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(payload), payload.Length,
+                $"A DATAGRAM frame payload on this connection is at most {ceiling} bytes.");
+        }
+        if (_datagramsToSend.Count >= DatagramQueueBound)
+        {
+            return false;
+        }
+        _datagramsToSend.Enqueue(payload.ToArray());
+        return true;
+    }
 
     /// <summary>
     /// THE ONE PLACE A DATAGRAM LEAVES THIS CONNECTION. Every send goes through here so that a
