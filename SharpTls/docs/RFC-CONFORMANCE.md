@@ -594,7 +594,7 @@ explicit RFC 8701 check will not find one, and should not conclude the rule is u
 
 ### QUIC datagrams — send side narrowed, no longer satisfied by construction
 
-`Quic/TlsQuicFrames.cs` now writes RFC 9221 s4 DATAGRAM frames in their 0x31 (length-bearing)
+`Quic/TlsQuicFrames.cs` now writes RFC 9221 §4 DATAGRAM frames in their 0x31 (length-bearing)
 form; it still refuses the 0x30 (length-less) form, pinned by
 `TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten`. Nothing yet queues a DATAGRAM to
 send, so the RFC 9221 §3 MUST NOT quoted beside the old refusal ("An endpoint MUST NOT send
@@ -652,7 +652,7 @@ for the rule it satisfies:
 |---|---|---|
 | RFC 8701 — reject GREASE values a server negotiates | `Enum.IsDefined(typeof(TlsCipherSuite), ...)`, an exact TLS 1.3 version match, and the HRR offered-group check | Adding a GREASE constant to `TlsCipherSuite` for any reason |
 | RFC 9000 §12.4 — a frame type MUST use the shortest encoding | `TlsQuicFrames.WriteFrame` calls the minimal varint overload and has no width parameter | Giving `WriteFrame` a width parameter, which the file's own comment anticipates |
-| RFC 9221 — every send-side DATAGRAM rule | ~~The codec refuses to write a DATAGRAM frame at all~~ **No longer true**: the codec now writes the 0x31 form (pinned by `ADatagramFrameRoundTripsInItsLengthBearingForm`) and refuses only the 0x30 form (pinned by `TheLengthLessDatagramFormIsNeverWritten`). See "QUIC datagrams" above | A caller queuing a DATAGRAM to send without gating on the peer's advertised `max_datagram_frame_size` |
+| RFC 9221 — every send-side DATAGRAM rule | 0x31 (length-bearing) DATAGRAM frames are written by `TlsQuicFrames.WriteFrame` (pinned by `ADatagramFrameRoundTripsInItsLengthBearingForm`); the 0x30 (length-less) form is refused (pinned by `TheLengthLessDatagramFormIsNeverWritten`); the send-side ceiling is the peer's advertised `max_datagram_frame_size`, enforced by the sender. See "QUIC datagrams" above | A caller queuing a DATAGRAM to send without gating on the peer's advertised `max_datagram_frame_size` |
 
 These are recorded because a reader looking for the explicit check will not find one and could
 wrongly file a MISSING — which is the same failure mode as the five near-misses, arriving from

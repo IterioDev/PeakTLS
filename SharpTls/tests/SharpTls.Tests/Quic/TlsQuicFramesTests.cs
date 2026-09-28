@@ -607,6 +607,7 @@ public sealed class TlsQuicFramesTests
     public void TheLengthLessDatagramFormIsNeverWritten()
     {
         var frame = new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Datagram, Data = new byte[] { 1 } };
-        Assert.Throws<ArgumentException>(() => TlsQuicFrames.WriteFrame([], frame));
+        var exception = Assert.Throws<ArgumentException>(() => TlsQuicFrames.WriteFrame([], frame));
+        Assert.Contains("length-bearing", exception.Message);
     }
 }

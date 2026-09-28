@@ -1819,9 +1819,9 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // "the value it sent in its max_datagram_frame_size transport parameter" - the peer's
     // value bounds what WE may send, and s3 gives that its own separate MUST NOT. Task 2 gave
     // TlsQuicFrames.WriteFrame a 0x31 (length-bearing) DATAGRAM writer, so that MUST NOT is no
-    // longer satisfied by construction; nothing here yet queues a DATAGRAM to send, so it
-    // remains satisfied in practice, but a future sender must gate on this endpoint's own
-    // advertised value before calling WriteFrame with one
+    // longer satisfied by construction; any sender this library adds must gate on the peer's
+    // advertised value (the one this endpoint received, kept in PeerMaxDatagramFrameSize)
+    // before calling WriteFrame with one
     // (TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten pins only the narrower
     // 0x30 refusal that survives). AdvertisedMaxDatagramFrameSize reads our own ClientHello,
     // which is the correct side.

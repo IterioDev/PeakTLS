@@ -195,15 +195,13 @@ public sealed class QuicFuzzSeedsTests
         Assert.Contains("TlsQuicAckFrames.TryGetRanges (as parsed): 4/4 true", report);
         Assert.Contains("TlsQuicFrameLegality.Permits: 2228/2340 true", report);
 
-        // "1 threw", down from the "3 threw" the paragraph above still describes:
-        // e638c60 taught WriteFrame to emit the 0x31 (length-bearing) DATAGRAM form
+        // "1 threw", down from 3: e638c60 taught WriteFrame to emit the 0x31 (length-bearing) DATAGRAM form
         // instead of refusing it. The axis-1 walk accepts three DATAGRAM frames,
         // 0x30 once and 0x31 twice (the walk's own per-type table, not the reslice
         // one above, carries that split), and the two 0x31 frames moved from threw
         // to ok: 582 -> 584. The one 0x30 (LEN-clear) frame still throws -
-        // WriteDatagramFrameFields still refuses that form by design ("Only the
-        // length-bearing DATAGRAM form (0x31) is sent."). Any SECOND throw is a
-        // real finding.
+        // WriteDatagramFrameFields still refuses that form by design. Any SECOND
+        // throw is a real finding.
         Assert.Contains("TlsQuicFrames.WriteFrame re-encode: 584 ok, 1 threw ArgumentException", report);
 
         // The reviewer's own example, verified directly rather than only through

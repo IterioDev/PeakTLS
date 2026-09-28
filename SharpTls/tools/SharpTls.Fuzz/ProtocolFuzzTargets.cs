@@ -621,10 +621,10 @@ internal sealed class ProtocolFuzzTargets : IDisposable
 
         // Task C17's two DATAGRAM forms, RFC 9221 s4's 0x30 and 0x31 - HAND-BUILT
         // BYTES, and they have to be. Every seed above is encoder output, but
-        // WriteFrame refuses to emit a DATAGRAM by design: this library parses and
-        // drops them to honour an advertisement it makes by default, and
-        // implements no datagram semantics to send. So these two are transcribed
-        // from s4's frame diagram instead - Type (i) = 0x30..0x31, then [Length
+        // WriteFrame now writes only the 0x31 (length-bearing) form and refuses the
+        // 0x30 (length-less) form, so hand-building both here is what keeps the
+        // refused form in the corpus at all. So these two are transcribed from
+        // s4's frame diagram instead - Type (i) = 0x30..0x31, then [Length
         // (i)], then Datagram Data (..).
         //
         // QuicFrameSeedDatagramData is shared with the sequence seed below and is
@@ -647,8 +647,10 @@ internal sealed class ProtocolFuzzTargets : IDisposable
             TlsQuicFrames.WriteFrame(sequence, BuildQuicSeedFrame(rawType));
         }
 
-        // DATAGRAM 0x31 tails the sequence, appended rather than written because
-        // there is no writer. 0x30 is excluded for exactly the reason the LEN-clear
+        // DATAGRAM 0x31 tails the sequence. WriteFrame can write this form now, but
+        // the seed is still appended raw here so the corpus keeps both DATAGRAM
+        // forms built the same way (0x30's hand-built bytes above, 0x31's here).
+        // 0x30 is excluded for exactly the reason the LEN-clear
         // STREAM forms are: RFC 9221 s4 gives it "the end of the packet", so
         // mid-sequence it would swallow everything after it. This is what puts a
         // DATAGRAM in front of the walk with real frames BEFORE it, which the
