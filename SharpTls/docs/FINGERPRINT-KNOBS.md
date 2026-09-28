@@ -469,7 +469,7 @@ byte-identical, over 12 attempts (`TlsQuicConnectionSpec.cs:731-737`).
 
 | Knob | Type | Default | Wire effect | Fingerprinted | Reach |
 | --- | --- | --- | --- | --- | --- |
-| `Parameters` `:523` | `ImmutableArray<TlsQuicTransportParameterSlot>` | **`RfcMinimumParameters`** (`:514-515`, `:445-508`) — 14 entries in the capture's order | The whole extension-57 body, emitted **unchanged, in the order listed** | **Yes — position *and* contents** | in-assembly |
+| `Parameters` | `ImmutableArray<TlsQuicTransportParameterSlot>` | **`RfcMinimumParameters`** — RFC 9000 §7.3's mandatory `initial_source_connection_id` and nothing else; a persona's list lives in its preset | The whole extension-57 body, emitted **unchanged, in the order listed** | **Yes — position *and* contents** | in-assembly |
 
 *Any identifier, any bytes, any order, any subset* (`:518-520`). No refusal here. The only two
 remaining constraints are `TlsQuicTransportParameters`': no duplicate identifier (RFC 9000 §18), and
@@ -486,8 +486,9 @@ a cap on count and encoded length (`:270-272`).
 `default(TlsQuicTransportParameterSlot)` is `Placed(0)`, which `Compose` rejects with a named
 message rather than throwing `NullReferenceException` (`:39-44`).
 
-**The three per-connection draws.** Three of the fourteen are redrawn per connection because a
-pinned per-connection field is itself a fingerprint:
+**The three per-connection draws.** A preset redraws three of its entries per connection because a
+pinned per-connection field is itself a fingerprint (the "Preset use" column describes the
+captured client the Spotify presets in `TlsClient-main/src/TlsClient/TlsPreset.cs` reproduce):
 
 | Draw factory | Signature | Preset use | Range drawn over |
 | --- | --- | --- | --- |
@@ -495,25 +496,14 @@ pinned per-connection field is itself a fingerprint:
 | `DrawnVersionInformation` `:697` | `(uint chosenVersion, IReadOnlyList<uint?> availableVersions)` | Entry **9**, capture line 87. `chosen 1, available [GREASE, 1]`; the `null` element **is** the GREASE slot (`:479-485`) | RFC 9368 §3's `0x?a?a?a?a` pattern — four free nibbles, 16^4 versions, drawn independently (`DrawReservedVersion` `:594-603`) |
 | `DrawnInitialRtt` `:734` | `(ulong identifier, (TimeSpan Min, TimeSpan Max)? fallbackRange)` | Entry **13**, capture line 91, identifier **12583** (`:376`) | `TlsQuicConnectionSpec.InitialRttRange` when set, else the entry's declared fallback — the preset's is `DeclaredInitialRttRange` `:421-422` = **100 ms … 300 ms**, which is **`UNVERIFIED`** |
 
-**`RfcMinimumParameters`** `:445-508` — the fourteen, in the capture's wire order. 4 literal +
-7 placed + 3 drawn = 14 (`:431-440`):
-
-| # | Capture line | Identifier | Kind | Value |
-| --- | --- | --- | --- | --- |
-| 1 | 79 | 12584 `google_connection_options` | Literal | `0x4f524947`, ASCII `ORIG` (`:364`) |
-| 2 | 80 | reserved (GREASE) | **Drawn** | value `0xfb`; identifier redrawn per connection |
-| 3 | 81 | 32 `max_datagram_frame_size` | Literal | 65536 |
-| 4 | 82 | 9 `initial_max_streams_uni` | Placed | 103 |
-| 5 | 83 | 8 `initial_max_streams_bidi` | Placed | 100 |
-| 6 | 84 | 7 `initial_max_stream_data_uni` | Placed | 6291456 |
-| 7 | 85 | 5 `initial_max_stream_data_bidi_local` | Placed | 6291456 |
-| 8 | 86 | 15 `initial_source_connection_id` | Placed | the connection's own SCID (empty, from `SourceConnectionIdLength = 0`) |
-| 9 | 87 | 17 `version_information` | **Drawn** | chosen 1, available `[GREASE, 1]` |
-| 10 | 88 | 1 `max_idle_timeout` | Literal | 30000 |
-| 11 | 89 | 6 `initial_max_stream_data_bidi_remote` | Placed | 6291456 |
-| 12 | 90 | 4 `initial_max_data` | Placed | 15728640 |
-| 13 | 91 | 12583 `initial_rtt` | **Drawn** | fresh µs draw — **not** the capture's 192859 |
-| 14 | 92 | 3 `max_udp_payload_size` | Literal | 1472 — **not** `PaddingTarget`, **not** the transport ceiling |
+**`RfcMinimumParameters`** — one placed slot, `initial_source_connection_id`, which RFC 9000 §7.3
+makes mandatory. It carries no flow control at all: the six `LocalFlowControl` values reach the
+wire only through a `Placed` slot each, so a spec that keeps this default advertises RFC 9000
+§18.2's absent-parameter zero for every limit, and an HTTP/3 peer that may open zero
+unidirectional streams never sends its SETTINGS. Every persona's fourteen-entry list, in its
+captured wire order, is the preset's (`TlsQuicTransportParameterOptions.Entries` in TlsClient);
+a library-owned profile that has to work, such as the MASQUE outer connection, places the six
+flow-control slots itself.
 
 `Compose(TlsQuicConnectionSpec, ReadOnlySpan<byte> sourceConnectionId)` `:794` runs the draws
 **in place at the index they were listed at** (`:825-834`), places the seven, and rejects a source

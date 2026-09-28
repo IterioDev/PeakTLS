@@ -5,16 +5,16 @@
     <PackageId>TlsClient</PackageId>
     <Title>TlsClient</Title>
     <Version>0.6.0-preview.1</Version>
-    <Authors>TlsClient contributors</Authors>
-    <Copyright>Copyright © 2026 TlsClient contributors</Copyright>
+    <Authors>PeakTLS contributors</Authors>
+    <Copyright>Copyright © 2026 PeakTLS contributors</Copyright>
     <Description>A pure managed, fingerprintable HTTP client powered by SharpTls.</Description>
     <PackageTags>tls;http;http2;hpack;fingerprint;clienthello;utls;managed</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/danikishin/TlsClient</PackageProjectUrl>
-    <PackageReleaseNotes>https://github.com/danikishin/TlsClient/releases/tag/v0.6.0-preview.1</PackageReleaseNotes>
-    <RepositoryUrl>https://github.com/danikishin/TlsClient</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/IterioDev/PeakTLS</PackageProjectUrl>
+    <PackageReleaseNotes>See CHANGELOG.md at the repository root.</PackageReleaseNotes>
+    <RepositoryUrl>https://github.com/IterioDev/PeakTLS</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>

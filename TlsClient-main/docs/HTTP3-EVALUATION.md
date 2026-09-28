@@ -92,8 +92,8 @@ Commit hashes below are branch-local and will change if the branch is rebased.
 
 Correspondingly, **the pin described in the original document no longer exists.**
 `src/TlsClient/TlsClient.csproj:35` now consumes SharpTls as a `ProjectReference` to the sibling
-checkout, not as `SharpTls 0.9.0-preview.5`. `README.md` (lines 69, 88, 411) and `ROADMAP.md`
-(line 159) still describe the exact NuGet dependency; **they are stale and were deliberately not
+checkout, not as `SharpTls 0.9.0-preview.5`. The README and roadmap of that time
+still described the exact NuGet dependency; **they were stale and were deliberately not
 edited by this amendment.**
 
 ## What changed
