@@ -17,11 +17,14 @@ reaches the target exactly as the client built it.
 
 ## The dial
 
-`TlsQuicMasqueTransport.ConnectAsync` runs four steps under one deadline. The outer
-connection's own `HandshakeDeadline` bounds step 1; a backstop 1 s behind it bounds DNS and steps
-2 to 4, and the grace lets a stalled outer handshake be reported by the receiver (what it
-discarded and why) rather than by a bare cancellation. A missed deadline is `MasqueTunnelRefused`,
-and its message names the stage the dial was in. An outer spec advertising fewer than three
+`TlsQuicMasqueTransport.ConnectAsync` runs four steps. Step 1 tries every address the proxy name
+resolves to, in resolver order, each under the outer connection's own `HandshakeDeadline`: UDP has
+no refusal to report, so a dead address costs one deadline and says nothing, and the next one is
+tried. A backstop 1 s behind the sum of those deadlines bounds DNS and steps 2 to 4, and the grace
+lets a stalled outer handshake be reported by the receiver (what it discarded and why) rather than
+by a bare cancellation. A missed deadline is `MasqueTunnelRefused`; its message names the stage the
+dial was in and lists the addresses that never answered. Steps 2 to 4 run once, against the address
+that completed the handshake: what the proxy answers there is not an address problem. An outer spec advertising fewer than three
 unidirectional streams (RFC 9114 §6.2) is refused with `ArgumentException` before any packet
 leaves, since the proxy could never open its control stream and send SETTINGS.
 

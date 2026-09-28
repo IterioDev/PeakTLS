@@ -162,6 +162,41 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task AnUnreachableProxyAddressFallsThroughToTheNextOne()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        // The first address swallows every datagram, as a dead front does over UDP; the dial
+        // spends one deadline on it, then dials the second and comes up.
+        await using var harness = await MasqueHarness.CreateAsync(
+            cancellation.Token,
+            peerSettings: FullOffer,
+            unreachableFirst: [new IPEndPoint(IPAddress.Loopback, 9)],
+            handshakeDeadline: TimeSpan.FromSeconds(1));
+
+        Assert.True(harness.Transport.MaxDatagramPayloadSize >= 1200);
+        Assert.True(harness.ClientTransport.MisdirectedSends > 0, "the dead address was never tried");
+    }
+
+    [Fact]
+    public async Task EveryProxyAddressUnreachableIsRefusedNamingEachOne()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await MasqueHarness.CreateAsync(
+                cancellation.Token,
+                peerSettings: FullOffer,
+                unreachableFirst: [new IPEndPoint(IPAddress.Loopback, 9), new IPEndPoint(IPAddress.Loopback, 10)],
+                reachable: false,
+                handshakeDeadline: TimeSpan.FromSeconds(1)));
+
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelRefused, error.Error);
+        Assert.Contains("the outer QUIC handshake with 127.0.0.1:10", error.Message);
+        Assert.Contains("unreachable: 127.0.0.1:9 (TimeoutException)", error.Message);
+    }
+
+    [Fact]
     public async Task AResetBeforeTheResponseIsATunnelClosed()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));

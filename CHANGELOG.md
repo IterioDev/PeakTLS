@@ -15,8 +15,9 @@ All notable changes to both packages in this repository are documented here, Sha
   `SETTINGS_ENABLE_CONNECT_PROTOCOL`) and RFC 9297 HTTP/3 datagrams routed by quarter stream id.
 - RFC 9298 CONNECT-UDP client transport (`TlsQuicMasqueTransport`): dials a MASQUE proxy over
   its own HTTP/3 connection and presents the tunnel as a datagram transport an inner QUIC
-  connection dials through. Every failure is named through `TlsQuicProxyError.Masque*`, and a
-  timeout names the dial stage.
+  connection dials through. Every failure is named through `TlsQuicProxyError.Masque*`, a
+  timeout names the dial stage, and every address the proxy name resolves to is tried in turn
+  before the dial is refused.
 - QPACK dynamic-table encoder with per-spec capacity and insert policy.
 - Handshake timeouts report what the receiver discarded and why; a SOCKS5 UDP relay that
   answers with a TLS alert fails fast as `TlsQuicProxyError.RelayDeliveredTlsAlert`.

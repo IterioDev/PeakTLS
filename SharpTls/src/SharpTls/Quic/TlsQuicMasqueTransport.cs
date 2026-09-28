@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Channels;
@@ -184,14 +185,20 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         var ct = deadline.Token;
         var stage = "resolving the proxy";
 
-        var outer = options.OuterTransport;
+        ITlsQuicDatagramTransport? outer = null;
         TlsQuicConnection? connection = null;
         TlsQuicHttp3Connection? http3Owned = null;
+        var unreachable = new List<string>();
         try
         {
-            // Step 1: the outer QUIC connection.
-            IPEndPoint proxy;
-            if (outer is null)
+            // Step 1: the outer QUIC connection, to the first address that answers. A proxy
+            // name resolves to several addresses (a provider's front has five), and UDP has no
+            // refusal to report: a dead one costs a whole HandshakeDeadline and says nothing.
+            // So each address gets its own deadline, in resolver order, and the backstop is
+            // re-armed to cover all of them. Steps 2 to 4 run once, against the address that
+            // completed the handshake: what the proxy answers there is not an address problem.
+            IReadOnlyList<IPEndPoint> candidates;
+            if (options.OuterTransport is null)
             {
                 var addresses = await System.Net.Dns.GetHostAddressesAsync(options.ProxyEndPoint.Host, ct)
                     .ConfigureAwait(false);
@@ -201,15 +208,18 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                         TlsQuicProxyError.MasqueTunnelRefused,
                         $"'{options.ProxyEndPoint.Host}' resolved to no address.");
                 }
-                proxy = new IPEndPoint(addresses[0], options.ProxyEndPoint.Port);
-                outer = TlsQuicUdpDatagramTransport.Create(proxy.AddressFamily);
+                candidates = [.. addresses.Select(a => new IPEndPoint(a, options.ProxyEndPoint.Port))];
             }
             else
             {
-                proxy = options.OuterRemoteEndPoint
-                    ?? throw new ArgumentException(
-                        "OuterTransport needs OuterRemoteEndPoint.", nameof(options));
+                candidates = options.OuterRemoteEndPoints is { Count: > 0 } endPoints
+                    ? endPoints
+                    : throw new ArgumentException(
+                        "OuterTransport needs at least one OuterRemoteEndPoints entry.",
+                        nameof(options));
             }
+            budget = options.HandshakeDeadline * candidates.Count + DeadlineGrace;
+            deadline.CancelAfter(budget);
 
             var factory = new TlsQuicClientHelloProfileFactory
             {
@@ -218,34 +228,70 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 Tls = options.ConfigureOuterClientHello,
             };
 
-            // The connection reads through the wrapper for its whole life; nothing wakes the
-            // dial's own pumps, so they read exactly as they would from the socket.
-            var wakeable = new WakeableTransport(outer, proxy);
-            connection = new TlsQuicConnection(
-                new TlsQuicConnectionOptions(wakeable, proxy, options.OuterSpec)
-                {
-                    HandshakeDeadline = options.HandshakeDeadline,
-                },
-                sourceConnectionId =>
-                {
-                    // TlsClient's Http3Connection.CreateTlsClient, minus the session-level
-                    // hooks a proxy dial has none of.
-                    var client = new CustomTlsQuicClientOptions
-                    {
-                        ServerName = options.ProxyEndPoint.Host,
-                        ServerPort = options.ProxyEndPoint.Port,
-                        ClientHello = factory.Create(sourceConnectionId.Span),
-                    };
-                    client.CertificateValidation.DangerouslySkipServerCertificateValidation =
-                        options.DangerouslySkipOuterCertificateValidation;
+            IPEndPoint proxy = candidates[0];
+            WakeableTransport? wakeable = null;
+            for (var index = 0; index < candidates.Count; index++)
+            {
+                proxy = candidates[index];
+                outer = options.OuterTransport
+                    ?? TlsQuicUdpDatagramTransport.Create(proxy.AddressFamily);
 
-                    // An OCSP fetch inside the pump loop would spend the handshake deadline
-                    // between two datagrams; chain and hostname validation stay on.
-                    client.CertificateValidation.RevocationMode = X509RevocationMode.NoCheck;
-                    return new CustomTlsQuicClient(client);
-                });
-            stage = $"the outer QUIC handshake with {proxy}";
-            await connection.ConnectAsync(ct).ConfigureAwait(false);
+                // The connection reads through the wrapper for its whole life; nothing wakes
+                // the dial's own pumps, so they read exactly as they would from the socket.
+                wakeable = new WakeableTransport(outer, proxy);
+                connection = new TlsQuicConnection(
+                    new TlsQuicConnectionOptions(wakeable, proxy, options.OuterSpec)
+                    {
+                        HandshakeDeadline = options.HandshakeDeadline,
+                    },
+                    sourceConnectionId =>
+                    {
+                        // TlsClient's Http3Connection.CreateTlsClient, minus the session-level
+                        // hooks a proxy dial has none of.
+                        var client = new CustomTlsQuicClientOptions
+                        {
+                            ServerName = options.ProxyEndPoint.Host,
+                            ServerPort = options.ProxyEndPoint.Port,
+                            ClientHello = factory.Create(sourceConnectionId.Span),
+                        };
+                        client.CertificateValidation.DangerouslySkipServerCertificateValidation =
+                            options.DangerouslySkipOuterCertificateValidation;
+
+                        // An OCSP fetch inside the pump loop would spend the handshake deadline
+                        // between two datagrams; chain and hostname validation stay on.
+                        client.CertificateValidation.RevocationMode = X509RevocationMode.NoCheck;
+                        return new CustomTlsQuicClient(client);
+                    });
+                stage = $"the outer QUIC handshake with {proxy}";
+                try
+                {
+                    await connection.ConnectAsync(ct).ConfigureAwait(false);
+                    break;
+                }
+                catch (Exception exception) when (
+                    index < candidates.Count - 1
+                        && !ct.IsCancellationRequested
+                        && exception is TimeoutException or SocketException)
+                {
+                    // Silence or a socket error is what an unreachable address looks like; a
+                    // proxy that answered and then refused is not, and is reported as is.
+                    unreachable.Add($"{proxy} ({exception.GetType().Name})");
+                    await connection.DisposeAsync().ConfigureAwait(false);
+                    connection = null;
+                    if (outer != options.OuterTransport)
+                    {
+                        await outer.DisposeAsync().ConfigureAwait(false);
+                    }
+                    outer = null;
+                }
+            }
+
+            // The loop either broke out with a connected outer or let the last attempt's
+            // exception through; the compiler cannot see that, so say it once.
+            if (connection is null || wakeable is null || outer is null)
+            {
+                throw new UnreachableException("The address loop neither connected nor threw.");
+            }
 
             // Step 2: the proxy must offer extended CONNECT and datagrams.
             stage = "waiting for the proxy's SETTINGS";
@@ -373,10 +419,13 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             // the receiver's discard report; the backstop throws OperationCanceledException.
             // TlsQuicProxyException has one constructor, (error, message); the cause rides in
             // the text.
+            var earlier = unreachable.Count == 0
+                ? string.Empty
+                : $" Addresses tried before it and unreachable: {string.Join(", ", unreachable)}.";
             throw new TlsQuicProxyException(
                 TlsQuicProxyError.MasqueTunnelRefused,
                 $"The MASQUE tunnel did not come up within {budget} during {stage} "
-                    + $"({exception.GetType().Name}: {exception.Message}).");
+                    + $"({exception.GetType().Name}: {exception.Message}).{earlier}");
         }
         catch (InvalidOperationException exception)
         {

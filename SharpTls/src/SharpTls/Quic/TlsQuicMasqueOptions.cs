@@ -44,9 +44,11 @@ internal sealed class TlsQuicMasqueOptions
     /// name is resolved. The caller keeps ownership and disposes it.</summary>
     internal ITlsQuicDatagramTransport? OuterTransport { get; init; }
 
-    /// <summary>Tests only: the endpoint <see cref="OuterTransport"/> must address (an in-memory
-    /// pair drops anything else). Required when <see cref="OuterTransport"/> is set.</summary>
-    internal IPEndPoint? OuterRemoteEndPoint { get; init; }
+    /// <summary>Tests only: the endpoints the dial tries in order through
+    /// <see cref="OuterTransport"/>, standing in for the proxy name's resolved addresses (an
+    /// in-memory pair drops anything not addressed to its other half, which is how a test makes
+    /// an address unreachable). Required when <see cref="OuterTransport"/> is set.</summary>
+    internal IReadOnlyList<IPEndPoint>? OuterRemoteEndPoints { get; init; }
 
     /// <summary>Tests only: skips certificate validation on the outer connection.</summary>
     internal bool DangerouslySkipOuterCertificateValidation { get; init; }

@@ -100,6 +100,12 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// <param name="wrapOuter">Wraps the client half of the pair before the dial uses it, for a
     /// test that has to see or hold the outer connection's sends; it stays the harness's to
     /// dispose.</param>
+    /// <param name="unreachableFirst">Endpoints the dial tries before the live one; the pair
+    /// drops every datagram to them, so each costs one <paramref name="handshakeDeadline"/>.
+    /// </param>
+    /// <param name="reachable">When <see langword="false"/>, the live endpoint is left out and
+    /// the dial has only <paramref name="unreachableFirst"/> to try.</param>
+    /// <param name="handshakeDeadline">Replaces the options' 10 s default, per address.</param>
     /// <exception cref="Exception">Whatever the dial threw, after the peer is torn down; or
     /// the script's own failure, when it failed.</exception>
     internal static async ValueTask<MasqueHarness> CreateAsync(
@@ -110,13 +116,17 @@ internal sealed class MasqueHarness : IAsyncDisposable
         bool answerWithReset = false,
         TlsQuicConnectionSpec? outerSpec = null,
         bool answerWithClose = false,
-        Func<ITlsQuicDatagramTransport, ITlsQuicDatagramTransport>? wrapOuter = null)
+        Func<ITlsQuicDatagramTransport, ITlsQuicDatagramTransport>? wrapOuter = null,
+        IPEndPoint[]? unreachableFirst = null,
+        bool reachable = true,
+        TimeSpan? handshakeDeadline = null)
     {
         var pki = TestPki.Create();
         var credential = Credential(pki);
         var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
         var options = new TlsQuicMasqueOptions
         {
+            HandshakeDeadline = handshakeDeadline ?? TimeSpan.FromSeconds(10),
             ProxyEndPoint = new DnsEndPoint("proxy.test", 50000),
             TargetHost = "target.test",
             TargetPort = 443,
@@ -127,7 +137,12 @@ internal sealed class MasqueHarness : IAsyncDisposable
             OuterHttp3Spec = new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable },
             ConfigureOuterClientHello = _ => { },
             OuterTransport = wrapOuter is null ? clientTransport : wrapOuter(clientTransport),
-            OuterRemoteEndPoint = serverTransport.LocalEndPoint,
+            // The pair drops anything not addressed to the server half, so an endpoint listed
+            // before it is an address that never answers.
+            OuterRemoteEndPoints = reachable
+                ? [.. unreachableFirst ?? [], serverTransport.LocalEndPoint]
+                : unreachableFirst ?? throw new ArgumentException(
+                    "An unreachable proxy needs at least one endpoint.", nameof(unreachableFirst)),
 
             // TestPki's root is not machine-trusted and the leaf does not name proxy.test.
             DangerouslySkipOuterCertificateValidation = true,
