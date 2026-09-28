@@ -457,6 +457,7 @@ internal sealed class Http3Connection : IHttpConnection
             OuterHttp3Spec = outer.Http3Spec,
             ConfigureOuterClientHello = outer.ConfigureClientHello,
             HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
+            InnerDatagramCeiling = masque.MaxInnerDatagramPayload,
         };
 
         // A TUNNEL THE PROXY ENDS DURING THE INNER HANDSHAKE IS DIALLED AGAIN, up to

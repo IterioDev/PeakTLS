@@ -40,6 +40,12 @@ internal sealed class TlsQuicMasqueOptions
     /// <summary>Bounds steps 1 to 4 of the dial as one deadline.</summary>
     public TimeSpan HandshakeDeadline { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>A ceiling on the inner UDP payload below the one the outer connection's frame
+    /// budget gives, for a proxy whose guide states a smaller number than the arithmetic
+    /// allows; <see langword="null"/> keeps the arithmetic. Never below RFC 9000 s14.1's 1200,
+    /// which an inner Initial needs.</summary>
+    public int? InnerDatagramCeiling { get; init; }
+
     /// <summary>Tests only: an already-connected outer transport, so no socket is opened and no
     /// name is resolved. The caller keeps ownership and disposes it.</summary>
     internal ITlsQuicDatagramTransport? OuterTransport { get; init; }

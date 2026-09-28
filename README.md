@@ -349,8 +349,10 @@ The inner connection, the one the origin sees, is unchanged: preset, transport p
 their rotation, QPACK, packet sizes. Only the proxy sees the outer connection, so its shape is
 the RFC minimum rather than a persona's; the optional `configureOuter` hook receives its
 `TlsQuicOptions` last. Inner datagrams are capped at the tunnel's ceiling: the outer path MTU
-is fixed at 1392 with PMTUD off, which leaves about 1,360 bytes per inner datagram (1,358 with
-an 8-byte proxy connection ID). The inner connection takes that ceiling from the transport.
+is fixed at 1392 with PMTUD off, which leaves about 1,360 bytes of frame budget per inner
+datagram, and the `maxInnerDatagramPayload` argument (default 1,352, the Oxylabs guide's
+number for inner packets) caps it further. The inner connection takes that ceiling from the
+transport.
 
 Failures are named on `TlsQuicProxyException.Error`, usually found as an inner exception:
 

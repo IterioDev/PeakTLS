@@ -431,7 +431,8 @@ static TlsClient.TlsPresets.Spotify917602050IOS260Http3.get -> TlsClient.TlsPres
 static TlsClient.TlsPresets.Spotify918602428IOS270Http3.get -> TlsClient.TlsPreset!
 static TlsClient.TlsProfiles.Spotify917602050IOS260Quic.get -> TlsClient.TlsProfile!
 static TlsClient.TlsProfiles.Spotify918602428IOS270Quic.get -> TlsClient.TlsProfile!
-static TlsClient.TlsProxy.Masque(string! address, string! username, string! password, System.Action<TlsClient.TlsQuicOptions!>? configureOuter = null) -> TlsClient.TlsProxy!
+static TlsClient.TlsProxy.Masque(string! address, string! username, string! password, System.Action<TlsClient.TlsQuicOptions!>? configureOuter = null, int maxInnerDatagramPayload = 1352) -> TlsClient.TlsProxy!
+const TlsClient.TlsProxy.DefaultMaxInnerDatagramPayload = 1352 -> int
 static TlsClient.TlsQuicOptions.ApplyDefaultClientHello(SharpTls.ClientHelloBuilder! builder) -> void
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(System.Func<(ulong Id, byte[]! Value)?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!
 static TlsClient.TlsQuicTransportParameterEntry.Drawn(ulong id, System.Func<byte[]?>! draw) -> TlsClient.TlsQuicTransportParameterEntry!

@@ -106,6 +106,8 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// <param name="reachable">When <see langword="false"/>, the live endpoint is left out and
     /// the dial has only <paramref name="unreachableFirst"/> to try.</param>
     /// <param name="handshakeDeadline">Replaces the options' 10 s default, per address.</param>
+    /// <param name="innerCeiling">A caller's inner datagram ceiling, below the arithmetic one.
+    /// </param>
     /// <exception cref="Exception">Whatever the dial threw, after the peer is torn down; or
     /// the script's own failure, when it failed.</exception>
     internal static async ValueTask<MasqueHarness> CreateAsync(
@@ -119,7 +121,8 @@ internal sealed class MasqueHarness : IAsyncDisposable
         Func<ITlsQuicDatagramTransport, ITlsQuicDatagramTransport>? wrapOuter = null,
         IPEndPoint[]? unreachableFirst = null,
         bool reachable = true,
-        TimeSpan? handshakeDeadline = null)
+        TimeSpan? handshakeDeadline = null,
+        int? innerCeiling = null)
     {
         var pki = TestPki.Create();
         var credential = Credential(pki);
@@ -127,6 +130,7 @@ internal sealed class MasqueHarness : IAsyncDisposable
         var options = new TlsQuicMasqueOptions
         {
             HandshakeDeadline = handshakeDeadline ?? TimeSpan.FromSeconds(10),
+            InnerDatagramCeiling = innerCeiling,
             ProxyEndPoint = new DnsEndPoint("proxy.test", 50000),
             TargetHost = "target.test",
             TargetPort = 443,

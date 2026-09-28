@@ -73,14 +73,29 @@ public sealed class TlsProxy
     /// <summary>An RFC 9298 CONNECT-UDP proxy reached over HTTP/3 on an explicit UDP port.</summary>
     /// <remarks>Used through <see cref="TlsSessionOptions"/>'s Quic.Proxy. TCP requests never use
     /// it. The port is required; <c>:443</c> counts as default and is rejected.</remarks>
+    /// <summary>The inner UDP payload ceiling a MASQUE dial applies by default: the 1352
+    /// bytes the Oxylabs MASQUE guide states for inner packets under its 1392-byte outer
+    /// packets. The outer connection's own arithmetic allows a few bytes more; a proxy that
+    /// ends a tunnel on a datagram it finds too large does not say so, so the guide's number
+    /// is the default and <see cref="Masque"/> takes another.</summary>
+    public const int DefaultMaxInnerDatagramPayload = 1352;
+
+    /// <summary>An RFC 9298 CONNECT-UDP proxy reached over HTTP/3 on an explicit UDP port.</summary>
+    /// <remarks>Used through <see cref="TlsSessionOptions"/>'s Quic.Proxy. TCP requests never use
+    /// it. The port is required; <c>:443</c> counts as default and is rejected.
+    /// <paramref name="maxInnerDatagramPayload"/> caps every inner datagram; it can only lower
+    /// what the outer connection's frame budget allows, and cannot go below RFC 9000 s14.1's
+    /// 1200, which an inner Initial needs.</remarks>
     public static TlsProxy Masque(
         string address,
         string username,
         string password,
-        Action<TlsQuicOptions>? configureOuter = null)
+        Action<TlsQuicOptions>? configureOuter = null,
+        int maxInnerDatagramPayload = DefaultMaxInnerDatagramPayload)
     {
         ArgumentNullException.ThrowIfNull(username);
         ArgumentNullException.ThrowIfNull(password);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxInnerDatagramPayload, 1200);
         var uri = new Uri(address, UriKind.Absolute);
         var proxy = Create(
             TlsProxyType.Masque,
@@ -95,8 +110,14 @@ public sealed class TlsProxy
                 nameof(address));
         }
         proxy.ConfigureOuterQuic = configureOuter;
+        proxy.MaxInnerDatagramPayload = maxInnerDatagramPayload;
         return proxy;
     }
+
+    /// <summary>The inner datagram ceiling this MASQUE proxy applies; see
+    /// <see cref="DefaultMaxInnerDatagramPayload"/>. Not part of <see cref="PoolKey"/> for the
+    /// same reason <see cref="ConfigureOuterQuic"/> is not.</summary>
+    internal int MaxInnerDatagramPayload { get; private set; } = DefaultMaxInnerDatagramPayload;
 
     /// <summary>Shapes the OUTER QUIC connection to a MASQUE proxy; null means TlsClient's
     /// defaults. Only the proxy sees that connection; the target sees the inner one. Not part of

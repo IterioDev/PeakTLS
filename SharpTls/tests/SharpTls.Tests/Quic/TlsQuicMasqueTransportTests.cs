@@ -196,6 +196,18 @@ public sealed class TlsQuicMasqueTransportTests
         Assert.Contains("unreachable: 127.0.0.1:9 (TimeoutException)", error.Message);
     }
 
+    [Theory]
+    [InlineData(1300, 1300)]    // a guide's number below the arithmetic wins
+    [InlineData(2000, 1358)]    // one above it changes nothing
+    public async Task ACallersCeilingCanOnlyLowerTheArithmeticOne(int ceiling, int expected)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await using var harness = await MasqueHarness.CreateAsync(
+            cancellation.Token, peerSettings: FullOffer, innerCeiling: ceiling);
+
+        Assert.Equal(expected, harness.Transport.MaxDatagramPayloadSize);
+    }
+
     [Fact]
     public async Task AResetBeforeTheResponseIsATunnelClosed()
     {

@@ -25,4 +25,19 @@ public sealed class TlsProxyMasqueTests
 
     [Fact]
     public void TheEnumValueIsThree() => Assert.Equal(3, (int)TlsProxyType.Masque);
+
+    [Fact]
+    public void TheInnerDatagramCeilingIsTheGuidesByDefaultAndCanOnlyBeLowered()
+    {
+        var proxy = TlsProxy.Masque("https://masque.example:50000", "u", "p");
+        Assert.Equal(1352, proxy.MaxInnerDatagramPayload);
+        Assert.Equal(TlsProxy.DefaultMaxInnerDatagramPayload, proxy.MaxInnerDatagramPayload);
+
+        var lowered = TlsProxy.Masque("https://masque.example:50000", "u", "p", maxInnerDatagramPayload: 1280);
+        Assert.Equal(1280, lowered.MaxInnerDatagramPayload);
+
+        // RFC 9000 s14.1: an inner Initial needs 1200 bytes, so a ceiling under it is refused.
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            TlsProxy.Masque("https://masque.example:50000", "u", "p", maxInnerDatagramPayload: 1199));
+    }
 }

@@ -113,8 +113,10 @@ All notable changes to both packages in this repository are documented here, Sha
   `MasqueTunnelClosed`; failures reach the caller as `TlsQuicProxyException` with a `Masque*`
   error. Live tests behind `TLSCLIENT_LIVE_MASQUE`. A tunnel the proxy ends during the inner
   handshake is dialled again, up to `Quic.MaximumAssociationAttempts` tunnels in all, and the
-  final error says how long each tunnel lived, what crossed it, and what the proxy wrote on the
-  tunnel stream before ending it.
+  final error says how long each tunnel lived, what crossed it (counts and the last sizes each
+  way), and what the proxy wrote on the tunnel stream before ending it. `TlsProxy.Masque` takes
+  `maxInnerDatagramPayload` (default 1352, the Oxylabs guide's inner size) to cap inner
+  datagrams below the outer frame budget.
 - Spotify 9.1.86 / iOS 27 presets (`spotify-9.1.86-ios-27.0-h3`, `-h2`) with the QPACK
   dynamic table, the h2 preface and HPACK policy from the capture.
 - SOCKS5: the authentication reply `VER 0x05` is tolerated; CONNECT and UDP ASSOCIATE

@@ -167,6 +167,12 @@ datagram capacity:
 
 1358 is the inner connection's usable datagram payload for an 8-byte server connection ID; a
 longer connection ID lowers it by exactly the difference. The transport asserts this capacity is
+
+A caller may cap the inner payload below that arithmetic through
+`TlsQuicMasqueOptions.InnerDatagramCeiling`. TlsClient passes `TlsProxy.Masque`'s
+`maxInnerDatagramPayload`, default 1352, the Oxylabs guide's inner size, so a tunnel to that proxy
+carries the guide's number rather than the few bytes more the arithmetic allows. The ceiling is
+never below RFC 9000 s14.1's 1200.
 at least 1200 bytes — an inner Initial (RFC 9000 §14.1) — at dial time (step 2 above) and fails
 with `MasqueNotOffered` rather than let a handshake hang. The proxy's own 1500-byte UDP datagram
 ceiling never binds here: the 1392-byte outer packet already sits well under it.

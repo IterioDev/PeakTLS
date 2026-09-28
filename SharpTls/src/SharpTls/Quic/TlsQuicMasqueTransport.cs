@@ -118,7 +118,8 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         WakeableTransport wakeable,
         ITlsQuicDatagramTransport? ownedOuter,
         ulong streamId,
-        IPEndPoint targetEndPoint)
+        IPEndPoint targetEndPoint,
+        int? innerCeiling)
     {
         _connection = connection;
         _http3 = http3;
@@ -128,10 +129,29 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         _targetEndPoint = targetEndPoint;
 
         // RFC 9297 s2.1: an HTTP Datagram is the Quarter Stream ID varint then the payload;
-        // RFC 9298 s4 puts the Context ID in front of the UDP payload inside that.
-        MaxDatagramPayloadSize = connection.MaximumDatagramFramePayload
+        // RFC 9298 s4 puts the Context ID in front of the UDP payload inside that. A caller's
+        // ceiling (a proxy guide's stated inner size) can only lower it.
+        var arithmetic = connection.MaximumDatagramFramePayload
             - QuicVariableLengthInteger.GetEncodedLength(streamId / 4)
             - ContextIdLength;
+        MaxDatagramPayloadSize = Math.Min(arithmetic, innerCeiling ?? int.MaxValue);
+    }
+
+    /// <summary>The sizes of the last few datagrams each way, for a tunnel-ended message: a
+    /// proxy or exit that ends a tunnel on one particular size shows it here.</summary>
+    private readonly Queue<int> _sentSizes = new();
+
+    private readonly Queue<int> _receivedSizes = new();
+
+    private const int RememberedSizes = 6;
+
+    private static void Remember(Queue<int> sizes, int size)
+    {
+        sizes.Enqueue(size);
+        while (sizes.Count > RememberedSizes)
+        {
+            sizes.Dequeue();
+        }
     }
 
     /// <summary>The largest inner UDP payload one outer DATAGRAM frame carries: the outer
@@ -147,7 +167,9 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     {
         var age = Stopwatch.GetElapsedTime(_openedAt);
         var text = $"{how} {age.TotalSeconds:F1} s after it opened, with {_sentIntoTunnel} "
-            + $"datagram(s) sent into it and {_receivedFromTunnel} received back.";
+            + $"datagram(s) sent into it and {_receivedFromTunnel} received back"
+            + $" (last sizes sent: {string.Join(", ", _sentSizes)}; received: "
+            + $"{string.Join(", ", _receivedSizes)}; ceiling {MaxDatagramPayloadSize}).";
         if (_sentIntoTunnel > 0 && _receivedFromTunnel == 0)
         {
             text += " Nothing ever came back: the exit behind this proxy session could not carry"
@@ -440,7 +462,8 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 wakeable,
                 outer == options.OuterTransport ? null : outer,
                 stream.Id,
-                options.TargetEndPoint);
+                options.TargetEndPoint,
+                options.InnerDatagramCeiling);
             transport._owner = Task.Run(transport.RunAsync);
             http3Owned = null;
             connection = null;
@@ -673,6 +696,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                         }
                         _stalled = null;
                         _sentIntoTunnel++;
+                        Remember(_sentSizes, next.Length - ContextIdLength);
                     }
                 }
                 while (await _connection.SendPendingAsync(_lifetime.Token).ConfigureAwait(false));
@@ -703,6 +727,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                     }
                     _inbound.Writer.TryWrite(datagram[cursor..]);
                     _receivedFromTunnel++;
+                    Remember(_receivedSizes, datagram.Length - cursor);
                 }
 
                 var response = _http3.ResponseFor(_streamId);
