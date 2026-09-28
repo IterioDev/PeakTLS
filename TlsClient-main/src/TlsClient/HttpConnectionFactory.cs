@@ -22,22 +22,10 @@ internal static class HttpConnectionFactory
         if (versionPolicy == TlsHttpVersionPolicy.Http3Only)
 #pragma warning restore TLSCLIENT3
         {
-            // ONLY SOCKS5 CAN CARRY QUIC, and the refusal names the type rather than
-            // blaming proxies as a category. RFC 1928 section 7's UDP ASSOCIATE is the only
-            // one of the three that relays datagrams: HTTP CONNECT tunnels a TCP byte stream
-            // and SOCKS4 has no UDP at all. RFC 9298's CONNECT-UDP would give the HTTP arm a
-            // path, but it needs the proxy to implement it and this client does not speak it.
-            if (proxy is not null && proxy.Type != TlsProxyType.Socks5)
-            {
-                throw new NotSupportedException(
-                    $"HTTP/3 cannot be tunnelled through a {proxy.Type} proxy: QUIC is UDP " +
-                    "and only SOCKS5 relays datagrams, through RFC 1928 UDP ASSOCIATE. Use a " +
-                    "SOCKS5 proxy for HTTP/3, a TCP version policy for this one, or clear " +
-                    "the proxy.");
-            }
+            ThrowIfProxyCannotCarryHttp3(proxy, configuration.Quic);
             return await Http3Connection.CreateAsync(
                 origin,
-                proxy,
+                configuration.Quic.Proxy is null ? proxy : null,
                 configuration,
                 tls13SessionCache,
                 dnsResolver,
@@ -61,5 +49,23 @@ internal static class HttpConnectionFactory
                 cancellationToken).ConfigureAwait(false);
         }
         return new Http11Connection(transport);
+    }
+
+    /// <summary>Refuses an HTTP/3 dial whose TCP-side proxy cannot carry QUIC. When
+    /// <see cref="TlsQuicConfiguration.Proxy"/> names a MASQUE proxy the tunnel carries h3 and
+    /// <paramref name="proxy"/> is TCP's business only, so nothing is checked.</summary>
+    internal static void ThrowIfProxyCannotCarryHttp3(TlsProxy? proxy, TlsQuicConfiguration quic)
+    {
+        if (quic.Proxy is not null)
+        {
+            return;
+        }
+        if (proxy is not null && proxy.Type != TlsProxyType.Socks5)
+        {
+            throw new NotSupportedException(
+                $"HTTP/3 cannot be tunnelled through a {proxy.Type} proxy in options.Proxy: QUIC is UDP. "
+                + "Use a SOCKS5 proxy whose UDP ASSOCIATE relays datagrams, or an RFC 9298 MASQUE proxy in "
+                + "options.Quic.Proxy, or a TCP version policy for this one.");
+        }
     }
 }

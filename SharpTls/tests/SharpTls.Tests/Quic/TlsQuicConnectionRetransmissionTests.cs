@@ -1910,7 +1910,7 @@ public sealed partial class TlsQuicConnectionTests
     // not make observable - its own comment names this task for it. SINCE TASK A3-14 THIS IS
     // ALSO THE SHIPPED DEFAULT, and it is still set explicitly here: a test that means to
     // exercise one arm of a knob should say which arm, not inherit it.
-    private static TlsQuicConnectionSpec RetransmittingProbeSpec(
+    internal static TlsQuicConnectionSpec RetransmittingProbeSpec(
         ITlsQuicCongestionController? controller = null,
         int? probePacketsPerPto = null) => new()
         {
@@ -2073,7 +2073,7 @@ public sealed partial class TlsQuicConnectionTests
     // A controller that answers one question and records what it was asked, so that "the gate
     // was consulted" and "the gate was consulted about the right number" are separate claims.
     // Every other member is a no-op: this is a gate, not a second NewReno.
-    private sealed class ScriptedSendGate : ITlsQuicCongestionController
+    internal sealed class ScriptedSendGate : ITlsQuicCongestionController
     {
         private readonly List<int> _asked = [];
 

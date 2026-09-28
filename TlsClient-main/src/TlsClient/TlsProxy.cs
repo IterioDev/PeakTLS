@@ -4,7 +4,7 @@ using System.Text;
 
 namespace TlsClient;
 
-/// <summary>Describes an HTTP CONNECT or SOCKS5 proxy.</summary>
+/// <summary>Describes an HTTP CONNECT, SOCKS5, or MASQUE (RFC 9298 CONNECT-UDP) proxy.</summary>
 public sealed class TlsProxy
 {
     private readonly NetworkCredential? _credentials;
@@ -19,7 +19,7 @@ public sealed class TlsProxy
         _credentials = credentials is null
             ? null
             : new NetworkCredential(credentials.UserName, credentials.Password, credentials.Domain);
-        PoolKey = CreatePoolKey(type, address, _credentials);
+        PoolKey = CreatePoolKey(type, address, EffectivePort, _credentials);
     }
 
     /// <summary>Gets the proxy protocol.</summary>
@@ -70,12 +70,51 @@ public sealed class TlsProxy
             new NetworkCredential(username, password));
     }
 
+    /// <summary>An RFC 9298 CONNECT-UDP proxy reached over HTTP/3 on an explicit UDP port.</summary>
+    /// <remarks>Used through <see cref="TlsSessionOptions"/>'s Quic.Proxy. TCP requests never use
+    /// it. The port is required; <c>:443</c> counts as default and is rejected.</remarks>
+    public static TlsProxy Masque(
+        string address,
+        string username,
+        string password,
+        Action<TlsQuicOptions>? configureOuter = null)
+    {
+        ArgumentNullException.ThrowIfNull(username);
+        ArgumentNullException.ThrowIfNull(password);
+        var uri = new Uri(address, UriKind.Absolute);
+        var proxy = Create(
+            TlsProxyType.Masque,
+            uri,
+            Uri.UriSchemeHttps,
+            new NetworkCredential(username, password));
+        if (proxy.Address.IsDefaultPort)
+        {
+            throw new ArgumentException(
+                "A MASQUE proxy address must name a UDP port other than 443 explicitly, "
+                    + "for example https://proxy.example:50000.",
+                nameof(address));
+        }
+        proxy.ConfigureOuterQuic = configureOuter;
+        return proxy;
+    }
+
+    /// <summary>Shapes the OUTER QUIC connection to a MASQUE proxy; null means TlsClient's
+    /// defaults. Only the proxy sees that connection; the target sees the inner one. Not part of
+    /// <see cref="PoolKey"/>: one proxy endpoint and credential has one outer shape in the
+    /// connection pool, so callers wanting different outer shapes use different proxy instances
+    /// with different credentials or addresses.</summary>
+    internal Action<TlsQuicOptions>? ConfigureOuterQuic { get; private set; }
+
     /// <inheritdoc />
     public override string ToString() => $"{Type} proxy {Address.Host}:{EffectivePort}";
 
-    internal int EffectivePort => Address.IsDefaultPort || Address.Port < 0
-        ? Type == TlsProxyType.Http ? 80 : 1080
-        : Address.Port;
+    // Masque() rejects a default-port address before returning, so a Masque proxy's own port is
+    // always the one it was built with; only Http/Socks5 fall back to a conventional port.
+    internal int EffectivePort => Type == TlsProxyType.Masque
+        ? Address.Port
+        : Address.IsDefaultPort || Address.Port < 0
+            ? Type == TlsProxyType.Http ? 80 : 1080
+            : Address.Port;
 
     internal string PoolKey { get; }
 
@@ -149,11 +188,9 @@ public sealed class TlsProxy
     private static string CreatePoolKey(
         TlsProxyType type,
         Uri address,
+        int port,
         NetworkCredential? credentials)
     {
-        var port = address.IsDefaultPort || address.Port < 0
-            ? type == TlsProxyType.Http ? 80 : 1080
-            : address.Port;
         var credentialBytes = Encoding.UTF8.GetBytes(
             $"{credentials?.UserName}\0{credentials?.Password}");
         var credentialHash = Convert.ToHexString(SHA256.HashData(credentialBytes));
@@ -180,4 +217,7 @@ public enum TlsProxyType
 
     /// <summary>SOCKS5 with optional username/password authentication.</summary>
     Socks5 = 2,
+
+    /// <summary>MASQUE: an RFC 9298 CONNECT-UDP proxy reached over HTTP/3.</summary>
+    Masque = 3,
 }

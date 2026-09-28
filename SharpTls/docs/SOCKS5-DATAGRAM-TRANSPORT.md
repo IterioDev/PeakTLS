@@ -180,6 +180,9 @@ TlsClient's `Socks5LivenessTransport` fails such an association at once with
 handshake deadline; SharpTls's own packet receiver keeps RFC 9000 s12.2's rule and only counts
 the discard.
 
+A proxy that only tunnels UDP into TCP cannot carry QUIC; providers that offer RFC 9298
+CONNECT-UDP are reached through `TlsQuicMasqueTransport`, see MASQUE-DATAGRAM-TRANSPORT.md.
+
 ## Error model
 
 ```csharp

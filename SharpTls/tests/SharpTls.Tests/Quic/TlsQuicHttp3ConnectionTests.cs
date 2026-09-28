@@ -895,7 +895,7 @@ public sealed partial class TlsQuicConnectionTests
     // s19.4's frame as the PEER sends it, built here for the reason Stream's own note in
     // TlsQuicConnectionStreamTests gives: these are the peer's frames, and a helper that reused
     // the send path's construction would make the two directions one implementation.
-    private static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
+    internal static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
     {
         RawType = (ulong)TlsQuicFrameType.ResetStream,
         StreamId = streamId,
@@ -2013,7 +2013,7 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(1, harness.Http3.Streams.EncoderPolicy.Table!.BlockedStreamCount);
     }
 
-    private static byte[] HeadersPayload(byte[] streamData)
+    internal static byte[] HeadersPayload(byte[] streamData)
     {
         var offset = 0;
         Assert.Equal(
@@ -2023,7 +2023,7 @@ public sealed partial class TlsQuicConnectionTests
         return payload.ToArray();
     }
 
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         private readonly TestPki _pki;
         private readonly TlsServerCertificate _credential;
@@ -2075,7 +2075,8 @@ public sealed partial class TlsQuicConnectionTests
             TlsQuicHttp3Spec? spec = null,
             IReadOnlyList<TlsQuicTransportParameter>? flowControl = null,
             bool openLocalStreams = true,
-            ulong? maxDatagramFrameSize = 65536)
+            ulong? maxDatagramFrameSize = 65536,
+            TlsQuicConnectionSpec? connectionSpec = null)
         {
             var pki = TestPki.Create();
             var credential = Credential(pki);
@@ -2087,7 +2088,7 @@ public sealed partial class TlsQuicConnectionTests
             // refuses, so this line is the harness saying what it means rather than the harness
             // opting out of the check.
             var connection = Connection(
-                clientTransport, serverTransport, pki,
+                clientTransport, serverTransport, pki, connectionSpec,
                 maxDatagramFrameSize: maxDatagramFrameSize);
             var server = Server(
                 credential, connection.OriginalDestinationConnectionId, flowControl: flowControl);
@@ -2415,7 +2416,7 @@ public sealed partial class TlsQuicConnectionTests
 
     // The peer's s6.2.1 opening flight: the stream-type varint and a SETTINGS frame, as one
     // STREAM frame at offset 0 with no FIN.
-    private static TlsQuicFrame PeerControl(params TlsQuicHttp3Setting[] settings)
+    internal static TlsQuicFrame PeerControl(params TlsQuicHttp3Setting[] settings)
     {
         var bytes = new List<byte> { (byte)TlsQuicHttp3StreamType.Control };
         var payload = new List<byte>();
@@ -2453,7 +2454,7 @@ public sealed partial class TlsQuicConnectionTests
     // side produced, so the field-line layout has evidence outside this file. What these tests
     // add is the SEQUENCE - that a field section reaches a reader through a QUIC stream, a
     // frame layer and a response state machine, in that order.
-    private static byte[] ResponseBytes(
+    internal static byte[] ResponseBytes(
         int status, (string Name, string Value)[] fields, byte[] body)
     {
         var section = new byte[4096];

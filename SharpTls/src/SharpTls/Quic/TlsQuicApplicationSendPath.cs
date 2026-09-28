@@ -604,7 +604,64 @@ internal sealed partial class TlsQuicConnection
         // transport parameters have arrived.
         FlushRetireConnectionIds();
 
-        if (_streams is { } streams && streams.HasPendingFrames && SendGateAdmits(now))
+        // RFC 9002 s7's gate, asked AT MOST ONCE PER BUILD. It spends pacer credit and counts
+        // refusals per call, so the DATAGRAM arm and the stream block asking separately would
+        // double-spend; both read this one answer.
+        bool? gate = null;
+        bool GateAdmits() => gate ??= SendGateAdmits(now);
+        static TlsQuicFrame DatagramFrame(byte[] payload) => new()
+        {
+            RawType = (ulong)TlsQuicFrameType.Datagram | TlsQuicFrames.DatagramLengthBit,
+            Data = payload,
+        };
+
+        // ONE DATAGRAM FRAME PER PACKET, AND NO STREAM FRAME BESIDE IT. The frame is ack-eliciting
+        // (RFC 9221 s5.2) and never retransmitted: it is not registered with the stream
+        // retransmission bookkeeping, and TlsQuicRetransmission.ActionFor answers Drop for a lost
+        // one - the inner connection's loss to recover. Measured with the encoder that writes it,
+        // against the same budget the stream block below spends, prefix and trailing ACK included.
+        //
+        // A HEAD NO PACKET ON THIS PATH CAN CARRY IS DROPPED FIRST, BEFORE THE GATE IS ASKED.
+        // TryQueueDatagram sized it against the path MTU of its day; black-hole detection can
+        // since have dropped the MTU back to BASE_PLPMTU, and a head that fits no packet would
+        // block every datagram behind it forever. RFC 9221 s5.4 allows dropping. The test is
+        // against an EMPTY packet at the current path MTU and deliberately ignores
+        // reservedBytes: a coalesced Handshake prefix is gone by the next datagram, so a head
+        // that only fails beside one waits rather than dies, like one that fails beside this
+        // packet's other frames.
+        var emptyPacketBudget = DatagramPayloadBudget - OneRttPacketOverhead;
+        while (_datagramsToSend.TryPeek(out var head)
+            && TlsQuicFrames.MeasureFrame(_frameMeasureScratch, DatagramFrame(head)) > emptyPacketBudget)
+        {
+            _datagramsToSend.Dequeue();
+            DroppedUnsendableDatagrams++;
+        }
+
+        var carriesDatagram = false;
+        if (_datagramsToSend.Count > 0 && GateAdmits())
+        {
+            var budget = DatagramPayloadBudget - reservedBytes - OneRttPacketOverhead;
+            foreach (var already in frames)
+            {
+                budget -= TlsQuicFrames.MeasureFrame(_frameMeasureScratch, already);
+            }
+
+            if (hasAck && !_options.Spec.AckLeadsInPacket)
+            {
+                budget -= TlsQuicFrames.MeasureFrame(_frameMeasureScratch, ack);
+            }
+
+            var datagram = DatagramFrame(_datagramsToSend.Peek());
+            if (TlsQuicFrames.MeasureFrame(_frameMeasureScratch, datagram) <= budget)
+            {
+                _datagramsToSend.Dequeue();
+                frames.Add(datagram);
+                PathMtu.OnApplicationDataSent();
+                carriesDatagram = true;
+            }
+        }
+
+        if (!carriesDatagram && _streams is { } streams && streams.HasPendingFrames && GateAdmits())
         {
             // RFC 9000 s14.2: "All QUIC packets that are not sent in a PMTU probe SHOULD be
             // sized to fit within the maximum datagram size to avoid the datagram being

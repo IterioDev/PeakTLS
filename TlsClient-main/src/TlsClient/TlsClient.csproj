@@ -43,9 +43,8 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="../../README.md" Pack="true" PackagePath="/" />
-    <None Include="../../ROADMAP.md" Pack="true" PackagePath="/" />
-    <None Include="../../CHANGELOG.md" Pack="true" PackagePath="/" />
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../../CHANGELOG.md" Pack="true" PackagePath="/" />
     <None Include="../../docs/PRESETS.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/PROFILE-MANIFEST.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/FINGERPRINT-LAB.md" Pack="true" PackagePath="docs/" />
@@ -60,14 +59,13 @@
     <None Include="../../docs/SUPPLY-CHAIN.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/RELEASING.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/PROTOCOL-REVIEW.md" Pack="true" PackagePath="docs/" />
-    <None Include="../../THREAT-MODEL.md" Pack="true" PackagePath="/" />
-    <None Include="../../SECURITY.md" Pack="true" PackagePath="/" />
+    <None Include="../../docs/THREAT-MODEL.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/SUPPORTED-VERSIONS.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/CONNECTIVITY.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/STREAMING.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/RETRIES.md" Pack="true" PackagePath="docs/" />
     <None Include="../../docs/POLICIES.md" Pack="true" PackagePath="docs/" />
-    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
-    <None Include="../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="/" />
+    <None Include="../../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

@@ -540,6 +540,53 @@ public sealed class Http3QuicOptionsTests
         Assert.Equal<string>(["h3", "h3-29"], options.Snapshot().Quic.AlpnProtocols);
     }
 
+    [Fact]
+    public void QuicProxyAcceptsOnlyMasque()
+    {
+        var options = new TlsSessionOptions();
+        options.Quic.Proxy = TlsProxy.Socks5("socks5://127.0.0.1:1080");
+
+        var exception = Assert.Throws<ArgumentException>(() => options.Snapshot());
+        Assert.Contains("Masque", exception.Message);
+    }
+
+    [Fact]
+    public void TheOuterOptionsAreTheLibraryDefaultsPlusWhatTheGuideAsksFor()
+    {
+        var outer = TlsQuicOptions.CreateMasqueOuter(configure: null);
+        var snapshot = outer.Snapshot(new TlsHttp3Options());
+
+        Assert.False(snapshot.ConnectionSpec.PathMtuDiscovery);
+        Assert.Equal(1392, snapshot.ConnectionSpec.BasePathMtu);
+        Assert.Equal(1392, snapshot.ConnectionSpec.MaximumPathMtu);
+        Assert.Equal(1UL, TlsQuicHttp3Settings.Value(TlsQuicOptions.CreateMasqueOuterHttp3().Snapshot().Settings, 0x33));
+
+        // The wire order: initial_source_connection_id, the six flow-control slots ascending by
+        // id, then max_datagram_frame_size. A list without the six advertises zero streams, the
+        // proxy never opens its control stream, and the dial idles out after a good handshake.
+        Assert.Equal(
+            [0x0f, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x20],
+            outer.TransportParameters.Entries.Select(e => e.Id));
+
+        // RFC 9114 s6.2's floor for HTTP/3 over QUIC, as the connection will enforce it: the
+        // advertisement read back through the same list it goes out in.
+        var advertised = snapshot.ConnectionSpec.LocalFlowControl
+            .AsAdvertisedBy(snapshot.ConnectionSpec.TransportParameters);
+        Assert.Equal(3UL, advertised.InitialMaxStreamsUni);
+        Assert.Equal(1_024UL, advertised.InitialMaxStreamDataUni);
+        Assert.Equal(1_024UL, advertised.InitialMaxStreamDataBidiLocal);
+        Assert.Equal(0UL, advertised.InitialMaxStreamsBidi);
+        Assert.Equal(0UL, advertised.InitialMaxStreamDataBidiRemote);
+        Assert.Equal(4_096UL, advertised.InitialMaxData);
+    }
+
+    [Fact]
+    public void TheOuterHookRunsLast()
+    {
+        var outer = TlsQuicOptions.CreateMasqueOuter(o => o.MaximumPathMtu = 1300);
+        Assert.Equal(1300, outer.MaximumPathMtu);
+    }
+
     // ------------------------------------------------------------------------------
     // Nothing crashes; bad input is rejected by name.
     // ------------------------------------------------------------------------------

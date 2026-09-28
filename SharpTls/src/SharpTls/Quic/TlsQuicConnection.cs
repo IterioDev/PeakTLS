@@ -1057,6 +1057,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // connection and then processes. A connection with no h3 layer above it never advertises
     // max_datagram_frame_size through a shipped preset without one either.
     private readonly List<byte[]> _receivedDatagrams = [];
+
+    // RFC 9221 s5.4 lets a sender delay or drop when it cannot send; this library delays, and
+    // drops only a head the shrunken path can no longer carry (DroppedUnsendableDatagrams). The
+    // bound is small on purpose: an inner QUIC stack behind a MASQUE tunnel keeps its own send
+    // pacing, so a queue that fills means the OUTER path is congested and the right answer is
+    // backpressure, not memory.
+    private const int DatagramQueueBound = 64;
+    private readonly Queue<byte[]> _datagramsToSend = new();
+
     private byte[] _destinationConnectionId = [];
 
     // RFC 9000 s7.2's "a valid Initial packet from the server": the Source Connection ID off a
@@ -1302,6 +1311,13 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// the client - and therefore the ClientHello - does not exist until then.</remarks>
     internal ulong? AdvertisedMaxDatagramFrameSize => _client?.AdvertisedMaxDatagramFrameSize;
 
+    /// <summary>Gets the peer's RFC 9221 s3 <c>max_datagram_frame_size</c>, or
+    /// <see langword="null"/> when its transport parameters carried none or carried 0 (RFC 9221
+    /// s3 gives both the same meaning), in which case it accepts no DATAGRAM frames. <see
+    /// cref="AdvertisedMaxDatagramFrameSize"/> is OUR value; this is theirs, and it is what the
+    /// send side must honour.</summary>
+    internal ulong? PeerMaxDatagramFrameSize { get; private set; }
+
     /// <summary>The Source Connection ID this connection drew and puts on its packets; it is
     /// also what it advertised as <c>initial_source_connection_id</c>, because the factory
     /// was handed these exact bytes.</summary>
@@ -1337,6 +1353,69 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     internal int DatagramPayloadBudget => Math.Min(
         CurrentMaxDatagramSize - _options.Transport.DatagramOverhead,
         _options.Transport.MaxDatagramPayloadSize);
+
+    /// <summary>Gets how many DATAGRAM frame payloads wait for <see cref="SendPendingAsync"/>.
+    /// </summary>
+    internal int QueuedDatagrams => _datagramsToSend.Count;
+
+    /// <summary>Gets how many queued DATAGRAM frame payloads were dropped because no 1-RTT
+    /// packet at the current path MTU could carry them any more.</summary>
+    /// <remarks>RFC 9221 s5.4 lets a sender drop a DATAGRAM frame it cannot send. This is the
+    /// one case this library drops rather than delays: the path shrank under a queued payload
+    /// (black-hole detection took the MTU back to BASE_PLPMTU after the payload was sized
+    /// against a larger one), and the head would otherwise block every datagram behind it
+    /// forever.</remarks>
+    internal int DroppedUnsendableDatagrams { get; private set; }
+
+    /// <summary>The largest DATAGRAM frame payload one 1-RTT packet at the current path MTU
+    /// carries: the packet budget minus the short header, DCID, largest packet number, AEAD tag,
+    /// frame type and a two-byte length, further bounded by the peer's
+    /// <c>max_datagram_frame_size</c> (which counts type and length, RFC 9221 s3).</summary>
+    internal int MaximumDatagramFramePayload
+    {
+        get
+        {
+            const int typeAndLength = 3;
+            if (PeerMaxDatagramFrameSize is not { } peer)
+            {
+                return 0;
+            }
+            var packet = DatagramPayloadBudget - OneRttPacketOverhead - typeAndLength;
+            var byPeer = (int)Math.Min(peer, int.MaxValue) - typeAndLength;
+            return Math.Max(0, Math.Min(packet, byPeer));
+        }
+    }
+
+    /// <summary>Queues one DATAGRAM frame payload; <see langword="false"/> means the queue is
+    /// full and the caller must wait for <see cref="SendPendingAsync"/> to drain it.</summary>
+    /// <param name="payload">The frame's payload, copied before this returns.</param>
+    /// <returns><see langword="true"/> when the payload was queued.</returns>
+    /// <exception cref="InvalidOperationException">The peer accepts no DATAGRAM frames.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The payload exceeds
+    /// <see cref="MaximumDatagramFramePayload"/>.</exception>
+    internal bool TryQueueDatagram(ReadOnlyMemory<byte> payload)
+    {
+        if (PeerMaxDatagramFrameSize is null)
+        {
+            throw new InvalidOperationException(
+                "The peer advertised no max_datagram_frame_size (RFC 9221 s3), so it accepts no "
+                + "DATAGRAM frames on this connection.");
+        }
+        var ceiling = MaximumDatagramFramePayload;
+        if (payload.Length > ceiling)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(payload), payload.Length,
+                $"A DATAGRAM frame payload on this connection is at most {ceiling} bytes.");
+        }
+        if (_datagramsToSend.Count >= DatagramQueueBound)
+        {
+            return false;
+        }
+        _datagramsToSend.Enqueue(payload.ToArray());
+        return true;
+    }
 
     /// <summary>
     /// THE ONE PLACE A DATAGRAM LEAVES THIS CONNECTION. Every send goes through here so that a
@@ -1810,11 +1889,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     //
     // THE PARAMETER THIS ENDPOINT SENT, NOT THE ONE IT RECEIVED. Both rules measure against
     // "the value it sent in its max_datagram_frame_size transport parameter" - the peer's
-    // value bounds what WE may send, and s3 gives that its own separate MUST NOT that this
-    // client satisfies by never writing a DATAGRAM frame at all
-    // (TlsQuicFrames.WriteFrame throws, pinned by
-    // TlsQuicFramesTests.WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne).
-    // AdvertisedMaxDatagramFrameSize reads our own ClientHello, which is the correct side.
+    // value bounds what WE may send, and s3 gives that its own separate MUST NOT. Task 2 gave
+    // TlsQuicFrames.WriteFrame a 0x31 (length-bearing) DATAGRAM writer, so that MUST NOT is no
+    // longer satisfied by construction; TlsQuicConnection.TryQueueDatagram, the sender, gates
+    // on the peer's advertised value (the one this endpoint received, kept in
+    // PeerMaxDatagramFrameSize) before any DATAGRAM reaches WriteFrame
+    // (TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten pins only the narrower
+    // 0x30 refusal that survives). AdvertisedMaxDatagramFrameSize reads our own ClientHello,
+    // which is the correct side.
     //
     // ZERO AND ABSENT ARE THE SAME VERDICT AND ARE NOT THE SAME STATE. s3: "The default for
     // this parameter is 0, which indicates that the endpoint does not support DATAGRAM
@@ -3658,6 +3740,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
                 peer.Parameters
                     .Get((ulong)TlsQuicTransportParameterId.MaxAckDelay)
                     ?.GetVariableInteger());
+
+            // RFC 9221 s3: absent or 0 both mean "no DATAGRAM frames accepted".
+            var advertisedDatagramLimit = peer.Parameters
+                .Get((ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize)
+                ?.GetVariableInteger();
+            PeerMaxDatagramFrameSize = advertisedDatagramLimit is 0 ? null : advertisedDatagramLimit;
 
             // RFC 9287 s3, read in the same step and for the same reason as the pair above: it
             // is a permission the PEER grants, it arrives with the peer's transport parameters,

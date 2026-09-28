@@ -198,21 +198,22 @@ integer silently, which is worse than a gap.
 Connections are pooled per `(host, port, proxy, version policy)`, so two sessions with different
 proxies never share a socket.
 
-### With HTTP/3 it must be SOCKS5
+### With HTTP/3 it must be SOCKS5 or MASQUE
 
-This is the part that matters if you came here from §3c. **SOCKS5 carries HTTP/3; the other two
-proxy types cannot, and say so.** That is a property of the protocols and not a preference:
+This is the part that matters if you came here from §3c. **SOCKS5 and MASQUE carry HTTP/3; the
+other proxy type cannot, and says so.** That is a property of the protocols and not a preference:
 
 | Type | Over h3 | Why |
 | --- | --- | --- |
-| `TlsProxy.Socks5` | **Works** | RFC 1928 §7 `UDP ASSOCIATE` relays datagrams, which is exactly what QUIC needs. With or without RFC 1929 username/password. |
-| `TlsProxy.Http` | `NotSupportedException` | CONNECT tunnels a TCP byte stream. RFC 9298's CONNECT-UDP would change this, but the proxy has to implement it and this client does not speak it. |
+| `TlsProxy.Socks5` | **Works**, via `options.Proxy` | RFC 1928 §7 `UDP ASSOCIATE` relays datagrams, which is exactly what QUIC needs. With or without RFC 1929 username/password. |
+| `TlsProxy.Masque` | **Works**, via `options.Quic.Proxy` | RFC 9298 CONNECT-UDP tunnels the QUIC datagrams natively over its own HTTP/3 hop to the proxy. |
+| `TlsProxy.Http` | `NotSupportedException` | CONNECT tunnels a TCP byte stream. Neither RFC 9298 CONNECT-UDP nor UDP ASSOCIATE, so it cannot carry a datagram at all. |
 
 ```csharp
 using TlsClient;
 
 // SOCKS5 with RFC 1929 username/password, set once for the life of the session.
-var options = TlsPresets.Spotify.CreateOptions();   // Http3Only, so this MUST be SOCKS5
+var options = TlsPresets.Spotify.CreateOptions();   // Http3Only, so this MUST be SOCKS5 or MASQUE
 options.Proxy = TlsProxy.Socks5("socks5://proxy.example.net:1080", "user", "pass");
 await using var session = new TlsSession(options);
 
@@ -223,7 +224,22 @@ var response = await session.GetAsync("https://fp.impersonate.pro/api/http3");
 Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
 ```
 
-The refusal for the other two names the type, and it arrives **before** any dial — never as a
+MASQUE is the other UDP-capable kind, wired through `options.Quic.Proxy` rather than
+`options.Proxy` — it is HTTP/3's own proxy hop, so it takes its own outer QUIC connection to the
+proxy rather than sharing the SOCKS5/HTTP TCP proxy slot:
+
+```csharp
+options.Proxy = TlsProxy.Socks5("socks5://pr.oxylabs.io:7777", user, pass);          // h2, TCP
+options.Quic.Proxy = TlsProxy.Masque("https://masque.oxylabs.io:50000", user, pass); // h3, UDP
+```
+
+A MASQUE tunnel closing mid-life — the proxy's own connection failing after the association was
+established — reaches the caller the same way a dead SOCKS5 relay does: a `TlsQuicProxyException`
+with `Error == MasqueTunnelClosed`, raised on the next request rather than out of band, and
+retried under the same retry policy as any other transient h3 failure. There is no connect event
+for it — nothing was dialled at that moment, an existing tunnel just stopped answering.
+
+The refusal for `TlsProxy.Http` names the type, and it arrives **before** any dial — never as a
 silent fallback to TCP, which is the downgrade this library refuses to make anywhere:
 
 ```
@@ -713,7 +729,7 @@ not any more.
 | **`PooledConnectionLifetime = InfiniteTimeSpan` gives h3 five minutes, not forever** | The connection is evicted after ~5 min | h3 inherits QUIC's handshake deadline, which bounds the whole connection. h1 and h2 really are unbounded. |
 | **The pool double-counts h3 concurrency** | You pay an extra handshake; never a failure | It compares in-flight leases against a *decaying* lifetime allowance those same leases drew down. Correct for h1 (constant 1) and h2 (fixed SETTINGS), wrong for h3. Pinned by a test, not fixed. |
 | **The h3 TLS fingerprint is not driven by `options.Profile`** | You get the QUIC ClientHello from `o.Quic.ConfigureClientHello`, not your `TlsProfile` | A `TlsProfile` is TCP-shaped and carries extensions RFC 9001 §8.4 forbids over QUIC. |
-| **h3 through an HTTP proxy** | `NotSupportedException` naming the type — explicit, never a silent downgrade | Neither relays UDP. **SOCKS5 works** — see §2a. |
+| **h3 through an HTTP proxy** | `NotSupportedException` naming the type — explicit, never a silent downgrade | HTTP CONNECT tunnels TCP and plain SOCKS5 without real UDP support still cannot carry a datagram. **MASQUE proxies carry h3 natively**, through `options.Quic.Proxy`, and **SOCKS5 with a real UDP ASSOCIATE works** too — see §2a. |
 | **h3 through a SOCKS5 proxy whose UDP ASSOCIATE is fake** | `TlsQuicProxyException` with `Error == RelayDeliveredTlsAlert`, at once | Some commercial gateways accept UDP ASSOCIATE and then write the datagram payload into a TCP connection to the destination port. The TLS server there answers a QUIC Initial with a seven-byte alert record (`15 03 01 00 02 02 46`), which no UDP relay can produce; the association fails on that first datagram instead of sitting out the handshake deadline. Use h2 through such a proxy. |
 | **Streaming request bodies are buffered whole** | Memory, not failure | The DATA path takes a complete body. |
 | **DNS/ECH, telemetry, resumption, 0-RTT replay policy over h3** | Absent | Condition 5 of `docs/HTTP3-EVALUATION.md` is **four-ninths** met. **0-RTT has real security weight — replay policy is not optional if it is ever enabled.** |

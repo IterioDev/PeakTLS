@@ -247,6 +247,9 @@ public sealed class TlsQuicOptions
     private static readonly string AssociationSilenceParameter =
         nameof(AssociationSilenceDeadline);
 
+    // Same reason again: this rejection belongs to the Proxy property, not to a parameter of
+    // Snapshot.
+    private static readonly string ProxyParameter = nameof(Proxy);
 
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
@@ -361,6 +364,11 @@ public sealed class TlsQuicOptions
     /// </remarks>
     public int MaximumAssociationAttempts { get; set; } =
         Http3Connection.DefaultMaximumAssociationAttempts;
+
+    /// <summary>The MASQUE proxy an HTTP/3 dial tunnels through (RFC 9298 CONNECT-UDP), or null
+    /// to dial directly or through <see cref="TlsSessionOptions.Proxy"/>'s SOCKS5. Must be a
+    /// <see cref="TlsProxy.Masque"/>. TCP requests never use it.</summary>
+    public TlsProxy? Proxy { get; set; }
 
     /// <summary>
     /// Gets or sets how long a request on a proxied HTTP/3 connection may wait while its RFC
@@ -596,6 +604,71 @@ public sealed class TlsQuicOptions
             .WithKeyShares(NamedGroup.X25519);
     }
 
+    /// <summary>The outer connection's options for a MASQUE dial: this library's default
+    /// ClientHello, PMTUD off at 1392 both ways, the flow control HTTP/3 needs, and an explicit
+    /// max_datagram_frame_size. <paramref name="configure"/> runs last. See
+    /// <see cref="CreateMasqueOuterHttp3"/> for the HTTP/3 options that go with it, including
+    /// SETTINGS_H3_DATAGRAM = 1.</summary>
+    /// <remarks>
+    /// <para>THE DEFAULT ADVERTISES NO FLOW CONTROL, AND THAT IDLES OUT. The default parameter
+    /// list is RFC 9000 s7.3's mandatory initial_source_connection_id alone, and the six
+    /// <see cref="FlowControl"/> values only reach the wire through a Placed slot each, so a
+    /// default outer connection tells the proxy it may open zero unidirectional streams. The
+    /// proxy then never opens its control stream, its SETTINGS never arrive, and the dial waits
+    /// out its deadline after a handshake that completed. Nothing else on the outer connection
+    /// is fingerprint-relevant - only the proxy sees it - so the values here are the ones the
+    /// specification sets rather than a persona's.</para>
+    /// <para>RFC 9114 s6.2: both sides "MUST allow the peer to create at least three
+    /// unidirectional streams" and give each "at least 1,024 bytes of flow-control credit";
+    /// s6.1: a server never opens a bidirectional stream, so that limit is zero and the credit
+    /// for one is too. The tunnel's own stream carries the proxy's response header section and
+    /// any capsules, credited at the same 1,024 the connection extends as it consumes;
+    /// initial_max_data is the sum of the four windows. The slots go out ascending by id, after
+    /// initial_source_connection_id and before max_datagram_frame_size.</para>
+    /// </remarks>
+    internal static TlsQuicOptions CreateMasqueOuter(Action<TlsQuicOptions>? configure)
+    {
+        const ulong StreamCredit = 1_024;   // RFC 9114 s6.2
+        const ulong UnidirectionalStreams = 3;   // RFC 9114 s6.2
+        var outer = new TlsQuicOptions
+        {
+            PathMtuDiscovery = false,
+            BasePathMtu = 1392,
+            MaximumPathMtu = 1392,
+        };
+        outer.FlowControl.InitialMaxStreamsUni = UnidirectionalStreams;
+        outer.FlowControl.InitialMaxStreamDataUni = StreamCredit;
+        outer.FlowControl.InitialMaxStreamsBidi = 0;   // RFC 9114 s6.1
+        outer.FlowControl.InitialMaxStreamDataBidiRemote = 0;
+        outer.FlowControl.InitialMaxStreamDataBidiLocal = StreamCredit;
+        outer.FlowControl.InitialMaxData = UnidirectionalStreams * StreamCredit + StreamCredit;
+        foreach (var id in new[]
+        {
+            TlsQuicTransportParameterId.InitialMaxData,
+            TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal,
+            TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote,
+            TlsQuicTransportParameterId.InitialMaxStreamDataUni,
+            TlsQuicTransportParameterId.InitialMaxStreamsBidi,
+            TlsQuicTransportParameterId.InitialMaxStreamsUni,
+        })
+        {
+            outer.TransportParameters.Entries.Add(TlsQuicTransportParameterEntry.Placed((ulong)id));
+        }
+        outer.TransportParameters.Entries.Add(
+            TlsQuicTransportParameterEntry.Literal(0x20, [0x80, 0x00, 0xFF, 0xFF])); // 65535 as a varint
+        configure?.Invoke(outer);
+        return outer;
+    }
+
+    /// <summary>The HTTP/3 options for the outer MASQUE connection: SETTINGS_H3_DATAGRAM = 1 on
+    /// top of the defaults.</summary>
+    internal static TlsHttp3Options CreateMasqueOuterHttp3()
+    {
+        var http3 = new TlsHttp3Options();
+        http3.Settings.Add(new TlsHttp3Setting(0x33, 1));
+        return http3;
+    }
+
     internal TlsQuicConfiguration Snapshot(TlsHttp3Options http3)
     {
         ArgumentNullException.ThrowIfNull(http3);
@@ -680,6 +753,17 @@ public sealed class TlsQuicOptions
                 "association undetected.");
         }
 
+        // A NON-MASQUE PROXY HERE WOULD DIAL SOMETHING THIS LAYER CANNOT SPEAK. SOCKS5 and HTTP
+        // CONNECT are TCP-shaped and are configured through TlsSessionOptions.Proxy instead; an
+        // h3 dial's own proxy hop is RFC 9298 CONNECT-UDP, which only TlsProxy.Masque describes.
+        if (Proxy is { Type: not TlsProxyType.Masque })
+        {
+            throw new ArgumentException(
+                "TlsQuicOptions.Proxy must be a TlsProxy.Masque; SOCKS5 and HTTP proxies go in " +
+                    "TlsSessionOptions.Proxy.",
+                ProxyParameter);
+        }
+
         // A NON-POSITIVE SILENCE DEADLINE WOULD FAIL EVERY PROXIED REQUEST the instant it
         // waited at all, since a request that has not yet been answered is by definition one
         // whose association has relayed nothing since the handshake. Infinite IS meaningful
@@ -731,7 +815,8 @@ public sealed class TlsQuicOptions
             AssociationWaitTimeout,
             AssociationLivenessDeadline,
             MaximumAssociationAttempts,
-            AssociationSilenceDeadline);
+            AssociationSilenceDeadline,
+            Proxy);
     }
 }
 
@@ -750,4 +835,5 @@ internal sealed record TlsQuicConfiguration(
     TimeSpan AssociationWaitTimeout,
     TimeSpan AssociationLivenessDeadline,
     int MaximumAssociationAttempts,
-    TimeSpan AssociationSilenceDeadline);
+    TimeSpan AssociationSilenceDeadline,
+    TlsProxy? Proxy);

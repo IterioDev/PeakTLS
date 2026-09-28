@@ -81,7 +81,7 @@ public sealed class ProxyUsageDocTests
                 CancellationToken.None).AsTask());
 
         Assert.Contains($"through a {type} proxy", error.Message, StringComparison.Ordinal);
-        Assert.Contains("only SOCKS5 relays datagrams", error.Message, StringComparison.Ordinal);
+        Assert.Contains("options.Quic.Proxy", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -196,8 +196,9 @@ internal sealed class Http3Connection : IHttpConnection
         Math.Max(0, _requestStreamAllowance - Volatile.Read(ref _requestsOpened));
 
     /// <summary>
-    /// Dials UDP - directly, or through a SOCKS5 UDP association - completes a QUIC
-    /// handshake with ALPN <c>h3</c>, and opens HTTP/3's unidirectional streams.
+    /// Dials UDP - directly, through a SOCKS5 UDP association, or through an RFC 9298 MASQUE
+    /// CONNECT-UDP tunnel - completes a QUIC handshake with ALPN <c>h3</c>, and opens HTTP/3's
+    /// unidirectional streams.
     /// </summary>
     /// <remarks>
     /// <para>A SOCKS5 <paramref name="proxy"/> RELAYS THE DATAGRAMS BUT NOT THE LOOKUP. The
@@ -236,6 +237,34 @@ internal sealed class Http3Connection : IHttpConnection
         ArgumentNullException.ThrowIfNull(associationGate);
 
         var connectionId = Guid.NewGuid();
+
+        // Every value here is the session's, not this file's. NOT configuration.Profile for the
+        // TLS half: a TlsProfile describes a TCP ClientHello — TLS 1.2 suites, session tickets,
+        // ALPS — and several of its extensions are ones RFC 9001 section 8.4 forbids over QUIC.
+        // TlsSessionOptions.Quic is the QUIC-shaped surface that drives this instead.
+        var spec = configuration.Quic.ConnectionSpec;
+        var factory = new TlsQuicClientHelloProfileFactory
+        {
+            ConnectionSpec = spec,
+            AlpnProtocols = configuration.Quic.AlpnProtocols,
+            Tls = configuration.Quic.ConfigureClientHello,
+        };
+
+        // BEFORE THE LOOKUP, BECAUSE MASQUE NEVER MAKES ONE. RFC 9298 section 2's URI template
+        // carries the target host as a name, so the proxy resolves it from its own vantage point
+        // and this host never queries a resolver for the origin at all.
+        if (configuration.Quic.Proxy is { } masque)
+        {
+            return await CreateThroughMasqueAsync(
+                origin,
+                masque,
+                configuration,
+                factory,
+                tls13SessionCache,
+                connectionId,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         var addresses = await dnsResolver.ResolveAsync(
             origin.IdnHost,
             origin.Port,
@@ -250,18 +279,6 @@ internal sealed class Http3Connection : IHttpConnection
         // equivalent here: a QUIC handshake is the connect, so racing two would mean two
         // handshakes and two ClientHellos. Left undone rather than approximated.
         var endPoint = new IPEndPoint(addresses[0], origin.Port);
-
-        // Every value here is the session's, not this file's. NOT configuration.Profile for the
-        // TLS half: a TlsProfile describes a TCP ClientHello — TLS 1.2 suites, session tickets,
-        // ALPS — and several of its extensions are ones RFC 9001 section 8.4 forbids over QUIC.
-        // TlsSessionOptions.Quic is the QUIC-shaped surface that drives this instead.
-        var spec = configuration.Quic.ConnectionSpec;
-        var factory = new TlsQuicClientHelloProfileFactory
-        {
-            ConnectionSpec = spec,
-            AlpnProtocols = configuration.Quic.AlpnProtocols,
-            Tls = configuration.Quic.ConfigureClientHello,
-        };
 
         // THE TRANSPORT IS THE ONLY THING A PROXY CHANGES HERE. Everything below - the
         // spec, the ClientHello, the deadline, the streams - is identical either way,
@@ -306,29 +323,8 @@ internal sealed class Http3Connection : IHttpConnection
                         cancellationToken).ConfigureAwait(false));
             ITlsQuicDatagramTransport transport =
                 relay ?? TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily);
-            TlsQuicConnection? connection = null;
-            CustomTlsQuicClient? tlsClient = null;
             try
             {
-                connection = new TlsQuicConnection(
-                    new TlsQuicConnectionOptions(transport, endPoint, spec)
-                    {
-                        // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
-                        // how long a healthy connection may be REUSED from the pool - minutes -
-                        // and handing it to a handshake deadline SharpTls defaults to ten
-                        // seconds meant the deadline could never fire: the real bound was the
-                        // outer HandshakeTimeout CTS below, and this line was dead configuration
-                        // wearing a misleading name. TlsQuicOptions.HandshakeDeadline is the
-                        // knob for it; null leaves SharpTls's own default in place.
-                        HandshakeDeadline = configuration.Quic.HandshakeDeadline
-                            ?? SharpTlsHandshakeDeadline,
-                        IdleTimeout = Bounded(
-                            configuration.PooledConnectionIdleTimeout,
-                            DefaultIdleTimeout),
-                    },
-                    source => tlsClient = CreateTlsClient(
-                        origin, configuration, factory, tls13SessionCache, source));
-
                 var handshakeTimeout = HandshakeTimeout(configuration);
 
                 // THE LIVENESS PROBE ONLY SHORTENS ATTEMPTS THAT CAN STILL BE RETRIED. A dead
@@ -339,114 +335,21 @@ internal sealed class Http3Connection : IHttpConnection
                 // still connects rather than being re-dialled to exhaustion, and the failure
                 // finally reported is the one the network actually produced.
                 var probing = relay is not null && attempt < attempts;
-                var deadline = probing
-                    ? Shorter(configuration.Quic.AssociationLivenessDeadline, handshakeTimeout)
-                    : handshakeTimeout;
-
-                using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
-                var startedAt = Stopwatch.GetTimestamp();
-                if (probing)
-                {
-                    // ONE DATAGRAM ENDS THE PROBE. Its arrival is proof that the association
-                    // relays, which is the only thing being asked; everything after that is an
-                    // ordinary handshake and gets the ordinary budget back. Measured from this
-                    // dial's start rather than from now, so a live connection is bounded exactly
-                    // as it was before the probe existed and never more generously.
-                    relay!.OnFirstInboundDatagram = () =>
-                    {
-                        try
-                        {
-                            var remaining =
-                                handshakeTimeout - Stopwatch.GetElapsedTime(startedAt);
-                            handshake.CancelAfter(
-                                remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            // The handshake already finished and disposed the source underneath
-                            // the receive loop that called this. There is nothing left to
-                            // extend, and instrumentation must never fail a connection.
-                        }
-                    };
-                }
-                handshake.CancelAfter(deadline);
-                try
-                {
-                    await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (
-                    handshake.IsCancellationRequested &&
-                    !cancellationToken.IsCancellationRequested)
-                {
-                    throw new HttpRequestException(
-                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
-                        $"within {deadline}.");
-                }
-                catch (Exception exception) when (
-                    exception is TimeoutException or InvalidOperationException)
-                {
-                    throw new HttpRequestException(
-                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
-                        exception);
-                }
-
-                if (tlsClient?.NegotiatedApplicationProtocol !=
-                    TlsQuicClientHelloProfileFactory.Http3AlpnToken)
-                {
-                    throw new HttpRequestException(
-                        "The peer did not select ALPN 'h3', so this connection cannot carry " +
-                        $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
-                }
-
-                // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
-                // constructor refuses unless the ClientHello also advertised a non-zero
-                // max_datagram_frame_size. The default transport parameter preset does, so the
-                // pair agrees by construction — a narrowed preset that drops 0x20 would be told
-                // here rather than by a peer's H3_SETTINGS_ERROR.
-                var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
-                http3.OpenLocalStreams();
-                if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    throw new HttpRequestException(
-                        "The HTTP/3 control stream could not be opened: the QUIC connection had " +
-                        "nothing to send.");
-                }
-
-                var allowance = (int)Math.Min(
-                    connection.PeerFlowControl.InitialMaxStreamsBidi,
-                    int.MaxValue);
-                var idleBudget = connection.EffectiveIdleTimeout() is { } effective
-                    ? TimeSpan.FromTicks(effective.Ticks / 2)
-                    : (TimeSpan?)null;
-                // TAKEN HERE, WHICH IS THE LAST INSTANT THAT STILL COUNTS AS "THE HANDSHAKE".
-                // Everything above has finished: ConnectAsync returned, ALPN was checked, the
-                // HTTP/3 unidirectional streams went out. So the relay's running total at this
-                // point is exactly what the handshake burst drew back, and anything the counter
-                // gains from now on is the association still working AFTER setup - which is the
-                // only question the request path asks it.
-                var result = new Http3Connection(
+                return await DialInnerAsync(
+                    origin,
+                    configuration,
+                    factory,
+                    tls13SessionCache,
                     transport,
-                    new SharpTlsHttp3Streams(connection, http3),
-                    relay is null
-                        ? null
-                        : new Socks5AssociationWatch(
-                            relay,
-                            connectionId,
-                            origin.IdnHost,
-                            origin.Port),
-                    BuildTlsInfo(configuration, tlsClient),
-                    allowance,
-                    idleBudget);
-                result.Start();
-                return result;
+                    endPoint,
+                    relay,
+                    probing,
+                    handshakeTimeout,
+                    connectionId,
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
-                if (connection is not null)
-                {
-                    await connection.DisposeAsync().ConfigureAwait(false);
-                }
                 await transport.DisposeAsync().ConfigureAwait(false);
 
                 // THE DISCRIMINATOR, AND IT IS DELIBERATELY NARROW. Only an association that
@@ -502,6 +405,274 @@ internal sealed class Http3Connection : IHttpConnection
                     elapsed: Stopwatch.GetElapsedTime(attemptStartedAt),
                     exception: exception);
             }
+        }
+    }
+
+    /// <summary>
+    /// Opens an RFC 9298 CONNECT-UDP tunnel through <paramref name="masque"/> and runs the
+    /// ordinary inner dial over it.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE TUNNEL IS A TRANSPORT AND NOTHING MORE. It implements
+    /// <see cref="ITlsQuicDatagramTransport"/>, so the inner dial is the direct path's: the same
+    /// spec, ClientHello and deadlines, no SOCKS5 relay wrapper and so no liveness probe, which
+    /// exists to catch an RFC 1928 association that never relays and observes that through the
+    /// wrapper.</para>
+    /// <para>THE INNER PATH MTU NEEDS NO CLAMP HERE. <c>TlsQuicConnection</c> bounds its RFC
+    /// 8899 search and every datagram it builds by the transport's
+    /// <c>MaxDatagramPayloadSize</c>, so the tunnel's ceiling reaches the inner connection
+    /// through the transport it is handed.</para>
+    /// <para>OWNERSHIP MATCHES THE OTHER TWO PATHS. On success the tunnel belongs to the returned
+    /// connection, whose <see cref="DisposeAsync"/> disposes it as it would a UDP socket or a
+    /// SOCKS5 relay; on any failure it is disposed here. Nothing is wrapped: a
+    /// <see cref="TlsQuicProxyException"/> from either dial reaches the caller as it is.</para>
+    /// <para>The worst case is two full deadlines: the outer dial's
+    /// <see cref="TlsQuicOptions.HandshakeDeadline"/>, then the inner handshake's.</para>
+    /// </remarks>
+    private static async ValueTask<IHttpConnection> CreateThroughMasqueAsync(
+        Uri origin,
+        TlsProxy masque,
+        TlsSessionConfiguration configuration,
+        TlsQuicClientHelloProfileFactory factory,
+        Tls13SessionCache tls13SessionCache,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        // Only the proxy sees the outer connection: the library's default QUIC shape with
+        // PMTUD off and SETTINGS_H3_DATAGRAM on, then the proxy's own ConfigureOuterQuic hook.
+        var outer = TlsQuicOptions.CreateMasqueOuter(masque.ConfigureOuterQuic)
+            .Snapshot(TlsQuicOptions.CreateMasqueOuterHttp3());
+        var credentials = masque.GetCredentials()!;
+        var options = new TlsQuicMasqueOptions
+        {
+            ProxyEndPoint = new DnsEndPoint(masque.Address.IdnHost, masque.EffectivePort),
+            TargetHost = origin.IdnHost,
+            TargetPort = origin.Port,
+            // Never resolved and never compared: the inner connection sends to it and nothing
+            // reads a received datagram's source, so the unspecified address will do.
+            TargetEndPoint = new IPEndPoint(IPAddress.Any, origin.Port),
+            Username = credentials.UserName,
+            Password = credentials.Password,
+            OuterSpec = outer.ConnectionSpec,
+            OuterHttp3Spec = outer.Http3Spec,
+            ConfigureOuterClientHello = outer.ConfigureClientHello,
+            HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
+        };
+
+        var startedAt = Stopwatch.GetTimestamp();
+        TlsQuicMasqueTransport tunnel;
+        try
+        {
+            tunnel = await TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // Every failure of the outer dial, not only the named ones: a socket error or a
+            // cancellation is still a tunnel that did not open.
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueTunnelClosed,
+                origin.IdnHost,
+                origin.Port,
+                elapsed: Stopwatch.GetElapsedTime(startedAt),
+                exception: exception);
+            throw;
+        }
+        TlsConnectTelemetry.Emit(
+            configuration.ConnectObserver,
+            connectionId,
+            TlsConnectEventKind.MasqueTunnelOpened,
+            origin.IdnHost,
+            origin.Port,
+            elapsed: Stopwatch.GetElapsedTime(startedAt));
+
+        try
+        {
+            return await DialInnerAsync(
+                origin,
+                configuration,
+                factory,
+                tls13SessionCache,
+                tunnel,
+                options.TargetEndPoint,
+                relay: null,
+                probing: false,
+                HandshakeTimeout(configuration),
+                connectionId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueTunnelClosed,
+                origin.IdnHost,
+                origin.Port,
+                elapsed: Stopwatch.GetElapsedTime(startedAt),
+                exception: exception);
+            await tunnel.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>One inner dial over <paramref name="transport"/>: connection options, the
+    /// SOCKS5 probe deadline when <paramref name="relay"/> is set, handshake, ALPN check,
+    /// HTTP/3 control streams, the Http3Connection. On any failure the CONNECTION it created is
+    /// disposed here; the TRANSPORT belongs to the caller, which disposes it (and decides
+    /// whether to re-associate) in its own catch.</summary>
+    private static async ValueTask<Http3Connection> DialInnerAsync(
+        Uri origin,
+        TlsSessionConfiguration configuration,
+        TlsQuicClientHelloProfileFactory factory,
+        Tls13SessionCache tls13SessionCache,
+        ITlsQuicDatagramTransport transport,
+        IPEndPoint endPoint,
+        Socks5LivenessTransport? relay,
+        bool probing,
+        TimeSpan handshakeTimeout,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        TlsQuicConnection? connection = null;
+        CustomTlsQuicClient? tlsClient = null;
+        try
+        {
+            connection = new TlsQuicConnection(
+                new TlsQuicConnectionOptions(
+                    transport,
+                    endPoint,
+                    configuration.Quic.ConnectionSpec)
+                {
+                    // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
+                    // how long a healthy connection may be REUSED from the pool - minutes -
+                    // and handing it to a handshake deadline SharpTls defaults to ten
+                    // seconds meant the deadline could never fire: the real bound was the
+                    // outer HandshakeTimeout CTS below, and this line was dead configuration
+                    // wearing a misleading name. TlsQuicOptions.HandshakeDeadline is the
+                    // knob for it; null leaves SharpTls's own default in place.
+                    HandshakeDeadline = configuration.Quic.HandshakeDeadline
+                        ?? SharpTlsHandshakeDeadline,
+                    IdleTimeout = Bounded(
+                        configuration.PooledConnectionIdleTimeout,
+                        DefaultIdleTimeout),
+                },
+                source => tlsClient = CreateTlsClient(
+                    origin, configuration, factory, tls13SessionCache, source));
+
+            var deadline = probing
+                ? Shorter(configuration.Quic.AssociationLivenessDeadline, handshakeTimeout)
+                : handshakeTimeout;
+
+            using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            var startedAt = Stopwatch.GetTimestamp();
+            if (probing)
+            {
+                // ONE DATAGRAM ENDS THE PROBE. Its arrival is proof that the association
+                // relays, which is the only thing being asked; everything after that is an
+                // ordinary handshake and gets the ordinary budget back. Measured from this
+                // dial's start rather than from now, so a live connection is bounded exactly
+                // as it was before the probe existed and never more generously.
+                relay!.OnFirstInboundDatagram = () =>
+                {
+                    try
+                    {
+                        var remaining =
+                            handshakeTimeout - Stopwatch.GetElapsedTime(startedAt);
+                        handshake.CancelAfter(
+                            remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // The handshake already finished and disposed the source underneath
+                        // the receive loop that called this. There is nothing left to
+                        // extend, and instrumentation must never fail a connection.
+                    }
+                };
+            }
+            handshake.CancelAfter(deadline);
+            try
+            {
+                await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                handshake.IsCancellationRequested &&
+                !cancellationToken.IsCancellationRequested)
+            {
+                throw new HttpRequestException(
+                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
+                    $"within {deadline}.");
+            }
+            catch (Exception exception) when (
+                exception is TimeoutException or InvalidOperationException)
+            {
+                throw new HttpRequestException(
+                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
+                    exception);
+            }
+
+            if (tlsClient?.NegotiatedApplicationProtocol !=
+                TlsQuicClientHelloProfileFactory.Http3AlpnToken)
+            {
+                throw new HttpRequestException(
+                    "The peer did not select ALPN 'h3', so this connection cannot carry " +
+                    $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
+            }
+
+            // The spec's default settings are empty, so they carry no SETTINGS_H3_DATAGRAM
+            // (0x33). A caller who adds 0x33 = 1 must also advertise a non-zero
+            // max_datagram_frame_size (0x20) transport parameter in the ClientHello, which the
+            // constructor checks before it accepts the setting. The default transport parameter
+            // preset is RfcMinimumParameters, which does NOT carry it — callers wanting H3
+            // datagrams must select or build a preset that does, or this constructor is the one
+            // that tells them, rather than a peer's H3_SETTINGS_ERROR.
+            var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
+            http3.OpenLocalStreams();
+            if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new HttpRequestException(
+                    "The HTTP/3 control stream could not be opened: the QUIC connection had " +
+                    "nothing to send.");
+            }
+
+            var allowance = (int)Math.Min(
+                connection.PeerFlowControl.InitialMaxStreamsBidi,
+                int.MaxValue);
+            var idleBudget = connection.EffectiveIdleTimeout() is { } effective
+                ? TimeSpan.FromTicks(effective.Ticks / 2)
+                : (TimeSpan?)null;
+            // TAKEN HERE, WHICH IS THE LAST INSTANT THAT STILL COUNTS AS "THE HANDSHAKE".
+            // Everything above has finished: ConnectAsync returned, ALPN was checked, the
+            // HTTP/3 unidirectional streams went out. So the relay's running total at this
+            // point is exactly what the handshake burst drew back, and anything the counter
+            // gains from now on is the association still working AFTER setup - which is the
+            // only question the request path asks it.
+            var result = new Http3Connection(
+                transport,
+                new SharpTlsHttp3Streams(connection, http3),
+                relay is null
+                    ? null
+                    : new Socks5AssociationWatch(
+                        relay,
+                        connectionId,
+                        origin.IdnHost,
+                        origin.Port),
+                BuildTlsInfo(configuration, tlsClient),
+                allowance,
+                idleBudget);
+            result.Start();
+            return result;
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+            }
+            throw;
         }
     }
 
@@ -1107,6 +1278,9 @@ internal sealed class Http3Connection : IHttpConnection
             TlsQuicHttp3RequestRefusal.FieldSectionTooLargeForPeer => new HttpRequestException(
                 "The HTTP/3 request field section exceeds the peer's advertised " +
                 "SETTINGS_MAX_FIELD_SECTION_SIZE."),
+            TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled => new TlsHttpProtocolException(
+                "The peer did not send SETTINGS_ENABLE_CONNECT_PROTOCOL, so an extended " +
+                "CONNECT cannot be sent on this connection (RFC 8441 section 3)."),
             _ => new TlsHttpProtocolException(
                 $"The HTTP/3 request was refused ({refusal})."),
         };

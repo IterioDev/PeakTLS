@@ -783,7 +783,7 @@ public sealed partial class TlsQuicConnectionTests
     // s19.8's frame, built here rather than by TlsQuicStreamSet: these are the PEER's frames,
     // and a helper that reused the send path would make the two sides one implementation -
     // the duplication LoopbackQuicPeer.BuildShortHeaderDatagram's own note defends.
-    private static TlsQuicFrame Stream(
+    internal static TlsQuicFrame Stream(
         ulong streamId, ulong offset, byte[] data, bool fin = false)
     {
         var rawType = (ulong)TlsQuicFrameType.Stream | TlsQuicStreamFrames.LengthBit;
