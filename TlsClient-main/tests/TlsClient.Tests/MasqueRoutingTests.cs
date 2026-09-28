@@ -36,12 +36,18 @@ public sealed class MasqueRoutingTests
     [Fact]
     public async Task AMasqueDialThatCannotReachTheProxyFailsByName()
     {
-        // 127.0.0.1:1 answers nothing; the 2 s HandshakeDeadline bounds the outer dial, which
-        // reports MasqueTunnelRefused "did not come up within". Http3Only because the default
-        // policy prefers h2 and would dial TCP; no connection retry because one attempt is the
-        // point.
+        // A bound UDP socket that never answers stands in for the proxy; the 2 s HandshakeDeadline
+        // bounds the outer dial, which reports MasqueTunnelRefused "did not come up within". The
+        // proxy is named "localhost", not by address: the outer ClientHello carries the proxy host
+        // as SNI, and RFC 6066 s3 forbids an IP literal there. Dual-mode so both loopback
+        // addresses land on the sink. Http3Only because the default policy prefers h2 and would
+        // dial TCP; no connection retry because one attempt is the point.
+        using var sink = new System.Net.Sockets.UdpClient(System.Net.Sockets.AddressFamily.InterNetworkV6);
+        sink.Client.DualMode = true;
+        sink.Client.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.IPv6Any, 0));
+        var port = ((System.Net.IPEndPoint)sink.Client.LocalEndPoint!).Port;
         var options = new TlsSessionOptions { HttpVersionPolicy = TlsHttpVersionPolicy.Http3Only };
-        options.Quic.Proxy = TlsProxy.Masque("https://127.0.0.1:1", "u", "p");
+        options.Quic.Proxy = TlsProxy.Masque($"https://localhost:{port}", "u", "p");
         options.Quic.HandshakeDeadline = TimeSpan.FromSeconds(2);
         options.Timeout = TimeSpan.FromSeconds(10);
         options.Retry.RetryConnectionFailures = false;
