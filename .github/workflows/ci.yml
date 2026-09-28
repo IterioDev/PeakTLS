@@ -17,14 +17,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 9.0.x
-      - name: Restore
-        run: |
-          dotnet restore SharpTls/SharpTls.slnx
-          dotnet restore TlsClient-main/TlsClient.slnx
-      - name: Build
-        run: |
-          dotnet build SharpTls/SharpTls.slnx --no-restore --configuration Release
-          dotnet build TlsClient-main/TlsClient.slnx --no-restore --configuration Release
+      # One command per step: in a multi-line PowerShell step only the last command's exit
+      # code counts, and a failed SharpTls build once passed straight into "test source file
+      # not found" instead of failing the build.
+      - name: Restore SharpTls
+        run: dotnet restore SharpTls/SharpTls.slnx
+      - name: Restore TlsClient
+        run: dotnet restore TlsClient-main/TlsClient.slnx
+      - name: Build SharpTls
+        run: dotnet build SharpTls/SharpTls.slnx --no-restore --configuration Release
+      - name: Build TlsClient
+        run: dotnet build TlsClient-main/TlsClient.slnx --no-restore --configuration Release
       - name: Test SharpTls
         run: dotnet test SharpTls/tests/SharpTls.Tests --no-build --configuration Release --logger "console;verbosity=minimal"
       - name: Test TlsClient
@@ -39,10 +42,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 9.0.x
-      - name: Pack both packages
-        run: |
-          dotnet pack SharpTls/src/SharpTls --configuration Release --output artifacts
-          dotnet pack TlsClient-main/src/TlsClient --configuration Release --output artifacts
+      - name: Pack SharpTls
+        run: dotnet pack SharpTls/src/SharpTls --configuration Release --output artifacts
+      - name: Pack TlsClient
+        run: dotnet pack TlsClient-main/src/TlsClient --configuration Release --output artifacts
       - uses: actions/upload-artifact@v4
         with:
           name: packages

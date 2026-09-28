@@ -468,7 +468,7 @@ public sealed class TlsQuicMasqueTransportTests
 
         var offset = (ulong)ResponseBytes(200, [], []).Length;
         byte[] capsule = [0x00, 0x03, 0xAA, 0xBB, 0xCC];   // a DATA frame's payload; type 0, length 3
-        var data = new byte[] { 0x00, (byte)capsule.Length, .. capsule };   // HTTP/3 DATA frame
+        byte[] data = [0x00, (byte)capsule.Length, .. capsule];   // HTTP/3 DATA frame
         await harness.Peer.SendStreamFramesAsync([Stream(0, offset, data, fin: true)], ct);
 
         var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
