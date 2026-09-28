@@ -1058,7 +1058,8 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // max_datagram_frame_size through a shipped preset without one either.
     private readonly List<byte[]> _receivedDatagrams = [];
 
-    // RFC 9221 s5.4 lets a sender delay or drop when it cannot send; this library delays. The
+    // RFC 9221 s5.4 lets a sender delay or drop when it cannot send; this library delays, and
+    // drops only a head the shrunken path can no longer carry (DroppedUnsendableDatagrams). The
     // bound is small on purpose: an inner QUIC stack behind a MASQUE tunnel keeps its own send
     // pacing, so a queue that fills means the OUTER path is congested and the right answer is
     // backpressure, not memory.
@@ -1356,6 +1357,15 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     /// <summary>Gets how many DATAGRAM frame payloads wait for <see cref="SendPendingAsync"/>.
     /// </summary>
     internal int QueuedDatagrams => _datagramsToSend.Count;
+
+    /// <summary>Gets how many queued DATAGRAM frame payloads were dropped because no 1-RTT
+    /// packet at the current path MTU could carry them any more.</summary>
+    /// <remarks>RFC 9221 s5.4 lets a sender drop a DATAGRAM frame it cannot send. This is the
+    /// one case this library drops rather than delays: the path shrank under a queued payload
+    /// (black-hole detection took the MTU back to BASE_PLPMTU after the payload was sized
+    /// against a larger one), and the head would otherwise block every datagram behind it
+    /// forever.</remarks>
+    internal int DroppedUnsendableDatagrams { get; private set; }
 
     /// <summary>The largest DATAGRAM frame payload one 1-RTT packet at the current path MTU
     /// carries: the packet budget minus the short header, DCID, largest packet number, AEAD tag,
