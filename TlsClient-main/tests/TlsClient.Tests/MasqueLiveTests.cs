@@ -75,11 +75,7 @@ public sealed class MasqueLiveTests
             () => session.SendAsync(SpotifyPresetLiveParityTests.NewRequest()));
         Exception? cursor = exception;
         while (cursor is not null && cursor is not TlsQuicProxyException) cursor = cursor.InnerException;
-
-        // TlsQuicProxyError.MasqueAuthenticationRejected does not exist on this branch yet (it
-        // lands with the MASQUE transport, on another lane). Until then this only pins that the
-        // failure surfaces as a named proxy exception, not any particular reason.
-        // TODO(masque): assert Error == MasqueAuthenticationRejected once the enum member merges
-        Assert.IsType<TlsQuicProxyException>(cursor);
+        var proxyFailure = Assert.IsType<TlsQuicProxyException>(cursor);
+        Assert.Equal(TlsQuicProxyError.MasqueAuthenticationRejected, proxyFailure.Error);
     }
 }

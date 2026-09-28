@@ -196,8 +196,9 @@ internal sealed class Http3Connection : IHttpConnection
         Math.Max(0, _requestStreamAllowance - Volatile.Read(ref _requestsOpened));
 
     /// <summary>
-    /// Dials UDP - directly, or through a SOCKS5 UDP association - completes a QUIC
-    /// handshake with ALPN <c>h3</c>, and opens HTTP/3's unidirectional streams.
+    /// Dials UDP - directly, through a SOCKS5 UDP association, or through an RFC 9298 MASQUE
+    /// CONNECT-UDP tunnel - completes a QUIC handshake with ALPN <c>h3</c>, and opens HTTP/3's
+    /// unidirectional streams.
     /// </summary>
     /// <remarks>
     /// <para>A SOCKS5 <paramref name="proxy"/> RELAYS THE DATAGRAMS BUT NOT THE LOOKUP. The
@@ -236,6 +237,34 @@ internal sealed class Http3Connection : IHttpConnection
         ArgumentNullException.ThrowIfNull(associationGate);
 
         var connectionId = Guid.NewGuid();
+
+        // Every value here is the session's, not this file's. NOT configuration.Profile for the
+        // TLS half: a TlsProfile describes a TCP ClientHello — TLS 1.2 suites, session tickets,
+        // ALPS — and several of its extensions are ones RFC 9001 section 8.4 forbids over QUIC.
+        // TlsSessionOptions.Quic is the QUIC-shaped surface that drives this instead.
+        var spec = configuration.Quic.ConnectionSpec;
+        var factory = new TlsQuicClientHelloProfileFactory
+        {
+            ConnectionSpec = spec,
+            AlpnProtocols = configuration.Quic.AlpnProtocols,
+            Tls = configuration.Quic.ConfigureClientHello,
+        };
+
+        // BEFORE THE LOOKUP, BECAUSE MASQUE NEVER MAKES ONE. RFC 9298 section 2's URI template
+        // carries the target host as a name, so the proxy resolves it from its own vantage point
+        // and this host never queries a resolver for the origin at all.
+        if (configuration.Quic.Proxy is { } masque)
+        {
+            return await CreateThroughMasqueAsync(
+                origin,
+                masque,
+                configuration,
+                factory,
+                tls13SessionCache,
+                connectionId,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         var addresses = await dnsResolver.ResolveAsync(
             origin.IdnHost,
             origin.Port,
@@ -250,18 +279,6 @@ internal sealed class Http3Connection : IHttpConnection
         // equivalent here: a QUIC handshake is the connect, so racing two would mean two
         // handshakes and two ClientHellos. Left undone rather than approximated.
         var endPoint = new IPEndPoint(addresses[0], origin.Port);
-
-        // Every value here is the session's, not this file's. NOT configuration.Profile for the
-        // TLS half: a TlsProfile describes a TCP ClientHello — TLS 1.2 suites, session tickets,
-        // ALPS — and several of its extensions are ones RFC 9001 section 8.4 forbids over QUIC.
-        // TlsSessionOptions.Quic is the QUIC-shaped surface that drives this instead.
-        var spec = configuration.Quic.ConnectionSpec;
-        var factory = new TlsQuicClientHelloProfileFactory
-        {
-            ConnectionSpec = spec,
-            AlpnProtocols = configuration.Quic.AlpnProtocols,
-            Tls = configuration.Quic.ConfigureClientHello,
-        };
 
         // THE TRANSPORT IS THE ONLY THING A PROXY CHANGES HERE. Everything below - the
         // spec, the ClientHello, the deadline, the streams - is identical either way,
@@ -388,6 +405,116 @@ internal sealed class Http3Connection : IHttpConnection
                     elapsed: Stopwatch.GetElapsedTime(attemptStartedAt),
                     exception: exception);
             }
+        }
+    }
+
+    /// <summary>
+    /// Opens an RFC 9298 CONNECT-UDP tunnel through <paramref name="masque"/> and runs the
+    /// ordinary inner dial over it.
+    /// </summary>
+    /// <remarks>
+    /// <para>THE TUNNEL IS A TRANSPORT AND NOTHING MORE. It implements
+    /// <see cref="ITlsQuicDatagramTransport"/>, so the inner dial is the direct path's: the same
+    /// spec, ClientHello and deadlines, no SOCKS5 relay wrapper and so no liveness probe, which
+    /// exists to catch an RFC 1928 association that never relays and observes that through the
+    /// wrapper.</para>
+    /// <para>THE INNER PATH MTU NEEDS NO CLAMP HERE. <c>TlsQuicConnection</c> bounds its RFC
+    /// 8899 search and every datagram it builds by the transport's
+    /// <c>MaxDatagramPayloadSize</c>, so the tunnel's ceiling reaches the inner connection
+    /// through the transport it is handed.</para>
+    /// <para>OWNERSHIP MATCHES THE OTHER TWO PATHS. On success the tunnel belongs to the returned
+    /// connection, whose <see cref="DisposeAsync"/> disposes it as it would a UDP socket or a
+    /// SOCKS5 relay; on any failure it is disposed here. Nothing is wrapped: a
+    /// <see cref="TlsQuicProxyException"/> from either dial reaches the caller as it is.</para>
+    /// <para>The worst case is two full deadlines: the outer dial's
+    /// <see cref="TlsQuicOptions.HandshakeDeadline"/>, then the inner handshake's.</para>
+    /// </remarks>
+    private static async ValueTask<IHttpConnection> CreateThroughMasqueAsync(
+        Uri origin,
+        TlsProxy masque,
+        TlsSessionConfiguration configuration,
+        TlsQuicClientHelloProfileFactory factory,
+        Tls13SessionCache tls13SessionCache,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        // Only the proxy sees the outer connection: the library's default QUIC shape with
+        // PMTUD off and SETTINGS_H3_DATAGRAM on, then the proxy's own ConfigureOuterQuic hook.
+        var outer = TlsQuicOptions.CreateMasqueOuter(masque.ConfigureOuterQuic)
+            .Snapshot(TlsQuicOptions.CreateMasqueOuterHttp3());
+        var credentials = masque.GetCredentials()!;
+        var options = new TlsQuicMasqueOptions
+        {
+            ProxyEndPoint = new DnsEndPoint(masque.Address.IdnHost, masque.EffectivePort),
+            TargetHost = origin.IdnHost,
+            TargetPort = origin.Port,
+            // Never resolved and never compared: the inner connection sends to it and nothing
+            // reads a received datagram's source, so the unspecified address will do.
+            TargetEndPoint = new IPEndPoint(IPAddress.Any, origin.Port),
+            Username = credentials.UserName,
+            Password = credentials.Password,
+            OuterSpec = outer.ConnectionSpec,
+            OuterHttp3Spec = outer.Http3Spec,
+            ConfigureOuterClientHello = outer.ConfigureClientHello,
+            HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
+        };
+
+        var startedAt = Stopwatch.GetTimestamp();
+        TlsQuicMasqueTransport tunnel;
+        try
+        {
+            tunnel = await TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // Every failure of the outer dial, not only the named ones: a socket error or a
+            // cancellation is still a tunnel that did not open.
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueTunnelClosed,
+                origin.IdnHost,
+                origin.Port,
+                elapsed: Stopwatch.GetElapsedTime(startedAt),
+                exception: exception);
+            throw;
+        }
+        TlsConnectTelemetry.Emit(
+            configuration.ConnectObserver,
+            connectionId,
+            TlsConnectEventKind.MasqueTunnelOpened,
+            origin.IdnHost,
+            origin.Port,
+            elapsed: Stopwatch.GetElapsedTime(startedAt));
+
+        try
+        {
+            return await DialInnerAsync(
+                origin,
+                configuration,
+                factory,
+                tls13SessionCache,
+                tunnel,
+                options.TargetEndPoint,
+                relay: null,
+                probing: false,
+                HandshakeTimeout(configuration),
+                connectionId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueTunnelClosed,
+                origin.IdnHost,
+                origin.Port,
+                elapsed: Stopwatch.GetElapsedTime(startedAt),
+                exception: exception);
+            await tunnel.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
     }
 

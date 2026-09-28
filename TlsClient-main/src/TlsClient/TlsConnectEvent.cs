@@ -157,13 +157,15 @@ public enum TlsConnectEventKind
     /// </remarks>
     MasqueTunnelOpened = 17,
 
-    /// <summary>The outer dial to a MASQUE proxy's RFC 9298 CONNECT-UDP tunnel failed, so the
-    /// inner QUIC dial it was meant to carry never started.</summary>
+    /// <summary>A dial through a MASQUE proxy's RFC 9298 CONNECT-UDP tunnel failed and the
+    /// tunnel was torn down.</summary>
     /// <remarks>
-    /// <para><see cref="TlsConnectEvent.Exception"/> says why the outer dial failed — a refused
-    /// CONNECT-UDP, a TLS or TCP failure to the proxy itself, or an outer QUIC dial that never
-    /// completed — so a broken MASQUE hop and a broken origin are told apart by which of this
-    /// event and the inner dial's own failure fired.</para>
+    /// <para>TWO CASES, TOLD APART BY <see cref="MasqueTunnelOpened"/>. Without one before it
+    /// under the same <see cref="TlsConnectEvent.ConnectionId"/>, the outer dial failed — a
+    /// refused CONNECT-UDP, a failure to reach the proxy itself, or an outer QUIC dial that never
+    /// completed — and the inner dial never started: a broken MASQUE hop. With one, the tunnel
+    /// opened and the inner dial over it failed: a broken origin, or a tunnel that died
+    /// mid-handshake. <see cref="TlsConnectEvent.Exception"/> says which failure it was.</para>
     /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
     /// </remarks>
     MasqueTunnelClosed = 18,
