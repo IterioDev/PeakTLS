@@ -60,12 +60,23 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// <remarks>The flow-control pair is the loopback's, not a persona's: a client that
     /// advertises RFC 9000 s18.2's absent-parameter zero cannot receive the proxy's control
     /// stream or its response. The 0x20 literal is 65535 as a four-byte varint.</remarks>
-    internal static TlsQuicConnectionSpec OuterSpec() => new()
+    /// <param name="congestionController">Replaces NewReno, for a test that shuts the
+    /// window.</param>
+    /// <param name="initialRtt">Pins RFC 9002 s6.2.2's initial RTT.</param>
+    internal static TlsQuicConnectionSpec OuterSpec(
+        ITlsQuicCongestionController? congestionController = null,
+        TimeSpan? initialRtt = null) => new()
     {
         PathMtuDiscovery = false,
         BasePathMtu = 1392,
         MaximumPathMtu = 1392,
         DestinationConnectionIdLength = 8,
+        InitialRttRange = initialRtt is { } rtt ? (rtt, rtt) : null,
+        Recovery = new TlsQuicRecoverySpec
+        {
+            CongestionController =
+                congestionController is null ? null : () => congestionController,
+        },
         LocalFlowControl = TestQuicSpecValues.HarnessFlowControl,
         TransportParameters = new TlsQuicTransportParameterSpec
         {
@@ -86,6 +97,8 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// <param name="answerStatus">The CONNECT-UDP response status.</param>
     /// <param name="answerWithReset">Answer with RESET_STREAM 0x10c instead of a
     /// response.</param>
+    /// <param name="answerWithClose">Answer by closing the outer connection with
+    /// H3_NO_ERROR instead of a response.</param>
     /// <param name="outerSpec">Replaces <see cref="OuterSpec"/>.</param>
     /// <exception cref="Exception">Whatever the dial threw, after the peer is torn down; or
     /// the script's own failure, when it failed.</exception>
@@ -95,7 +108,8 @@ internal sealed class MasqueHarness : IAsyncDisposable
         ulong? serverMaxDatagramFrameSize = 65535,
         int answerStatus = 200,
         bool answerWithReset = false,
-        TlsQuicConnectionSpec? outerSpec = null)
+        TlsQuicConnectionSpec? outerSpec = null,
+        bool answerWithClose = false)
     {
         var pki = TestPki.Create();
         var credential = Credential(pki);
@@ -156,7 +170,12 @@ internal sealed class MasqueHarness : IAsyncDisposable
         using var scriptCancellation =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var script = RunScriptAsync(
-            peer, peerSettings, answerStatus, answerWithReset, scriptCancellation.Token);
+            peer,
+            peerSettings,
+            answerStatus,
+            answerWithReset,
+            answerWithClose,
+            scriptCancellation.Token);
 
         TlsQuicMasqueTransport transport;
         try
@@ -207,11 +226,12 @@ internal sealed class MasqueHarness : IAsyncDisposable
         }
     }
 
-    /// <summary>Tears down the peer side and the transport pair.</summary>
-    /// <remarks>The tunnel itself is not disposed yet: its DisposeAsync lands with the data
-    /// plane.</remarks>
+    /// <summary>Disposes the tunnel, then tears down the peer side and the transport pair.
+    /// </summary>
+    /// <remarks>No null guard: a dial that failed returned no harness.</remarks>
     public async ValueTask DisposeAsync()
     {
+        await Transport.DisposeAsync();
         await Peer.DisposeAsync();
         await _server.DisposeAsync();
         await ClientTransport.DisposeAsync();
@@ -228,6 +248,7 @@ internal sealed class MasqueHarness : IAsyncDisposable
         TlsQuicHttp3Setting[] peerSettings,
         int answerStatus,
         bool answerWithReset,
+        bool answerWithClose,
         CancellationToken cancellationToken)
     {
         var pumped = 0;
@@ -247,6 +268,14 @@ internal sealed class MasqueHarness : IAsyncDisposable
             }
             await peer.PumpOnceAsync(SentAt, cancellationToken);
             pumped++;
+        }
+
+        if (answerWithClose)
+        {
+            // RFC 9000 s19.19's application CONNECTION_CLOSE: type 0x1d, error code 0x100
+            // (H3_NO_ERROR) as a two-byte varint, an empty reason phrase.
+            await peer.SendOneRttRawFrameAsync([0x1d, 0x41, 0x00, 0x00], cancellationToken);
+            return pumped;
         }
 
         await peer.SendStreamFramesAsync(

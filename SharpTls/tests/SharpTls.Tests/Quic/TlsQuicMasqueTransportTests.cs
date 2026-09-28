@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using SharpTls;
 using SharpTls.Quic;
@@ -5,8 +6,10 @@ using static SharpTls.Tests.Quic.TlsQuicConnectionTests;
 
 namespace SharpTls.Tests.Quic;
 
-/// <summary>The MASQUE dial: what the proxy must offer (RFC 9298 s3, RFC 9297 s2.1.1, RFC 9221
-/// s3), what the CONNECT-UDP request carries, and how each answer is judged by name.</summary>
+/// <summary>The MASQUE tunnel. The dial: what the proxy must offer (RFC 9298 s3, RFC 9297
+/// s2.1.1, RFC 9221 s3), what the CONNECT-UDP request carries, and how each answer is judged
+/// by name. The data plane: context-0 framing both ways, backpressure that delays rather than
+/// drops, and every way the tunnel ends surfacing as MasqueTunnelClosed.</summary>
 public sealed class TlsQuicMasqueTransportTests
 {
     private static readonly TlsQuicHttp3Setting ExtendedConnect =
@@ -137,5 +140,201 @@ public sealed class TlsQuicMasqueTransportTests
 
         Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
         Assert.Contains("0x10c", error.Message);
+    }
+
+    [Fact]
+    public async Task AnOuterCloseDuringTheDialIsATunnelClosed()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await MasqueHarness.CreateAsync(
+                cancellation.Token, peerSettings: FullOffer, answerWithClose: true));
+
+        // The cause rides in the text: TlsQuicConnection's draining refusal (RFC 9000 s10.2).
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
+        Assert.Contains("draining", error.Message);
+    }
+
+    [Fact]
+    public async Task ASentPayloadReachesThePeerAsAContextZeroHttpDatagram()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        // Any destination: RFC 9298 s2 fixed the target in the request.
+        await harness.Transport.SendAsync(
+            new IPEndPoint(IPAddress.Any, 1), new byte[] { 0xC0, 1, 2, 3 }, ct);
+
+        // RFC 9297 s2.1's Quarter Stream ID (stream 0, so 0x00), then RFC 9298 s4's Context
+        // ID 0, then the payload.
+        await PumpPeerUntilAsync(harness, () => harness.Peer.ReceivedDatagrams.Count > 0, ct);
+        Assert.Equal(new byte[] { 0x00, 0x00, 0xC0, 1, 2, 3 }, harness.Peer.ReceivedDatagrams[^1]);
+    }
+
+    [Fact]
+    public async Task APeerDatagramReachesReceiveAsyncWithoutItsFraming()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 9, 8, 7), ct);
+
+        var buffer = new byte[2048];
+        var received = await harness.Transport.ReceiveAsync(buffer, ct);
+        Assert.Equal(3, received.Length);
+        Assert.Equal(new byte[] { 9, 8, 7 }, buffer[..3]);
+        Assert.Equal(new IPEndPoint(IPAddress.Loopback, 443), received.RemoteEndPoint);
+    }
+
+    [Fact]
+    public async Task ANonZeroContextIdIsDroppedAndCounted()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x02, 1), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 5), ct);
+
+        var buffer = new byte[2048];
+        var received = await harness.Transport.ReceiveAsync(buffer, ct);
+        Assert.Equal(new byte[] { 5 }, buffer[..received.Length]);
+        Assert.StartsWith(
+            "1 datagram(s) dropped for a context id other than 0", harness.Transport.DropSummary);
+    }
+
+    [Fact]
+    public async Task AnOversizePayloadIsRefusedByNameNotDropped()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+        var ceiling = harness.Transport.MaxDatagramPayloadSize;
+
+        var error = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () =>
+            await harness.Transport.SendAsync(
+                new IPEndPoint(IPAddress.Loopback, 443), new byte[ceiling + 1], ct));
+
+        Assert.Contains($"at most {ceiling} bytes", error.Message);
+    }
+
+    [Fact]
+    public async Task SendAwaitsWhenTheOuterIsCongestionBlocked()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+
+        // OPEN FOR THE DIAL, which needs the window, and shut once the tunnel is up. The 5 s
+        // initial RTT keeps an RFC 9002 s6.2 probe out of the 200 ms window.
+        var gate = new ScriptedSendGate { Open = true };
+        await using var harness = await MasqueHarness.CreateAsync(
+            ct,
+            peerSettings: FullOffer,
+            outerSpec: MasqueHarness.OuterSpec(gate, initialRtt: TimeSpan.FromSeconds(5)));
+        gate.Open = false;
+
+        // What a shut outer absorbs before a send waits: TlsQuicConnection's DATAGRAM queue
+        // (64), the one payload that queue refused and the owner holds, and the channel (64).
+        const int absorbed = 64 + 1 + 64;
+        var target = new IPEndPoint(IPAddress.Loopback, 443);
+        var sends = Enumerable.Range(0, absorbed + 1)
+            .Select(i => harness.Transport.SendAsync(target, new byte[] { (byte)i }, ct).AsTask())
+            .ToList();
+
+        await Task.WhenAll(sends.Take(absorbed)).WaitAsync(TimeSpan.FromSeconds(5), ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+        Assert.False(sends[absorbed].IsCompleted, "a send beyond the bound completed");
+
+        // A PROPERTY FLIP WAKES NOTHING: the owner is parked in its pump, and the last send in
+        // the channel write before it reaches InterruptPump. A PING from the proxy wakes it.
+        gate.Open = true;
+        await harness.Peer.SendOneRttRawFrameAsync([0x01], ct);
+        await sends[absorbed].WaitAsync(TimeSpan.FromSeconds(5), ct);
+
+        await PumpPeerUntilAsync(
+            harness, () => harness.Peer.ReceivedDatagrams.Count >= absorbed + 1, ct);
+        Assert.Equal(
+            Enumerable.Range(0, absorbed + 1).Select(i => new byte[] { 0x00, 0x00, (byte)i }),
+            harness.Peer.ReceivedDatagrams);
+    }
+
+    [Fact]
+    public async Task AResetAfterTheResponseSurfacesAsTunnelClosedOnTheNextReceive()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        // RFC 9000 s19.4: the final size is every byte already sent, the 200's HEADERS frame.
+        var finalSize = (ulong)ResponseBytes(200, [], []).Length;
+        await harness.Peer.SendStreamFramesAsync([Reset(0, finalSize, 0x10c)], ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
+        Assert.Contains("0x10c", error.Message);
+
+        var send = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.SendAsync(
+                new IPEndPoint(IPAddress.Loopback, 443), new byte[] { 1 }, ct));
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, send.Error);
+        Assert.Contains("0x10c", send.Message);
+    }
+
+    [Fact]
+    public async Task AnOuterConnectionCloseSurfacesAsTunnelClosed()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        // RFC 9000 s19.19's application CONNECTION_CLOSE with H3_NO_ERROR (0x100).
+        await harness.Peer.SendOneRttRawFrameAsync([0x1d, 0x41, 0x00, 0x00], ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
+        Assert.Contains("draining", error.Message);
+    }
+
+    [Fact]
+    public async Task DisposeIsIdempotentAndClosesTheOuter()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        await harness.Transport.DisposeAsync();
+        await harness.Transport.DisposeAsync();
+        await harness.PumpPeerAsync(ct);
+
+        // RFC 9114 s5.2's graceful close: H3_NO_ERROR in an application CONNECTION_CLOSE.
+        var close = Assert.NotNull(harness.Peer.LastConnectionClose);
+        Assert.Equal(0x1dUL, close.RawType);
+        Assert.Equal(0x100UL, close.ErrorCode);
+    }
+
+    // RFC 9221 s4's DATAGRAM frame with a Length (type 0x31); every payload here is under 64
+    // bytes, so the length is a one-byte varint.
+    private static byte[] DatagramFrame(params byte[] payload) =>
+        [0x31, (byte)payload.Length, .. payload];
+
+    // The owner sends on its own schedule, so the peer is pumped until what the test waits
+    // for has arrived; the test's token bounds the wait.
+    private static async Task PumpPeerUntilAsync(
+        MasqueHarness harness, Func<bool> arrived, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await harness.PumpPeerAsync(cancellationToken);
+            if (arrived())
+            {
+                return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+        }
     }
 }
