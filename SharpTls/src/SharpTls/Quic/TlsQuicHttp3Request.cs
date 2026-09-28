@@ -1588,6 +1588,14 @@ internal sealed class TlsQuicHttp3Response
     /// </remarks>
     internal ReadOnlySpan<byte> Body => CollectionsMarshal.AsSpan(_body);
 
+    /// <summary>Drops every DATA payload read so far, so <see cref="Body"/> is empty until the
+    /// next one.</summary>
+    /// <remarks>For a datagram-carrying exchange, whose stream never FINs while its tunnel
+    /// lives and whose DATA frames are RFC 9297 s3.2 capsules nothing here parses. Kept, they
+    /// would only accumulate toward the buffering ceiling. Clear keeps the capacity for the
+    /// next read; the ceiling that bounds one read bounds it too.</remarks>
+    internal void DiscardBody() => _body.Clear();
+
     /// <summary>Gets the final response's status code, or -1 when no final response has been
     /// read.</summary>
     /// <remarks>-1 NO LONGER MEANS "read, but malformed". C10 left an absent or unparsable
