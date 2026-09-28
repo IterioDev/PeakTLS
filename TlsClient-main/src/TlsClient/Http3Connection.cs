@@ -306,29 +306,8 @@ internal sealed class Http3Connection : IHttpConnection
                         cancellationToken).ConfigureAwait(false));
             ITlsQuicDatagramTransport transport =
                 relay ?? TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily);
-            TlsQuicConnection? connection = null;
-            CustomTlsQuicClient? tlsClient = null;
             try
             {
-                connection = new TlsQuicConnection(
-                    new TlsQuicConnectionOptions(transport, endPoint, spec)
-                    {
-                        // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
-                        // how long a healthy connection may be REUSED from the pool - minutes -
-                        // and handing it to a handshake deadline SharpTls defaults to ten
-                        // seconds meant the deadline could never fire: the real bound was the
-                        // outer HandshakeTimeout CTS below, and this line was dead configuration
-                        // wearing a misleading name. TlsQuicOptions.HandshakeDeadline is the
-                        // knob for it; null leaves SharpTls's own default in place.
-                        HandshakeDeadline = configuration.Quic.HandshakeDeadline
-                            ?? SharpTlsHandshakeDeadline,
-                        IdleTimeout = Bounded(
-                            configuration.PooledConnectionIdleTimeout,
-                            DefaultIdleTimeout),
-                    },
-                    source => tlsClient = CreateTlsClient(
-                        origin, configuration, factory, tls13SessionCache, source));
-
                 var handshakeTimeout = HandshakeTimeout(configuration);
 
                 // THE LIVENESS PROBE ONLY SHORTENS ATTEMPTS THAT CAN STILL BE RETRIED. A dead
@@ -339,114 +318,21 @@ internal sealed class Http3Connection : IHttpConnection
                 // still connects rather than being re-dialled to exhaustion, and the failure
                 // finally reported is the one the network actually produced.
                 var probing = relay is not null && attempt < attempts;
-                var deadline = probing
-                    ? Shorter(configuration.Quic.AssociationLivenessDeadline, handshakeTimeout)
-                    : handshakeTimeout;
-
-                using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
-                var startedAt = Stopwatch.GetTimestamp();
-                if (probing)
-                {
-                    // ONE DATAGRAM ENDS THE PROBE. Its arrival is proof that the association
-                    // relays, which is the only thing being asked; everything after that is an
-                    // ordinary handshake and gets the ordinary budget back. Measured from this
-                    // dial's start rather than from now, so a live connection is bounded exactly
-                    // as it was before the probe existed and never more generously.
-                    relay!.OnFirstInboundDatagram = () =>
-                    {
-                        try
-                        {
-                            var remaining =
-                                handshakeTimeout - Stopwatch.GetElapsedTime(startedAt);
-                            handshake.CancelAfter(
-                                remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            // The handshake already finished and disposed the source underneath
-                            // the receive loop that called this. There is nothing left to
-                            // extend, and instrumentation must never fail a connection.
-                        }
-                    };
-                }
-                handshake.CancelAfter(deadline);
-                try
-                {
-                    await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (
-                    handshake.IsCancellationRequested &&
-                    !cancellationToken.IsCancellationRequested)
-                {
-                    throw new HttpRequestException(
-                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
-                        $"within {deadline}.");
-                }
-                catch (Exception exception) when (
-                    exception is TimeoutException or InvalidOperationException)
-                {
-                    throw new HttpRequestException(
-                        $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
-                        exception);
-                }
-
-                if (tlsClient?.NegotiatedApplicationProtocol !=
-                    TlsQuicClientHelloProfileFactory.Http3AlpnToken)
-                {
-                    throw new HttpRequestException(
-                        "The peer did not select ALPN 'h3', so this connection cannot carry " +
-                        $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
-                }
-
-                // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
-                // constructor refuses unless the ClientHello also advertised a non-zero
-                // max_datagram_frame_size. The default transport parameter preset does, so the
-                // pair agrees by construction — a narrowed preset that drops 0x20 would be told
-                // here rather than by a peer's H3_SETTINGS_ERROR.
-                var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
-                http3.OpenLocalStreams();
-                if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    throw new HttpRequestException(
-                        "The HTTP/3 control stream could not be opened: the QUIC connection had " +
-                        "nothing to send.");
-                }
-
-                var allowance = (int)Math.Min(
-                    connection.PeerFlowControl.InitialMaxStreamsBidi,
-                    int.MaxValue);
-                var idleBudget = connection.EffectiveIdleTimeout() is { } effective
-                    ? TimeSpan.FromTicks(effective.Ticks / 2)
-                    : (TimeSpan?)null;
-                // TAKEN HERE, WHICH IS THE LAST INSTANT THAT STILL COUNTS AS "THE HANDSHAKE".
-                // Everything above has finished: ConnectAsync returned, ALPN was checked, the
-                // HTTP/3 unidirectional streams went out. So the relay's running total at this
-                // point is exactly what the handshake burst drew back, and anything the counter
-                // gains from now on is the association still working AFTER setup - which is the
-                // only question the request path asks it.
-                var result = new Http3Connection(
+                return await DialInnerAsync(
+                    origin,
+                    configuration,
+                    factory,
+                    tls13SessionCache,
                     transport,
-                    new SharpTlsHttp3Streams(connection, http3),
-                    relay is null
-                        ? null
-                        : new Socks5AssociationWatch(
-                            relay,
-                            connectionId,
-                            origin.IdnHost,
-                            origin.Port),
-                    BuildTlsInfo(configuration, tlsClient),
-                    allowance,
-                    idleBudget);
-                result.Start();
-                return result;
+                    endPoint,
+                    relay,
+                    probing,
+                    handshakeTimeout,
+                    connectionId,
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
-                if (connection is not null)
-                {
-                    await connection.DisposeAsync().ConfigureAwait(false);
-                }
                 await transport.DisposeAsync().ConfigureAwait(false);
 
                 // THE DISCRIMINATOR, AND IT IS DELIBERATELY NARROW. Only an association that
@@ -502,6 +388,162 @@ internal sealed class Http3Connection : IHttpConnection
                     elapsed: Stopwatch.GetElapsedTime(attemptStartedAt),
                     exception: exception);
             }
+        }
+    }
+
+    /// <summary>One inner dial over <paramref name="transport"/>: connection options, the
+    /// SOCKS5 probe deadline when <paramref name="relay"/> is set, handshake, ALPN check,
+    /// HTTP/3 control streams, the Http3Connection. On any failure the CONNECTION it created is
+    /// disposed here; the TRANSPORT belongs to the caller, which disposes it (and decides
+    /// whether to re-associate) in its own catch.</summary>
+    private static async ValueTask<Http3Connection> DialInnerAsync(
+        Uri origin,
+        TlsSessionConfiguration configuration,
+        TlsQuicClientHelloProfileFactory factory,
+        Tls13SessionCache tls13SessionCache,
+        ITlsQuicDatagramTransport transport,
+        IPEndPoint endPoint,
+        Socks5LivenessTransport? relay,
+        bool probing,
+        TimeSpan handshakeTimeout,
+        Guid connectionId,
+        CancellationToken cancellationToken)
+    {
+        TlsQuicConnection? connection = null;
+        CustomTlsQuicClient? tlsClient = null;
+        try
+        {
+            connection = new TlsQuicConnection(
+                new TlsQuicConnectionOptions(
+                    transport,
+                    endPoint,
+                    configuration.Quic.ConnectionSpec)
+                {
+                    // NOT PooledConnectionLifetime, WHICH IS WHAT THIS USED TO READ. That is
+                    // how long a healthy connection may be REUSED from the pool - minutes -
+                    // and handing it to a handshake deadline SharpTls defaults to ten
+                    // seconds meant the deadline could never fire: the real bound was the
+                    // outer HandshakeTimeout CTS below, and this line was dead configuration
+                    // wearing a misleading name. TlsQuicOptions.HandshakeDeadline is the
+                    // knob for it; null leaves SharpTls's own default in place.
+                    HandshakeDeadline = configuration.Quic.HandshakeDeadline
+                        ?? SharpTlsHandshakeDeadline,
+                    IdleTimeout = Bounded(
+                        configuration.PooledConnectionIdleTimeout,
+                        DefaultIdleTimeout),
+                },
+                source => tlsClient = CreateTlsClient(
+                    origin, configuration, factory, tls13SessionCache, source));
+
+            var deadline = probing
+                ? Shorter(configuration.Quic.AssociationLivenessDeadline, handshakeTimeout)
+                : handshakeTimeout;
+
+            using var handshake = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            var startedAt = Stopwatch.GetTimestamp();
+            if (probing)
+            {
+                // ONE DATAGRAM ENDS THE PROBE. Its arrival is proof that the association
+                // relays, which is the only thing being asked; everything after that is an
+                // ordinary handshake and gets the ordinary budget back. Measured from this
+                // dial's start rather than from now, so a live connection is bounded exactly
+                // as it was before the probe existed and never more generously.
+                relay!.OnFirstInboundDatagram = () =>
+                {
+                    try
+                    {
+                        var remaining =
+                            handshakeTimeout - Stopwatch.GetElapsedTime(startedAt);
+                        handshake.CancelAfter(
+                            remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // The handshake already finished and disposed the source underneath
+                        // the receive loop that called this. There is nothing left to
+                        // extend, and instrumentation must never fail a connection.
+                    }
+                };
+            }
+            handshake.CancelAfter(deadline);
+            try
+            {
+                await connection.ConnectAsync(handshake.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                handshake.IsCancellationRequested &&
+                !cancellationToken.IsCancellationRequested)
+            {
+                throw new HttpRequestException(
+                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' did not complete " +
+                    $"within {deadline}.");
+            }
+            catch (Exception exception) when (
+                exception is TimeoutException or InvalidOperationException)
+            {
+                throw new HttpRequestException(
+                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
+                    exception);
+            }
+
+            if (tlsClient?.NegotiatedApplicationProtocol !=
+                TlsQuicClientHelloProfileFactory.Http3AlpnToken)
+            {
+                throw new HttpRequestException(
+                    "The peer did not select ALPN 'h3', so this connection cannot carry " +
+                    $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
+            }
+
+            // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
+            // constructor refuses unless the ClientHello also advertised a non-zero
+            // max_datagram_frame_size. The default transport parameter preset does, so the
+            // pair agrees by construction — a narrowed preset that drops 0x20 would be told
+            // here rather than by a peer's H3_SETTINGS_ERROR.
+            var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
+            http3.OpenLocalStreams();
+            if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))
+            {
+                throw new HttpRequestException(
+                    "The HTTP/3 control stream could not be opened: the QUIC connection had " +
+                    "nothing to send.");
+            }
+
+            var allowance = (int)Math.Min(
+                connection.PeerFlowControl.InitialMaxStreamsBidi,
+                int.MaxValue);
+            var idleBudget = connection.EffectiveIdleTimeout() is { } effective
+                ? TimeSpan.FromTicks(effective.Ticks / 2)
+                : (TimeSpan?)null;
+            // TAKEN HERE, WHICH IS THE LAST INSTANT THAT STILL COUNTS AS "THE HANDSHAKE".
+            // Everything above has finished: ConnectAsync returned, ALPN was checked, the
+            // HTTP/3 unidirectional streams went out. So the relay's running total at this
+            // point is exactly what the handshake burst drew back, and anything the counter
+            // gains from now on is the association still working AFTER setup - which is the
+            // only question the request path asks it.
+            var result = new Http3Connection(
+                transport,
+                new SharpTlsHttp3Streams(connection, http3),
+                relay is null
+                    ? null
+                    : new Socks5AssociationWatch(
+                        relay,
+                        connectionId,
+                        origin.IdnHost,
+                        origin.Port),
+                BuildTlsInfo(configuration, tlsClient),
+                allowance,
+                idleBudget);
+            result.Start();
+            return result;
+        }
+        catch
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+            }
+            throw;
         }
     }
 
