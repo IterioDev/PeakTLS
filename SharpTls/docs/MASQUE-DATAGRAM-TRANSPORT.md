@@ -20,11 +20,16 @@ reaches the target exactly as the client built it.
 `TlsQuicMasqueTransport.ConnectAsync` runs five steps under one `HandshakeDeadline`:
 
 1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, standard (non-overridden)
-   certificate validation, PMTUD off, both path MTUs fixed at 1392. No default transport
-   parameter set advertises `max_datagram_frame_size`, so the outer ClientHello adds it
-   explicitly as a literal transport parameter (id `0x20`); without it the proxy has no basis to
-   accept HTTP/3 datagrams (RFC 9221 §3). The outer HTTP/3 settings send
-   `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1).
+   certificate validation, PMTUD off, both path MTUs fixed at 1392. The default transport
+   parameter list is `initial_source_connection_id` alone, which advertises no flow control at
+   all: the proxy could open zero unidirectional streams, would never send its SETTINGS, and the
+   dial would idle out after a completed handshake. The outer ClientHello therefore places the
+   six flow-control parameters at RFC 9114 §6.2's floor (three unidirectional streams with 1,024
+   bytes of credit each, the same credit on the tunnel's own stream, no server-initiated
+   bidirectional streams per §6.1) and adds `max_datagram_frame_size` explicitly as a literal
+   transport parameter (id `0x20`); without it the proxy has no basis to accept HTTP/3
+   datagrams (RFC 9221 §3). The outer HTTP/3 settings send `SETTINGS_H3_DATAGRAM = 1`
+   (RFC 9297 §2.1.1).
 2. **Wait for the proxy's SETTINGS.** The proxy must advertise
    `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` (RFC 8441 §3, carried into HTTP/3 by RFC 9220 §3) and
    `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1), and its transport parameters must carry a

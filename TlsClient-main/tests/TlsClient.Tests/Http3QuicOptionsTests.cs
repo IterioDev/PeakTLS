@@ -559,8 +559,25 @@ public sealed class Http3QuicOptionsTests
         Assert.False(snapshot.ConnectionSpec.PathMtuDiscovery);
         Assert.Equal(1392, snapshot.ConnectionSpec.BasePathMtu);
         Assert.Equal(1392, snapshot.ConnectionSpec.MaximumPathMtu);
-        Assert.Contains(outer.TransportParameters.Entries, e => e.Id == 0x20);
         Assert.Equal(1UL, TlsQuicHttp3Settings.Value(TlsQuicOptions.CreateMasqueOuterHttp3().Snapshot().Settings, 0x33));
+
+        // The wire order: initial_source_connection_id, the six flow-control slots ascending by
+        // id, then max_datagram_frame_size. A list without the six advertises zero streams, the
+        // proxy never opens its control stream, and the dial idles out after a good handshake.
+        Assert.Equal(
+            [0x0f, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x20],
+            outer.TransportParameters.Entries.Select(e => e.Id));
+
+        // RFC 9114 s6.2's floor for HTTP/3 over QUIC, as the connection will enforce it: the
+        // advertisement read back through the same list it goes out in.
+        var advertised = snapshot.ConnectionSpec.LocalFlowControl
+            .AsAdvertisedBy(snapshot.ConnectionSpec.TransportParameters);
+        Assert.Equal(3UL, advertised.InitialMaxStreamsUni);
+        Assert.Equal(1_024UL, advertised.InitialMaxStreamDataUni);
+        Assert.Equal(1_024UL, advertised.InitialMaxStreamDataBidiLocal);
+        Assert.Equal(0UL, advertised.InitialMaxStreamsBidi);
+        Assert.Equal(0UL, advertised.InitialMaxStreamDataBidiRemote);
+        Assert.Equal(4_096UL, advertised.InitialMaxData);
     }
 
     [Fact]

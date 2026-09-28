@@ -605,17 +605,55 @@ public sealed class TlsQuicOptions
     }
 
     /// <summary>The outer connection's options for a MASQUE dial: this library's default
-    /// ClientHello, PMTUD off at 1392 both ways, and an explicit max_datagram_frame_size.
-    /// <paramref name="configure"/> runs last. See <see cref="CreateMasqueOuterHttp3"/> for the
-    /// HTTP/3 options that go with it, including SETTINGS_H3_DATAGRAM = 1.</summary>
+    /// ClientHello, PMTUD off at 1392 both ways, the flow control HTTP/3 needs, and an explicit
+    /// max_datagram_frame_size. <paramref name="configure"/> runs last. See
+    /// <see cref="CreateMasqueOuterHttp3"/> for the HTTP/3 options that go with it, including
+    /// SETTINGS_H3_DATAGRAM = 1.</summary>
+    /// <remarks>
+    /// <para>THE DEFAULT ADVERTISES NO FLOW CONTROL, AND THAT IDLES OUT. The default parameter
+    /// list is RFC 9000 s7.3's mandatory initial_source_connection_id alone, and the six
+    /// <see cref="FlowControl"/> values only reach the wire through a Placed slot each, so a
+    /// default outer connection tells the proxy it may open zero unidirectional streams. The
+    /// proxy then never opens its control stream, its SETTINGS never arrive, and the dial waits
+    /// out its deadline after a handshake that completed. Nothing else on the outer connection
+    /// is fingerprint-relevant - only the proxy sees it - so the values here are the ones the
+    /// specification sets rather than a persona's.</para>
+    /// <para>RFC 9114 s6.2: both sides "MUST allow the peer to create at least three
+    /// unidirectional streams" and give each "at least 1,024 bytes of flow-control credit";
+    /// s6.1: a server never opens a bidirectional stream, so that limit is zero and the credit
+    /// for one is too. The tunnel's own stream carries the proxy's response header section and
+    /// any capsules, credited at the same 1,024 the connection extends as it consumes;
+    /// initial_max_data is the sum of the four windows. The slots go out ascending by id, after
+    /// initial_source_connection_id and before max_datagram_frame_size.</para>
+    /// </remarks>
     internal static TlsQuicOptions CreateMasqueOuter(Action<TlsQuicOptions>? configure)
     {
+        const ulong StreamCredit = 1_024;   // RFC 9114 s6.2
+        const ulong UnidirectionalStreams = 3;   // RFC 9114 s6.2
         var outer = new TlsQuicOptions
         {
             PathMtuDiscovery = false,
             BasePathMtu = 1392,
             MaximumPathMtu = 1392,
         };
+        outer.FlowControl.InitialMaxStreamsUni = UnidirectionalStreams;
+        outer.FlowControl.InitialMaxStreamDataUni = StreamCredit;
+        outer.FlowControl.InitialMaxStreamsBidi = 0;   // RFC 9114 s6.1
+        outer.FlowControl.InitialMaxStreamDataBidiRemote = 0;
+        outer.FlowControl.InitialMaxStreamDataBidiLocal = StreamCredit;
+        outer.FlowControl.InitialMaxData = UnidirectionalStreams * StreamCredit + StreamCredit;
+        foreach (var id in new[]
+        {
+            TlsQuicTransportParameterId.InitialMaxData,
+            TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal,
+            TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote,
+            TlsQuicTransportParameterId.InitialMaxStreamDataUni,
+            TlsQuicTransportParameterId.InitialMaxStreamsBidi,
+            TlsQuicTransportParameterId.InitialMaxStreamsUni,
+        })
+        {
+            outer.TransportParameters.Entries.Add(TlsQuicTransportParameterEntry.Placed((ulong)id));
+        }
         outer.TransportParameters.Entries.Add(
             TlsQuicTransportParameterEntry.Literal(0x20, [0x80, 0x00, 0xFF, 0xFF])); // 65535 as a varint
         configure?.Invoke(outer);
