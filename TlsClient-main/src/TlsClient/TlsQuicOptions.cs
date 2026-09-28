@@ -251,7 +251,6 @@ public sealed class TlsQuicOptions
     // Snapshot.
     private static readonly string ProxyParameter = nameof(Proxy);
 
-
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
     // already declares both. That is four silent drift hazards: change TlsQuicConnectionSpec's
@@ -606,9 +605,9 @@ public sealed class TlsQuicOptions
     }
 
     /// <summary>The outer connection's options for a MASQUE dial: this library's default
-    /// ClientHello, PMTUD off at 1392 both ways, an explicit max_datagram_frame_size, and
-    /// SETTINGS_H3_DATAGRAM = 1 on the HTTP/3 options that go with it. <paramref name="configure"/>
-    /// runs last.</summary>
+    /// ClientHello, PMTUD off at 1392 both ways, and an explicit max_datagram_frame_size.
+    /// <paramref name="configure"/> runs last. See <see cref="CreateMasqueOuterHttp3"/> for the
+    /// HTTP/3 options that go with it, including SETTINGS_H3_DATAGRAM = 1.</summary>
     internal static TlsQuicOptions CreateMasqueOuter(Action<TlsQuicOptions>? configure)
     {
         var outer = new TlsQuicOptions
@@ -716,6 +715,17 @@ public sealed class TlsQuicOptions
                 "association undetected.");
         }
 
+        // A NON-MASQUE PROXY HERE WOULD DIAL SOMETHING THIS LAYER CANNOT SPEAK. SOCKS5 and HTTP
+        // CONNECT are TCP-shaped and are configured through TlsSessionOptions.Proxy instead; an
+        // h3 dial's own proxy hop is RFC 9298 CONNECT-UDP, which only TlsProxy.Masque describes.
+        if (Proxy is { Type: not TlsProxyType.Masque })
+        {
+            throw new ArgumentException(
+                "TlsQuicOptions.Proxy must be a TlsProxy.Masque; SOCKS5 and HTTP proxies go in " +
+                    "TlsSessionOptions.Proxy.",
+                ProxyParameter);
+        }
+
         // A NON-POSITIVE SILENCE DEADLINE WOULD FAIL EVERY PROXIED REQUEST the instant it
         // waited at all, since a request that has not yet been answered is by definition one
         // whose association has relayed nothing since the handshake. Infinite IS meaningful
@@ -755,17 +765,6 @@ public sealed class TlsQuicOptions
             TransportParameters = TransportParameters.Snapshot(),
             Recovery = Recovery.Snapshot(),
         };
-
-        // A NON-MASQUE PROXY HERE WOULD DIAL SOMETHING THIS LAYER CANNOT SPEAK. SOCKS5 and HTTP
-        // CONNECT are TCP-shaped and are configured through TlsSessionOptions.Proxy instead; an
-        // h3 dial's own proxy hop is RFC 9298 CONNECT-UDP, which only TlsProxy.Masque describes.
-        if (Proxy is { Type: not TlsProxyType.Masque })
-        {
-            throw new ArgumentException(
-                "TlsQuicOptions.Proxy must be a TlsProxy.Masque; SOCKS5 and HTTP proxies go in " +
-                    "TlsSessionOptions.Proxy.",
-                ProxyParameter);
-        }
 
         var configureClientHello = ConfigureClientHello ?? ApplyDefaultClientHello;
         return new TlsQuicConfiguration(
