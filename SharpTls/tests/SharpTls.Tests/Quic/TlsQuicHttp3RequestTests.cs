@@ -1384,7 +1384,7 @@ public sealed class TlsQuicHttp3RequestTests
     // Heap's algorithm would be shorter; this is the recursive one because it is the one a
     // reader can check by eye, and 24 permutations of a four-element list is not a place to
     // be clever.
-    private static IEnumerable<List<TlsQuicHttp3PseudoHeader>> Permutations(
+    internal static IEnumerable<List<TlsQuicHttp3PseudoHeader>> Permutations(
         List<TlsQuicHttp3PseudoHeader> items)
     {
         if (items.Count <= 1)

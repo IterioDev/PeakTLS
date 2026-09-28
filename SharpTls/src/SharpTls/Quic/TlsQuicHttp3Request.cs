@@ -28,6 +28,11 @@ namespace SharpTls.Quic;
 // whole after rows 26 and 36 gained witnesses, rather than leaving forty counts measured
 // against a suite that no longer exists.
 //
+// WRITTEN BEFORE EXTENDED CONNECT (Task 4 of the MASQUE plan). The sweep above predates
+// TlsQuicHttp3ExtendedConnectTests, a test outside the 42-case suite that DOES reference this
+// type, and it never swept the two mutation points that test now pins: ProtocolName's spelling
+// and the `Protocol is { Length: 0 }` guard in the empty-value check.
+//
 // THE HARNESS WAS DISTRUSTED FIRST, because a prior task's reported "all 32 survived" turned
 // out to be a bad failure-match pattern. Before any real row ran, a deliberate known-bad
 // mutation - `":method"` spelled `":methodX"` - was applied and the harness reported KILLED
@@ -369,11 +374,9 @@ internal enum TlsQuicHttp3RequestError
 // EXTENDED CONNECT, RFC 8441 s4 via RFC 9220 s3's HTTP/3 mapping, is the opposite shape and
 // is what Protocol exists for. RFC 8441 s4: "on requests that contain the :protocol
 // pseudo-header field... the :scheme and :path pseudo-header fields ... MUST be included."
-// Because :scheme and :path are present, the same mandatory-pseudo-header check that refuses
-// a plain CONNECT is satisfied by an extended one, and Protocol's own emitted line is the
-// only part of an extended CONNECT this type adds: everything else - :method CONNECT,
-// :scheme, :authority, :path, the ordinary fields - is spelled through the members every
-// other request already uses. Whether an extended CONNECT may be SENT AT ALL is a
+// Because :scheme and :path are present, the mandatory-pseudo-header check passes for an
+// extended CONNECT too; Protocol's line is the only addition, the rest spelled through the
+// members every other request already uses. Whether an extended CONNECT may be SENT AT ALL is a
 // connection-level decision, not this type's: RFC 8441 s3 conditions it on the peer's
 // SETTINGS_ENABLE_CONNECT_PROTOCOL, and TlsQuicHttp3Connection.TryOpenRequest is the gate
 // that reads it, this type having no reference to the peer's SETTINGS at all.
@@ -845,7 +848,7 @@ internal sealed class TlsQuicHttp3Request
         // s4.3.1 closes with: "An HTTP request that omits mandatory pseudo-header fields or
         // contains invalid values for those pseudo-header fields is malformed." An empty
         // method or scheme is such an invalid value in any scheme.
-        if (method.Length == 0 || scheme.Length == 0)
+        if (method.Length == 0 || scheme.Length == 0 || Protocol is { Length: 0 })
         {
             error = TlsQuicHttp3RequestError.MandatoryPseudoHeaderValueInvalid;
             return false;
@@ -896,9 +899,7 @@ internal sealed class TlsQuicHttp3Request
                 case TlsQuicHttp3PseudoHeader.Method:
                     lines.Add((MethodName, Encoding.UTF8.GetBytes(method)));
 
-                    // RFC 9220 s3's :protocol has no PseudoHeaderOrder member of its own - see
-                    // Protocol's doc comment - so it is emitted here, right after :method,
-                    // whatever order the rest of the switch is following.
+                    // See ProtocolName's comment above for why :protocol is emitted here.
                     if (Protocol is { } protocol)
                     {
                         lines.Add((ProtocolName, Encoding.UTF8.GetBytes(protocol)));
@@ -1586,6 +1587,14 @@ internal sealed class TlsQuicHttp3Response
     /// storage rather than a copy, matching <see cref="TlsQuicHttp3Frames.TryRead"/>'s payload.
     /// </remarks>
     internal ReadOnlySpan<byte> Body => CollectionsMarshal.AsSpan(_body);
+
+    /// <summary>Drops every DATA payload read so far, so <see cref="Body"/> is empty until the
+    /// next one.</summary>
+    /// <remarks>For a datagram-carrying exchange, whose stream never FINs while its tunnel
+    /// lives and whose DATA frames are RFC 9297 s3.2 capsules nothing here parses. Kept, they
+    /// would only accumulate toward the buffering ceiling. Clear keeps the capacity for the
+    /// next read; the ceiling that bounds one read bounds it too.</remarks>
+    internal void DiscardBody() => _body.Clear();
 
     /// <summary>Gets the final response's status code, or -1 when no final response has been
     /// read.</summary>

@@ -389,11 +389,13 @@ public sealed class TlsQuicFramesTests
     // extent, since a payload is "a sequence of complete frames" (RFC 9000 s12.4
     // Figure 11) and a DATAGRAM measured wrong corrupts every frame after it.
     //
-    // Every input here is hand-built bytes rather than encoder output, and it has
-    // to be: WriteFrame refuses to emit a DATAGRAM, which is the point of
-    // WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne below. Each is
-    // derived from RFC 9221 s4's frame diagram - Type (i) = 0x30..0x31, then
-    // [Length (i)], then Datagram Data (..) - and from its LEN bit sentence.
+    // Every input here is hand-built bytes rather than encoder output: these are read-side
+    // tests, and several rows are either malformed on purpose or use the 0x30 (LEN-clear)
+    // form, which WriteFrame never produces - see
+    // TheLengthLessDatagramFormIsNeverWritten below - so building them by encoding a valid
+    // frame first would not reach the rows that matter. Each is derived from RFC 9221 s4's
+    // frame diagram - Type (i) = 0x30..0x31, then [Length (i)], then Datagram Data (..) -
+    // and from its LEN bit sentence.
 
     // The LEN-clear form, 0x30. RFC 9221 s4: "if this bit is set to 0, the Length
     // field is absent and the Datagram Data field extends to the end of the
@@ -564,32 +566,48 @@ public sealed class TlsQuicFramesTests
         Assert.Equal(TlsQuicTransportError.FrameEncodingError, error);
     }
 
-    // The refusal, and it is the deliverable rather than a limitation of it. This
-    // library parses DATAGRAM frames so that its own advertisement -
-    // max_datagram_frame_size in TlsQuicTransportParameterSpec's default preset,
-    // SETTINGS_H3_DATAGRAM = 1 in TlsQuicHttp3Spec's default settings - does not
-    // kill connections. It implements no datagram semantics and must never claim
-    // to by emitting one.
+    // Task 2 narrows the refusal rather than lifting it. RFC 9221 s4 gives DATAGRAM two wire
+    // forms - 0x30 (LEN-clear), which by rule must be the last frame in its packet, and 0x31
+    // (LEN-present). Only the second is safe to hand to a general-purpose writer:
+    // TryBuildApplicationPacket may append an ACK after any frame it writes, and a 0x30 frame
+    // followed by anything would misrepresent where its data ends. So WriteFrame now emits the
+    // 0x31 form and still refuses the 0x30 one.
     //
-    // Both wire values, because the refusal is on the derived Type and a reader of
-    // WriteFrame's switch cannot tell from one row whether the other reaches the
-    // same arm. RFC 9221 s3 independently forbids sending in this tree's situation:
-    // "An endpoint MUST NOT send DATAGRAM frames until it has received the
-    // max_datagram_frame_size transport parameter with a non-zero value during the
-    // handshake", and nothing here reads a peer's value of that parameter.
-    [Theory]
-    [InlineData(0x30UL)]
-    [InlineData(0x31UL)]
-    public void WritingADatagramFrameThrowsBecauseThisLibraryNeverSendsOne(ulong rawType)
+    // RFC 9221 s3's send-side MUST NOT ("An endpoint MUST NOT send DATAGRAM frames until it has
+    // received the max_datagram_frame_size transport parameter with a non-zero value during the
+    // handshake") is not this writer's job: nothing here yet reads a peer's value of that
+    // parameter, so gating on it is left to whichever future caller queues a DATAGRAM to send.
+    [Fact]
+    public void ADatagramFrameRoundTripsInItsLengthBearingForm()
     {
-        var frame = new TlsQuicFrame { RawType = rawType };
+        var frame = new TlsQuicFrame
+        {
+            RawType = (ulong)TlsQuicFrameType.Datagram | TlsQuicFrames.DatagramLengthBit,
+            Data = new byte[] { 0x00, 0x00, 0xAA, 0xBB, 0xCC },
+        };
 
-        var thrown = Assert.Throws<ArgumentException>(
-            () => TlsQuicFrames.WriteFrame([], frame));
+        var written = new List<byte>();
+        TlsQuicFrames.WriteFrame(written, frame);
+        Assert.Equal(0x31, written[0]);
+        Assert.Equal(5, written[1]);
+        Assert.Equal(frame.Data.ToArray(), written.Skip(2).ToArray());
 
-        // The message is asserted, not just the exception type, because falling
-        // through to the default arm would throw the same type with a message
-        // reading "is not implemented" - which is the opposite of what this is.
-        Assert.Contains("never sent", thrown.Message, StringComparison.Ordinal);
+        var offset = 0;
+        Assert.True(TlsQuicFrames.TryReadFrame(written.ToArray(), ref offset, out var read, out var error));
+        Assert.Equal(TlsQuicFrameType.Datagram, read.Type);
+        Assert.Equal(frame.Data.ToArray(), read.Data.ToArray());
+        Assert.Equal(written.Count, offset);
+        Assert.Equal(written.Count, TlsQuicFrames.MeasureFrame([], frame));
+    }
+
+    // The narrowed half of the refusal: the 0x30 (LEN-clear) form is never written, for the
+    // reason above. LoopbackQuicPeer.SendOneRttRawFrameAsync is the escape hatch a test needing
+    // to send one uses instead.
+    [Fact]
+    public void TheLengthLessDatagramFormIsNeverWritten()
+    {
+        var frame = new TlsQuicFrame { RawType = (ulong)TlsQuicFrameType.Datagram, Data = new byte[] { 1 } };
+        var exception = Assert.Throws<ArgumentException>(() => TlsQuicFrames.WriteFrame([], frame));
+        Assert.Contains("length-bearing", exception.Message);
     }
 }

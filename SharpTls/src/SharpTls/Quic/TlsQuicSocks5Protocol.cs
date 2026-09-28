@@ -28,7 +28,9 @@ public enum TlsQuicProxyError
     /// destination port, so it cannot carry QUIC at all.</summary>
     RelayDeliveredTlsAlert,
 
-    /// <summary>The MASQUE proxy's SETTINGS or transport parameters lack extended CONNECT (SETTINGS_ENABLE_CONNECT_PROTOCOL), HTTP datagrams (SETTINGS_H3_DATAGRAM), or a usable max_datagram_frame_size, so it does not offer CONNECT-UDP (RFC 9298).</summary>
+    /// <summary>The MASQUE proxy's SETTINGS or transport parameters lack extended CONNECT
+    /// (SETTINGS_ENABLE_CONNECT_PROTOCOL), HTTP datagrams (SETTINGS_H3_DATAGRAM), or a usable
+    /// max_datagram_frame_size, so it does not offer CONNECT-UDP (RFC 9298).</summary>
     MasqueNotOffered,
     /// <summary>The proxy answered the CONNECT-UDP request with 407: credentials refused or the account's traffic limit reached.</summary>
     MasqueAuthenticationRejected,
@@ -40,8 +42,9 @@ public enum TlsQuicProxyError
     MasqueTunnelClosed,
 }
 
-/// <summary>A SOCKS5 proxy failure. Distinct from <see cref="TlsQuicTransportException"/>,
-/// which carries an RFC 9000 transport error code.</summary>
+/// <summary>A SOCKS5 proxy failure or a MASQUE CONNECT-UDP tunnel failure. Distinct from
+/// <see cref="TlsQuicTransportException"/>, which carries an RFC 9000 transport error
+/// code.</summary>
 public sealed class TlsQuicProxyException : IOException
 {
     /// <summary>Creates a proxy failure.</summary>

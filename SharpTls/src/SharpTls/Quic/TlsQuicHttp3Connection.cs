@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 
 namespace SharpTls.Quic;
@@ -421,11 +422,21 @@ internal sealed class TlsQuicHttp3Connection
 {
     // One request stream and the reader draining it. A class rather than a tuple because
     // Consumed and Finished are MUTATED per pump and a tuple in a List cannot be.
-    private sealed class Exchange(TlsQuicStream stream, TlsQuicHttp3Response response)
+    private sealed class Exchange(
+        TlsQuicStream stream, TlsQuicHttp3Response response, bool receivesDatagrams)
     {
         internal TlsQuicStream Stream { get; } = stream;
 
         internal TlsQuicHttp3Response Response { get; } = response;
+
+        // Whether RFC 9297 s2.1's HTTP datagrams naming this stream are kept for the caller.
+        // Fixed at open: TryOpenRequest's receivesDatagrams, which also leaves the send side
+        // open, because a datagram-carrying request is one whose stream outlives its HEADERS.
+        internal bool ReceivesDatagrams { get; } = receivesDatagrams;
+
+        // HTTP Datagram Payloads received since the last DrainDatagrams, quarter stream id
+        // stripped, in arrival order.
+        internal List<byte[]> Datagrams { get; } = [];
 
         // How many of Stream.Received's bytes have been handed to Response. The reader holds
         // its own partial-frame remainder, so this only ever grows.
@@ -548,6 +559,23 @@ internal sealed class TlsQuicHttp3Connection
     internal IReadOnlyList<ulong> RequestStreamIds =>
         _exchanges.ConvertAll(exchange => exchange.Stream.Id);
 
+    /// <summary>Gets whether the peer's SETTINGS frame has been read.</summary>
+    /// <remarks>Forwarded from <see cref="TlsQuicHttp3Streams.PeerSettingsReceived"/>, whose
+    /// remark is why an empty <see cref="PeerSettings"/> does not answer this.</remarks>
+    internal bool PeerSettingsReceived => _streams.PeerSettingsReceived;
+
+    /// <summary>Gets the peer's settings, in the peer's wire order.</summary>
+    /// <remarks>Forwarded from <see cref="TlsQuicHttp3Streams.PeerSettings"/>; empty until
+    /// <see cref="PeerSettingsReceived"/>.</remarks>
+    internal ImmutableArray<TlsQuicHttp3Setting> PeerSettings => _streams.PeerSettings;
+
+    /// <summary>Gets how many HTTP datagrams passed RFC 9297 s2.1's receipt checks and were
+    /// then dropped because no exchange reads datagrams on the stream they name.</summary>
+    /// <remarks>s2.1's drop is silent on the wire, not in the process: this counts datagrams
+    /// for a stream opened without <c>receivesDatagrams</c>, for one this connection never
+    /// opened, and for one whose receive side had already closed.</remarks>
+    internal ulong DroppedDatagramsWrongStream { get; private set; }
+
     /// <summary>Sends s6.2.1's opening flight: the spec's unidirectional streams, with SETTINGS
     /// as the control stream's first frame.</summary>
     /// <remarks>Delegates to <see cref="TlsQuicHttp3Streams.OpenLocalStreams"/> rather than
@@ -580,8 +608,10 @@ internal sealed class TlsQuicHttp3Connection
     /// existed, which TlsQuicConnectionTests.AGetsBytesOnTheWireAreUnchangedByTheBodyPath pins
     /// against a transcript recorded at pristine HEAD.</para>
     /// <para>s4.1's "After sending a request, a client MUST close the stream for sending" is
-    /// what the FIN is, and it is unconditional here rather than deferred - the same sentence
-    /// carves out only CONNECT, which TlsQuicHttp3Request refuses at the encoder.</para>
+    /// what the FIN is, and it is sent with the HEADERS rather than deferred - the same
+    /// sentence carves out only CONNECT. TlsQuicHttp3Request refuses plain CONNECT at the
+    /// encoder; an extended CONNECT that carries datagrams is the one request sent without
+    /// the FIN, see <paramref name="receivesDatagrams"/>.</para>
     /// <para>THE ORDER IS DELIBERATE: everything that can refuse runs BEFORE
     /// <see cref="TlsQuicStreamSet.OpenBidirectional"/>, because that call spends an ordinal
     /// and RFC 9000 s3.2 makes a spent ordinal a stream the peer opens implicitly - a hole
@@ -594,6 +624,9 @@ internal sealed class TlsQuicHttp3Connection
     /// <see cref="TlsQuicHttp3RequestRefusal.None"/>.</param>
     /// <param name="malformed">The s4.2 or s4.3.1 rule the request broke when
     /// <paramref name="refusal"/> is <see cref="TlsQuicHttp3RequestRefusal.Malformed"/>.</param>
+    /// <param name="receivesDatagrams">Whether this exchange carries RFC 9297 HTTP datagrams:
+    /// its HEADERS leave without the FIN, <see cref="DrainDatagrams"/> hands over what the peer
+    /// sends on it, and its DATA payloads are discarded rather than kept as a body.</param>
     /// <returns>The request stream, or <see langword="null"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="request"/> is
     /// <see langword="null"/>.</exception>
@@ -604,7 +637,8 @@ internal sealed class TlsQuicHttp3Connection
     internal TlsQuicStream? TryOpenRequest(
         TlsQuicHttp3Request request,
         out TlsQuicHttp3RequestRefusal refusal,
-        out TlsQuicHttp3RequestError malformed)
+        out TlsQuicHttp3RequestError malformed,
+        bool receivesDatagrams = false)
     {
         ArgumentNullException.ThrowIfNull(request);
         malformed = TlsQuicHttp3RequestError.None;
@@ -634,8 +668,8 @@ internal sealed class TlsQuicHttp3Connection
             return null;
         }
 
-        // RFC 8441 s3, via RFC 9220 s3: "a client MAY use the Extended CONNECT method ... upon
-        // receipt of the SETTINGS_ENABLE_CONNECT_PROTOCOL parameter". request.Protocol is
+        // RFC 8441 s3's gate on the peer's SETTINGS_ENABLE_CONNECT_PROTOCOL - see
+        // ExtendedConnectNotEnabled's remarks for the quoted text. request.Protocol is
         // non-null only for an extended CONNECT (see TlsQuicHttp3Request.Protocol), and this
         // is the one place that setting can be read: TlsQuicHttp3Request has no reference to
         // the peer's SETTINGS at all.
@@ -718,7 +752,12 @@ internal sealed class TlsQuicHttp3Connection
             _streams.SendEncoderInstructions(plan.EncoderStreamBytes);
         }
 
-        _connection.Streams.Send(stream, frame.ToArray(), fin: true);
+        // A DATAGRAM-CARRYING EXCHANGE KEEPS ITS SEND SIDE OPEN. RFC 9297 s2.1: "HTTP/3
+        // datagrams MUST only be sent with an association to a stream whose send side is
+        // open", and RFC 9298 s3.1 ties the tunnel to the request stream - the UDP proxying
+        // lasts as long as the stream does - so a FIN here would end the tunnel the request
+        // just asked for. Every other request still closes its send side with its HEADERS.
+        _connection.Streams.Send(stream, frame.ToArray(), fin: !receivesDatagrams);
 
         // request.Method IS PASSED, and it is the one place it can be. RFC 9110 s6.4.1's
         // never-having-content set opens with "Responses to the HEAD request method
@@ -745,7 +784,8 @@ internal sealed class TlsQuicHttp3Connection
                 MaximumFieldSectionSizeAdvertised,
                 request.Method,
                 _streams.Table,
-                _spec.MaximumBufferedResponseBytes)));
+                _spec.MaximumBufferedResponseBytes),
+            receivesDatagrams));
         refusal = TlsQuicHttp3RequestRefusal.None;
         return stream;
     }
@@ -779,6 +819,51 @@ internal sealed class TlsQuicHttp3Connection
             }
         }
         return null;
+    }
+
+    /// <summary>Takes every HTTP Datagram Payload (RFC 9297 s2.1) received for the exchange on
+    /// <paramref name="streamId"/> since the last call.</summary>
+    /// <remarks>The quarter stream id is already stripped; any RFC 9298 context id is still in
+    /// front, because this layer does not know that RFC. Empty for a stream opened without
+    /// <c>receivesDatagrams</c>, whose datagrams <see cref="DroppedDatagramsWrongStream"/>
+    /// counts instead.</remarks>
+    /// <param name="streamId">The request stream <see cref="TryOpenRequest"/> returned.</param>
+    /// <returns>The payloads in arrival order, or an empty list.</returns>
+    internal List<byte[]> DrainDatagrams(ulong streamId)
+    {
+        foreach (var exchange in _exchanges)
+        {
+            if (exchange.Stream.Id == streamId && exchange.Datagrams.Count > 0)
+            {
+                var drained = new List<byte[]>(exchange.Datagrams);
+                exchange.Datagrams.Clear();
+                return drained;
+            }
+        }
+        return [];
+    }
+
+    /// <summary>Queues an HTTP datagram on the exchange's stream: RFC 9297 s2.1's quarter
+    /// stream id, then <paramref name="payload"/>.</summary>
+    /// <remarks>s2.1's Quarter Stream ID is the associated client-initiated bidirectional
+    /// stream's id divided by four. Queued, not sent - the frame leaves on the next
+    /// <see cref="TlsQuicConnection.SendPendingAsync"/>.</remarks>
+    /// <param name="streamId">The request stream <see cref="TryOpenRequest"/> returned.</param>
+    /// <param name="payload">The HTTP Datagram Payload, including any RFC 9298 context id.
+    /// </param>
+    /// <returns><see langword="false"/> when the connection's DATAGRAM queue is full; the
+    /// caller waits and retries after a send.</returns>
+    /// <exception cref="InvalidOperationException">The peer accepts no DATAGRAM frames.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The quarter stream id and payload exceed
+    /// <see cref="TlsQuicConnection.MaximumDatagramFramePayload"/>.</exception>
+    internal bool TrySendDatagram(ulong streamId, ReadOnlySpan<byte> payload)
+    {
+        var quarter = QuicVariableLengthInteger.Encode(streamId / 4);
+        var datagram = new byte[quarter.Length + payload.Length];
+        quarter.CopyTo(datagram, 0);
+        payload.CopyTo(datagram.AsSpan(quarter.Length));
+        return _connection.TryQueueDatagram(datagram);
     }
 
     /// <summary>Gets whether a peer GOAWAY has said this request will not be processed.</summary>
@@ -847,12 +932,33 @@ internal sealed class TlsQuicHttp3Connection
                 return Fail((ulong)TlsQuicHttp3ErrorCode.H3DatagramError, out errorCode);
             }
 
-            // AND THE PAYLOAD GOES NOWHERE. s2.1's remaining rule is "If a datagram is received
-            // after the corresponding stream's receive side is closed, the received datagrams
-            // MUST be silently dropped", and with no extension in this tree consuming HTTP
-            // datagrams every one of them is in that position. Dropping after validating is the
-            // point: the connection errors above are what a peer can observe, and they are
-            // raised whether or not anything would have used the bytes.
+            // ONLY AN EXCHANGE THAT ASKED FOR DATAGRAMS, AND ONLY WHILE IT CAN STILL RECEIVE.
+            // s2.1's remaining rule is "If a datagram is received after the corresponding
+            // stream's receive side is closed, the received datagrams MUST be silently
+            // dropped" - the FIN and reset conjuncts below - and a stream opened without
+            // receivesDatagrams, or never opened here, has nothing reading its datagrams
+            // either. Dropping after validating is the point: the connection errors above are
+            // what a peer can observe, and they are raised whether or not anything would have
+            // used the bytes.
+            var streamId = quarterStreamId * 4;
+            Exchange? target = null;
+            foreach (var exchange in _exchanges)
+            {
+                if (exchange.Stream.Id == streamId && exchange.ReceivesDatagrams
+                    && !exchange.Stream.ReceiveComplete && !exchange.Stream.ResetReceived)
+                {
+                    target = exchange;
+                    break;
+                }
+            }
+
+            if (target is null)
+            {
+                DroppedDatagramsWrongStream++;
+                continue;
+            }
+
+            target.Datagrams.Add(datagram[cursor..]);
         }
 
         // THE PEER'S STREAMS FIRST, AND C16 MADE THAT ORDERING LOAD-BEARING. It was already the
@@ -958,6 +1064,14 @@ internal sealed class TlsQuicHttp3Connection
             if (!exchange.Response.TryRead(chunk, endOfStream, out var responseError))
             {
                 return Fail(responseError, out errorCode);
+            }
+
+            // A DATAGRAM-CARRYING EXCHANGE KEEPS NO BODY. Its stream never FINs while the
+            // tunnel lives, and its DATA payloads are RFC 9297 s3.2 capsules nothing here
+            // parses, so keeping them would only walk the reader toward its buffering ceiling.
+            if (exchange.ReceivesDatagrams)
+            {
+                exchange.Response.DiscardBody();
             }
 
             // RFC 9000 s19.4's RESET_STREAM, which s4.1.1 makes an ordinary thing for a server
