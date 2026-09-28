@@ -634,8 +634,8 @@ internal sealed class TlsQuicHttp3Connection
             return null;
         }
 
-        // RFC 8441 s3, via RFC 9220 s3: "a client MAY use the Extended CONNECT method ... upon
-        // receipt of the SETTINGS_ENABLE_CONNECT_PROTOCOL parameter". request.Protocol is
+        // RFC 8441 s3's gate on the peer's SETTINGS_ENABLE_CONNECT_PROTOCOL - see
+        // ExtendedConnectNotEnabled's remarks for the quoted text. request.Protocol is
         // non-null only for an extended CONNECT (see TlsQuicHttp3Request.Protocol), and this
         // is the one place that setting can be read: TlsQuicHttp3Request has no reference to
         // the peer's SETTINGS at all.

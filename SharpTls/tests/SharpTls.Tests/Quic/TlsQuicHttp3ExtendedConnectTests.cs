@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using SharpTls.Quic;
 using static SharpTls.Tests.Quic.TlsQuicConnectionTests;
 
@@ -34,14 +33,58 @@ public sealed class TlsQuicHttp3ExtendedConnectTests
     [Fact]
     public void TheProtocolPseudoHeaderFollowsTheMethodWhateverTheOrder()
     {
-        var encoded = new List<byte>();
-        Assert.True(ConnectUdp().TryEncode(encoded, new TlsQuicHttp3Spec(), out _));
-        var fields = Decode(encoded);
+        var permutations = 0;
 
+        foreach (var order in TlsQuicHttp3RequestTests.Permutations(
+            [
+                TlsQuicHttp3PseudoHeader.Method,
+                TlsQuicHttp3PseudoHeader.Authority,
+                TlsQuicHttp3PseudoHeader.Scheme,
+                TlsQuicHttp3PseudoHeader.Path,
+            ]))
+        {
+            permutations++;
+            var encoded = new List<byte>();
+            Assert.True(ConnectUdp().TryEncode(
+                encoded, new TlsQuicHttp3Spec { PseudoHeaderOrder = [.. order] }, out _));
+
+            var names = Decode(encoded).Select(f => f.Name).ToList();
+            Assert.Equal(":protocol", names[names.IndexOf(":method") + 1]);
+
+            // :protocol makes five pseudo-header lines whatever order the other four take;
+            // the regular fields always follow them.
+            Assert.Equal(["proxy-authorization", "capsule-protocol"], names.Skip(5).ToArray());
+        }
+
+        // 4! = 24, recomputed from the loop rather than asserted as a literal.
+        Assert.Equal(4 * 3 * 2 * 1, permutations);
+
+        // The exact default order, pinned directly rather than only through the invariant above.
+        var defaultEncoded = new List<byte>();
+        Assert.True(ConnectUdp().TryEncode(defaultEncoded, new TlsQuicHttp3Spec(), out _));
+        var defaultFields = Decode(defaultEncoded);
         Assert.Equal(
             [":method", ":protocol", ":authority", ":scheme", ":path", "proxy-authorization", "capsule-protocol"],
-            fields.Select(f => f.Name).ToArray());
-        Assert.Equal("connect-udp", fields[1].Value);
+            defaultFields.Select(f => f.Name).ToArray());
+        Assert.Equal("connect-udp", defaultFields[1].Value);
+    }
+
+    [Fact]
+    public void AnEmptyProtocolIsRefused()
+    {
+        var destination = new List<byte>();
+        var request = new TlsQuicHttp3Request
+        {
+            Method = "CONNECT",
+            Protocol = "",
+            Scheme = "https",
+            Authority = "masque.example:50000",
+            Path = "/.well-known/masque/udp/target.example/443/",
+        };
+
+        Assert.False(request.TryEncode(destination, new TlsQuicHttp3Spec(), out var error));
+        Assert.Equal(TlsQuicHttp3RequestError.MandatoryPseudoHeaderValueInvalid, error);
+        Assert.Empty(destination);
     }
 
     [Fact]
