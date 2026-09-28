@@ -19,7 +19,7 @@ public sealed class TlsProxy
         _credentials = credentials is null
             ? null
             : new NetworkCredential(credentials.UserName, credentials.Password, credentials.Domain);
-        PoolKey = CreatePoolKey(type, address, _credentials);
+        PoolKey = CreatePoolKey(type, address, EffectivePort, _credentials);
     }
 
     /// <summary>Gets the proxy protocol.</summary>
@@ -70,10 +70,9 @@ public sealed class TlsProxy
             new NetworkCredential(username, password));
     }
 
-    /// <summary>Creates an RFC 9298 CONNECT-UDP (MASQUE) proxy reached over HTTP/3. <paramref
-    /// name="address"/> is <c>https://host:port</c> with the port required; used through <see
-    /// cref="TlsSessionOptions"/>'s Quic.Proxy, which a later task adds. TCP requests never use
-    /// it.</summary>
+    /// <summary>An RFC 9298 CONNECT-UDP proxy reached over HTTP/3 on an explicit UDP port.</summary>
+    /// <remarks>Used through <see cref="TlsSessionOptions"/>'s Quic.Proxy. TCP requests never use
+    /// it. The port is required; <c>:443</c> counts as default and is rejected.</remarks>
     public static TlsProxy Masque(
         string address,
         string username,
@@ -83,29 +82,39 @@ public sealed class TlsProxy
         ArgumentNullException.ThrowIfNull(username);
         ArgumentNullException.ThrowIfNull(password);
         var uri = new Uri(address, UriKind.Absolute);
-        if (uri.IsDefaultPort || uri.Port < 0)   // note: IsDefaultPort is also true for an explicit :443; a MASQUE proxy on 443 would need a different check
+        var proxy = Create(
+            TlsProxyType.Masque,
+            uri,
+            Uri.UriSchemeHttps,
+            new NetworkCredential(username, password));
+        if (proxy.Address.IsDefaultPort)
         {
             throw new ArgumentException(
-                "A MASQUE proxy address must name a UDP port other than 443 explicitly, for example https://masque.oxylabs.io:50000.",
+                "A MASQUE proxy address must name a UDP port other than 443 explicitly, "
+                    + "for example https://proxy.example:50000.",
                 nameof(address));
         }
-        var proxy = Create(TlsProxyType.Masque, uri, Uri.UriSchemeHttps, new NetworkCredential(username, password));
         proxy.ConfigureOuterQuic = configureOuter;
         return proxy;
     }
 
     /// <summary>Shapes the OUTER QUIC connection to a MASQUE proxy; null means TlsClient's
-    /// defaults. Only the proxy sees that connection; the target sees the inner one.</summary>
+    /// defaults. Only the proxy sees that connection; the target sees the inner one. Not part of
+    /// <see cref="PoolKey"/>: one proxy endpoint and credential has one outer shape in the
+    /// connection pool, so callers wanting different outer shapes use different proxy instances
+    /// with different credentials or addresses.</summary>
     internal Action<TlsQuicOptions>? ConfigureOuterQuic { get; private set; }
 
     /// <inheritdoc />
     public override string ToString() => $"{Type} proxy {Address.Host}:{EffectivePort}";
 
-    internal int EffectivePort => Address.IsDefaultPort || Address.Port < 0
-        ? Type == TlsProxyType.Http ? 80
-            : Type == TlsProxyType.Masque ? throw new InvalidOperationException("MASQUE proxies always carry a port.")
-            : 1080
-        : Address.Port;
+    // Masque() rejects a default-port address before returning, so a Masque proxy's own port is
+    // always the one it was built with; only Http/Socks5 fall back to a conventional port.
+    internal int EffectivePort => Type == TlsProxyType.Masque
+        ? Address.Port
+        : Address.IsDefaultPort || Address.Port < 0
+            ? Type == TlsProxyType.Http ? 80 : 1080
+            : Address.Port;
 
     internal string PoolKey { get; }
 
@@ -179,11 +188,9 @@ public sealed class TlsProxy
     private static string CreatePoolKey(
         TlsProxyType type,
         Uri address,
+        int port,
         NetworkCredential? credentials)
     {
-        var port = address.IsDefaultPort || address.Port < 0
-            ? type == TlsProxyType.Http ? 80 : 1080
-            : address.Port;
         var credentialBytes = Encoding.UTF8.GetBytes(
             $"{credentials?.UserName}\0{credentials?.Password}");
         var credentialHash = Convert.ToHexString(SHA256.HashData(credentialBytes));
