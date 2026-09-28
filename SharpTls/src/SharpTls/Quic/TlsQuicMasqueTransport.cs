@@ -16,6 +16,10 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     // narrower than that cannot carry the inner connection's first flight at all.
     private const int InnerInitialSize = 1200;
 
+    /// <summary>RFC 9114 s6.2: the unidirectional streams a peer must be allowed to open
+    /// (control, QPACK encoder, QPACK decoder) before HTTP/3 can start.</summary>
+    private const ulong Http3UnidirectionalStreams = 3;
+
     /// <summary>How far behind the outer connection's own handshake deadline the dial's backstop
     /// runs, so a stalled handshake is reported by the receiver (what it discarded and why)
     /// rather than by a bare cancellation.</summary>
@@ -150,6 +154,23 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         TlsQuicMasqueOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+
+        // RFC 9114 s6.2: the proxy needs three unidirectional streams (control, QPACK encoder,
+        // QPACK decoder) before it may send SETTINGS. An outer spec that advertises fewer - the
+        // RFC-minimum parameter list advertises none - completes the handshake and then waits
+        // out the deadline for a SETTINGS the proxy is not allowed to send. Refuse it by name.
+        var advertised = options.OuterSpec.LocalFlowControl
+            .AsAdvertisedBy(options.OuterSpec.TransportParameters);
+        if (advertised.InitialMaxStreamsUni < Http3UnidirectionalStreams)
+        {
+            throw new ArgumentException(
+                $"OuterSpec advertises initial_max_streams_uni = {advertised.InitialMaxStreamsUni}, "
+                    + $"but HTTP/3 needs at least {Http3UnidirectionalStreams} (RFC 9114 s6.2) or the "
+                    + "proxy can never open its control stream and send SETTINGS. Place the six "
+                    + "flow-control parameters in OuterSpec.TransportParameters.",
+                nameof(options));
+        }
+
         // The outer connection's own HandshakeDeadline bounds step 1 and, when it fires, names
         // what the receiver discarded and why; this backstop runs a grace period behind it so
         // that report wins the race, and bounds DNS and steps 2 to 4 on its own.

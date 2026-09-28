@@ -130,6 +130,38 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task AnOuterSpecAdvertisingNoUnidirectionalStreamsIsRefusedBeforeDialing()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        // The RFC-minimum list plus the datagram parameter: what a caller gets by forgetting
+        // flow control. The first live dial did exactly this and idled out after a completed
+        // handshake, waiting for a SETTINGS the proxy could not send.
+        var outerSpec = new TlsQuicConnectionSpec
+        {
+            PathMtuDiscovery = false,
+            BasePathMtu = 1392,
+            MaximumPathMtu = 1392,
+            DestinationConnectionIdLength = 8,
+            TransportParameters = new TlsQuicTransportParameterSpec
+            {
+                Parameters =
+                [
+                    .. TlsQuicTransportParameterSpec.RfcMinimumParameters,
+                    TlsQuicTransportParameterSlot.Literal(0x20, [0x80, 0x00, 0xFF, 0xFF]),
+                ],
+            },
+        };
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await MasqueHarness.CreateAsync(
+                cancellation.Token, peerSettings: FullOffer, outerSpec: outerSpec));
+
+        Assert.Contains("initial_max_streams_uni = 0", error.Message);
+        Assert.Contains("RFC 9114 s6.2", error.Message);
+    }
+
+    [Fact]
     public async Task AResetBeforeTheResponseIsATunnelClosed()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
