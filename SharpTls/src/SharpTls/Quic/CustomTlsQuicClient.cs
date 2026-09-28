@@ -338,11 +338,19 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
                 "QUIC CRYPTO frames cannot use the 0-RTT encryption level.");
         }
 
+        // A CANCELLED CALL IS NOT A FAILED HANDSHAKE. The caller's pump is woken by cancelling
+        // its token (TlsClient's Http3StreamMultiplexer does this for every writer), and a
+        // post-handshake NewSessionTicket arriving in that window used to enter the try below
+        // with a cancelled token, throw from a cancellation check, and be caught by the catch
+        // that marks this client failed for good: the next CRYPTO frame then failed the whole
+        // connection with "the QUIC TLS handshake is not active" long after the handshake had
+        // completed. Cancellation is checked before any state changes, and a message once
+        // taken from the deframer is processed to the end.
+        cancellationToken.ThrowIfCancellationRequested();
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var events = new List<TlsQuicEvent>();
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var contiguous = GetReassembler(level).Add(offset, data.Span);
             if (contiguous.Length == 0)
             {
@@ -353,7 +361,6 @@ public sealed class CustomTlsQuicClient : IAsyncDisposable
             deframer.Append(contiguous);
             while (deframer.TryRead(out var message))
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 switch (level)
                 {
                     case TlsQuicEncryptionLevel.Initial:

@@ -51,6 +51,39 @@ public sealed class CustomTlsQuicClientTests
     }
 
     [Fact]
+    public async Task ACancelledCryptoCallLeavesTheClientActive()
+    {
+        // A field failure of 2026-09-28: TlsClient wakes a parked HTTP/3 pump by cancelling its
+        // token, and a post-handshake NewSessionTicket that reached ProcessCryptoDataAsync with
+        // that cancelled token marked the client failed for good, so the next CRYPTO frame
+        // ended a healthy connection with "the QUIC TLS handshake is not active". A cancelled
+        // call has to leave the client exactly as it was.
+        using var pki = TestPki.Create();
+        await using var client = new CustomTlsQuicClient(new CustomTlsQuicClientOptions
+        {
+            ServerName = "example.com",
+            ClientHello = CreateProfile(CreateClientParameters()),
+            CertificateValidation = new CustomTlsCertificateValidationOptions
+            {
+                CustomTrustRoots = [pki.Root],
+                RevocationMode = X509RevocationMode.NoCheck,
+            },
+        });
+        using var start = client.StartHandshake();
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await client.ProcessCryptoDataAsync(
+                TlsQuicEncryptionLevel.Initial, 0, ReadOnlyMemory<byte>.Empty, cancelled.Token));
+
+        // Still active: an empty chunk is accepted without "the handshake is not active".
+        using var accepted = await client.ProcessCryptoDataAsync(
+            TlsQuicEncryptionLevel.Initial, 0, ReadOnlyMemory<byte>.Empty);
+        Assert.Empty(accepted.Events);
+    }
+
+    [Fact]
     public void OptionsRejectMissingQuicExtensionAndAlpn()
     {
         Assert.Throws<ArgumentException>(() => new CustomTlsQuicClient(
