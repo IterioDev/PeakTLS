@@ -1588,13 +1588,41 @@ internal sealed class TlsQuicHttp3Response
     /// </remarks>
     internal ReadOnlySpan<byte> Body => CollectionsMarshal.AsSpan(_body);
 
+    /// <summary>How many discarded bytes <see cref="DiscardedBodyTail"/> keeps.</summary>
+    private const int DiscardedTailLength = 64;
+
+    private readonly List<byte> _discardedTail = [];
+
+    private long _discardedBodyBytes;
+
+    /// <summary>Every byte <see cref="DiscardBody"/> has dropped, counted.</summary>
+    internal long DiscardedBodyBytes => _discardedBodyBytes;
+
+    /// <summary>The last <see cref="DiscardedTailLength"/> bytes <see cref="DiscardBody"/>
+    /// dropped: what a proxy wrote on a tunnel stream before ending it, kept for the message
+    /// that reports the end. Capsules nothing here parses, but a reader can.</summary>
+    internal ReadOnlyMemory<byte> DiscardedBodyTail => _discardedTail.ToArray();
+
     /// <summary>Drops every DATA payload read so far, so <see cref="Body"/> is empty until the
-    /// next one.</summary>
+    /// next one, keeping only a count and the last few bytes for diagnostics.</summary>
     /// <remarks>For a datagram-carrying exchange, whose stream never FINs while its tunnel
     /// lives and whose DATA frames are RFC 9297 s3.2 capsules nothing here parses. Kept, they
     /// would only accumulate toward the buffering ceiling. Clear keeps the capacity for the
     /// next read; the ceiling that bounds one read bounds it too.</remarks>
-    internal void DiscardBody() => _body.Clear();
+    internal void DiscardBody()
+    {
+        if (_body.Count == 0)
+        {
+            return;
+        }
+        _discardedBodyBytes += _body.Count;
+        _discardedTail.AddRange(_body);
+        if (_discardedTail.Count > DiscardedTailLength)
+        {
+            _discardedTail.RemoveRange(0, _discardedTail.Count - DiscardedTailLength);
+        }
+        _body.Clear();
+    }
 
     /// <summary>Gets the final response's status code, or -1 when no final response has been
     /// read.</summary>

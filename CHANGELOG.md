@@ -111,7 +111,10 @@ All notable changes to both packages in this repository are documented here, Sha
   (RFC 9298 CONNECT-UDP). The TCP proxy slot `options.Proxy` is independent; the inner QUIC
   connection and its fingerprint are unchanged. Connect events `MasqueTunnelOpened` and
   `MasqueTunnelClosed`; failures reach the caller as `TlsQuicProxyException` with a `Masque*`
-  error. Live tests behind `TLSCLIENT_LIVE_MASQUE`.
+  error. Live tests behind `TLSCLIENT_LIVE_MASQUE`. A tunnel the proxy ends during the inner
+  handshake is dialled again, up to `Quic.MaximumAssociationAttempts` tunnels in all, and the
+  final error says how long each tunnel lived, what crossed it, and what the proxy wrote on the
+  tunnel stream before ending it.
 - Spotify 9.1.86 / iOS 27 presets (`spotify-9.1.86-ios-27.0-h3`, `-h2`) with the QPACK
   dynamic table, the h2 preface and HPACK policy from the capture.
 - SOCKS5: the authentication reply `VER 0x05` is tolerated; CONNECT and UDP ASSOCIATE

@@ -458,6 +458,27 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task WhatTheProxyWroteBeforeEndingTheTunnelStreamIsInTheMessage()
+    {
+        // RFC 9297 s3.2 capsules are the one place a proxy can explain an ended tunnel.
+        // Nothing parses them, so the bytes themselves go into the message.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        var offset = (ulong)ResponseBytes(200, [], []).Length;
+        byte[] capsule = [0x00, 0x03, 0xAA, 0xBB, 0xCC];   // a DATA frame's payload; type 0, length 3
+        var data = new byte[] { 0x00, (byte)capsule.Length, .. capsule };   // HTTP/3 DATA frame
+        await harness.Peer.SendStreamFramesAsync([Stream(0, offset, data, fin: true)], ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
+        Assert.Contains("wrote 5 byte(s) on the tunnel stream before ending it", error.Message);
+        Assert.Contains("0003AABBCC", error.Message);
+    }
+
+    [Fact]
     public async Task AnOuterConnectionCloseSurfacesAsTunnelClosed()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));

@@ -343,7 +343,8 @@ public sealed class TlsQuicOptions
 
     /// <summary>
     /// Gets or sets how many RFC 1928 section 7 UDP associations one proxied HTTP/3 dial may
-    /// open before giving up. The default is three; one disables re-association.
+    /// open before giving up, and likewise how many RFC 9298 MASQUE tunnels when the proxy
+    /// ends one during the inner handshake. The default is three; one disables re-dialling.
     /// </summary>
     /// <remarks>
     /// <para>THE ARITHMETIC IS WHY IT IS THREE. At the observed six to eight per cent

@@ -459,62 +459,87 @@ internal sealed class Http3Connection : IHttpConnection
             HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
         };
 
-        var startedAt = Stopwatch.GetTimestamp();
-        TlsQuicMasqueTransport tunnel;
-        try
+        // A TUNNEL THE PROXY ENDS DURING THE INNER HANDSHAKE IS DIALLED AGAIN, up to
+        // MaximumAssociationAttempts tunnels in all, the same count that governs a SOCKS5
+        // association that proved dead. The field shape: the proxy answers 2xx, the inner
+        // Initial goes in, and the proxy FINs the CONNECT-UDP stream within a second with
+        // nothing back. Sometimes that is the exit hiccuping and a fresh tunnel succeeds;
+        // sometimes the exit cannot carry UDP at all and every tunnel ends the same way,
+        // which the last exception then says. Nothing of the request has been sent when this
+        // happens, so the retry is safe for every method. A tunnel that never opened, or one
+        // the proxy refused by name, is not retried here: those are immediate, named failures.
+        var attempts = Math.Max(1, configuration.Quic.MaximumAssociationAttempts);
+        for (var attempt = 1; ; attempt++)
         {
-            tunnel = await TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            // Every failure of the outer dial, not only the named ones: a socket error or a
-            // cancellation is still a tunnel that did not open.
+            var startedAt = Stopwatch.GetTimestamp();
+            TlsQuicMasqueTransport tunnel;
+            try
+            {
+                tunnel = await TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                // Every failure of the outer dial, not only the named ones: a socket error or
+                // a cancellation is still a tunnel that did not open.
+                TlsConnectTelemetry.Emit(
+                    configuration.ConnectObserver,
+                    connectionId,
+                    TlsConnectEventKind.MasqueTunnelClosed,
+                    origin.IdnHost,
+                    origin.Port,
+                    elapsed: Stopwatch.GetElapsedTime(startedAt),
+                    exception: exception);
+                throw;
+            }
             TlsConnectTelemetry.Emit(
                 configuration.ConnectObserver,
                 connectionId,
-                TlsConnectEventKind.MasqueTunnelClosed,
+                TlsConnectEventKind.MasqueTunnelOpened,
                 origin.IdnHost,
                 origin.Port,
-                elapsed: Stopwatch.GetElapsedTime(startedAt),
-                exception: exception);
-            throw;
-        }
-        TlsConnectTelemetry.Emit(
-            configuration.ConnectObserver,
-            connectionId,
-            TlsConnectEventKind.MasqueTunnelOpened,
-            origin.IdnHost,
-            origin.Port,
-            elapsed: Stopwatch.GetElapsedTime(startedAt));
+                elapsed: Stopwatch.GetElapsedTime(startedAt));
 
-        try
-        {
-            return await DialInnerAsync(
-                origin,
-                configuration,
-                factory,
-                tls13SessionCache,
-                tunnel,
-                options.TargetEndPoint,
-                relay: null,
-                probing: false,
-                HandshakeTimeout(configuration),
-                connectionId,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            TlsConnectTelemetry.Emit(
-                configuration.ConnectObserver,
-                connectionId,
-                TlsConnectEventKind.MasqueTunnelClosed,
-                origin.IdnHost,
-                origin.Port,
-                elapsed: Stopwatch.GetElapsedTime(startedAt),
-                exception: exception);
-            await tunnel.DisposeAsync().ConfigureAwait(false);
-            throw;
+            try
+            {
+                return await DialInnerAsync(
+                    origin,
+                    configuration,
+                    factory,
+                    tls13SessionCache,
+                    tunnel,
+                    options.TargetEndPoint,
+                    relay: null,
+                    probing: false,
+                    HandshakeTimeout(configuration),
+                    connectionId,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                TlsConnectTelemetry.Emit(
+                    configuration.ConnectObserver,
+                    connectionId,
+                    TlsConnectEventKind.MasqueTunnelClosed,
+                    origin.IdnHost,
+                    origin.Port,
+                    elapsed: Stopwatch.GetElapsedTime(startedAt),
+                    exception: exception);
+                await tunnel.DisposeAsync().ConfigureAwait(false);
+                if (exception is TlsQuicProxyException { Error: TlsQuicProxyError.MasqueTunnelClosed } ended
+                    && !cancellationToken.IsCancellationRequested)
+                {
+                    if (attempt < attempts)
+                    {
+                        continue;
+                    }
+                    throw new TlsQuicProxyException(
+                        TlsQuicProxyError.MasqueTunnelClosed,
+                        $"{attempts} MASQUE tunnel(s) in a row ended during the inner QUIC "
+                            + $"handshake with '{origin.IdnHost}'. The last one: {ended.Message}");
+                }
+                throw;
+            }
         }
     }
 

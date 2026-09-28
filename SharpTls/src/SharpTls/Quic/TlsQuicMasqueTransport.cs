@@ -143,7 +143,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// an exit that could not reach the target over UDP (a residential exit's UDP is the
     /// exit's, not the proxy front's), so the message says to change proxy session rather than
     /// retry the same one.</summary>
-    private string TunnelEnded(string how)
+    private string TunnelEnded(string how, TlsQuicHttp3Response? response)
     {
         var age = Stopwatch.GetElapsedTime(_openedAt);
         var text = $"{how} {age.TotalSeconds:F1} s after it opened, with {_sentIntoTunnel} "
@@ -153,6 +153,15 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             text += " Nothing ever came back: the exit behind this proxy session could not carry"
                 + " UDP to the target. That is a property of the session, so retry with a fresh"
                 + " proxy session rather than the same one.";
+        }
+        if (response is { DiscardedBodyBytes: > 0 })
+        {
+            // RFC 9297 s3.2 capsules, which nothing here parses; a proxy that explains itself
+            // does so there, so the bytes go into the message for a reader to decode.
+            var tail = response.DiscardedBodyTail.Span;
+            text += $" The proxy wrote {response.DiscardedBodyBytes} byte(s) on the tunnel"
+                + $" stream before ending it, the last {tail.Length} being"
+                + $" {Convert.ToHexString(tail)}.";
         }
         return text;
     }
@@ -704,7 +713,8 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                         TunnelEnded(
                             response is { IsReset: true }
                                 ? $"The proxy reset the tunnel stream with error 0x{response.ResetErrorCode:x}"
-                                : "The proxy ended the tunnel stream"));
+                                : "The proxy ended the tunnel stream",
+                            response));
                 }
             }
         }
