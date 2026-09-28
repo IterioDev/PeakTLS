@@ -42,6 +42,13 @@ public enum TlsQuicProxyError
     MasqueTunnelRefused,
     /// <summary>The tunnel stream or the outer connection ended, before or after the response; the message carries the proxy's error code or the underlying failure.</summary>
     MasqueTunnelClosed,
+
+    /// <summary>The tunnel opened and stayed open, inner datagrams went into it, and nothing
+    /// came back within the inner handshake deadline while the outer connection to the proxy
+    /// stayed alive: the exit behind this proxy session does not carry UDP to the target. A
+    /// property of the session, remembered for it, so later dials on the same session fail at
+    /// once with this error; a fresh proxy session reaches a different exit.</summary>
+    MasqueExitSilent,
 }
 
 /// <summary>What a relayed datagram says about the relay: shared by the SOCKS5 liveness

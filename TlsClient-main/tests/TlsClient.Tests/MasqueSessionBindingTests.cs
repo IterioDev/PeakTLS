@@ -1,10 +1,193 @@
+using System.Net;
+using SharpTls.Quic;
+
 namespace TlsClient.Tests;
 
 /// <summary>The MASQUE-first binding of a sticky session shared by a TCP proxy and a MASQUE
-/// proxy: when it applies, that it runs once, and that a failed binding never blocks TCP.</summary>
+/// proxy: when it applies, that it runs once, and that a failed binding never blocks TCP. And
+/// the session's one outer MASQUE connection: shared by every dial, replaced once it has ended,
+/// disposed with the binding; and the memory of an exit that proved unable to carry UDP.</summary>
 public sealed class MasqueSessionBindingTests
 {
     private const string User = "customer-acct-cc-us-sessid-123456-sesstime-10";
+
+    /// <summary>An outer connection that does nothing but report whether it has ended.</summary>
+    private sealed class FakeOuter : ITlsQuicMasqueConnection
+    {
+        public bool IsClosed { get; set; }
+
+        public int TunnelsRequested => 0;
+
+        public bool Disposed { get; private set; }
+
+        public Task<TlsQuicMasqueTransport> OpenTunnelAsync(
+            string targetHost, int targetPort, IPEndPoint targetEndPoint, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task EveryDialOnOneSessionSharesOneOuterConnection()
+    {
+        var dialled = 0;
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) => { dialled++; return Task.FromResult<ITlsQuicMasqueConnection>(new FakeOuter()); },
+        };
+        var configuration = Configuration();
+        var masque = configuration.Quic.Proxy!;
+
+        var first = await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+        var second = await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+
+        Assert.Same(first, second);
+        Assert.Equal(1, dialled);
+    }
+
+    [Fact]
+    public async Task AnOuterThatHasEndedIsReplacedByTheNextDial()
+    {
+        var dialled = 0;
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) => { dialled++; return Task.FromResult<ITlsQuicMasqueConnection>(new FakeOuter()); },
+        };
+        var configuration = Configuration();
+        var masque = configuration.Quic.Proxy!;
+
+        var first = (FakeOuter)await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+        first.IsClosed = true;
+        var second = await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+
+        Assert.NotSame(first, second);
+        Assert.Equal(2, dialled);
+        Assert.True(first.Disposed);
+    }
+
+    [Fact]
+    public async Task AFailedOuterDialIsReportedAndNotKept()
+    {
+        var dialled = 0;
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) =>
+            {
+                dialled++;
+                return dialled == 1
+                    ? Task.FromException<ITlsQuicMasqueConnection>(new IOException("front silent"))
+                    : Task.FromResult<ITlsQuicMasqueConnection>(new FakeOuter());
+            },
+        };
+        var configuration = Configuration();
+        var masque = configuration.Quic.Proxy!;
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await binding.GetOuterAsync(masque, configuration, CancellationToken.None));
+        var outer = await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+
+        Assert.IsType<FakeOuter>(outer);
+        Assert.Equal(2, dialled);
+    }
+
+    [Fact]
+    public async Task ConcurrentDialsShareOneOuterDialInFlight()
+    {
+        var dialled = 0;
+        var release = new TaskCompletionSource<ITlsQuicMasqueConnection>();
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) => { Interlocked.Increment(ref dialled); return release.Task; },
+        };
+        var configuration = Configuration();
+        var masque = configuration.Quic.Proxy!;
+
+        var first = binding.GetOuterAsync(masque, configuration, CancellationToken.None).AsTask();
+        var second = binding.GetOuterAsync(masque, configuration, CancellationToken.None).AsTask();
+        release.SetResult(new FakeOuter());
+        var outers = await Task.WhenAll(first, second);
+
+        Assert.Same(outers[0], outers[1]);
+        Assert.Equal(1, dialled);
+    }
+
+    [Fact]
+    public async Task DisposingTheBindingDisposesEveryOuter()
+    {
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) => Task.FromResult<ITlsQuicMasqueConnection>(new FakeOuter()),
+        };
+        var one = Configuration();
+        var other = Configuration(masqueUser: "customer-acct-cc-us-sessid-999-sesstime-10");
+        var first = (FakeOuter)await binding.GetOuterAsync(one.Quic.Proxy!, one, CancellationToken.None);
+        var second = (FakeOuter)await binding.GetOuterAsync(other.Quic.Proxy!, other, CancellationToken.None);
+
+        await binding.DisposeAsync();
+
+        Assert.True(first.Disposed);
+        Assert.True(second.Disposed);
+    }
+
+    [Fact]
+    public async Task AnExitThatProvedUnableToCarryUdpIsRememberedPerSession()
+    {
+        var binding = new MasqueSessionBinding
+        {
+            Dialer = (_, _, _) => Task.FromResult<ITlsQuicMasqueConnection>(new FakeOuter()),
+        };
+        var configuration = Configuration();
+        var masque = configuration.Quic.Proxy!;
+        var proof = new TlsQuicProxyException(
+            TlsQuicProxyError.MasqueExitSilent, "2 datagram(s) went in and nothing came back.");
+
+        Assert.Null(binding.RememberedFailure(masque));
+        binding.Remember(masque, proof);
+
+        var remembered = binding.RememberedFailure(masque);
+        Assert.NotNull(remembered);
+        Assert.Equal(TlsQuicProxyError.MasqueExitSilent, remembered.Error);
+        Assert.Contains("nothing came back", remembered.Message);
+        Assert.Contains("remembered", remembered.Message);
+
+        // Another session on the same TlsSession is judged on its own.
+        var other = Configuration(masqueUser: "customer-acct-cc-us-sessid-999-sesstime-10");
+        Assert.Null(binding.RememberedFailure(other.Quic.Proxy!));
+
+        // The outer connection is not the problem and stays.
+        var outer = await binding.GetOuterAsync(masque, configuration, CancellationToken.None);
+        Assert.False(outer.IsClosed);
+    }
+
+    [Theory]
+    [InlineData(3UL, 0UL, false, true)]     // datagrams in, nothing back, outer alive: the exit
+    [InlineData(3UL, 1UL, false, false)]    // something came back: the path works
+    [InlineData(0UL, 0UL, false, false)]    // nothing went in: not the exit's silence
+    [InlineData(3UL, 0UL, true, false)]     // the outer itself ended: not the exit
+    public void OnlyDatagramsInWithNothingBackOnALiveOuterConvictsTheExit(
+        ulong sent, ulong received, bool outerClosed, bool convicted)
+    {
+        var verdict = MasqueSessionBinding.JudgeSilence(
+            new HttpRequestException("The HTTP/3 (QUIC) handshake with 'spclient.example' did not complete within 00:00:05."),
+            "spclient.example",
+            sent,
+            received,
+            outerClosed);
+
+        if (!convicted)
+        {
+            Assert.Null(verdict);
+            return;
+        }
+        Assert.NotNull(verdict);
+        Assert.Equal(TlsQuicProxyError.MasqueExitSilent, verdict.Error);
+        Assert.Contains("3 datagram(s)", verdict.Message);
+        Assert.Contains("fresh proxy session", verdict.Message);
+    }
 
     private static TlsSessionConfiguration Configuration(
         string? masqueUser = User, bool bind = true)

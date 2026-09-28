@@ -13,11 +13,14 @@ All notable changes to both packages in this repository are documented here, Sha
   drops; a lost DATAGRAM is never retransmitted.
 - RFC 9220 extended CONNECT (`TlsQuicHttp3Request.Protocol`,
   `SETTINGS_ENABLE_CONNECT_PROTOCOL`) and RFC 9297 HTTP/3 datagrams routed by quarter stream id.
-- RFC 9298 CONNECT-UDP client transport (`TlsQuicMasqueTransport`): dials a MASQUE proxy over
-  its own HTTP/3 connection and presents the tunnel as a datagram transport an inner QUIC
-  connection dials through. Every failure is named through `TlsQuicProxyError.Masque*`, a
-  timeout names the dial stage, and every address the proxy name resolves to is tried in turn
-  before the dial is refused.
+- RFC 9298 CONNECT-UDP client transport: `TlsQuicMasqueConnection` dials a MASQUE proxy over
+  one HTTP/3 connection and `OpenTunnelAsync` opens any number of tunnels on it, each a
+  `TlsQuicMasqueTransport`, the datagram transport an inner QUIC connection dials through,
+  routed by quarter stream id. Disposing a tunnel ends its request stream alone; the outer
+  connection's end fails every tunnel and later open by name. Every failure is named through
+  `TlsQuicProxyError.Masque*` (including `MasqueExitSilent` for TlsClient's use), a timeout
+  names the dial stage, and every address the proxy name resolves to is tried in turn before the
+  dial is refused.
 - QPACK dynamic-table encoder with per-spec capacity and insert policy.
 - Handshake timeouts report what the receiver discarded and why; a SOCKS5 UDP relay that
   answers with a TLS alert fails fast as `TlsQuicProxyError.RelayDeliveredTlsAlert`.
@@ -123,6 +126,14 @@ All notable changes to both packages in this repository are documented here, Sha
   bound through MASQUE before its first TCP proxy connect (`Quic.BindSessionThroughMasque`,
   default on; connect event `MasqueSessionBound`), because a session first used through the
   SOCKS5 front lands on an exit that cannot carry UDP.
+- One outer MASQUE connection per proxy session (per username), shared by every h3 dial on it
+  and reported once as `MasqueConnectionOpened`; each inner connection is one CONNECT-UDP tunnel
+  on it, so several origins cost one outer handshake instead of one each. An outer that has
+  ended is replaced by the next dial; one that refuses or ends a tunnel open after having carried
+  tunnels is replaced once. An exit that proved unable to carry UDP (`MasqueExitSilent`:
+  datagrams in and nothing back within the inner handshake deadline while the outer stayed alive;
+  `RelayDeliveredTlsAlert`; every tunnel of a dial ending with nothing back) is remembered for
+  the session, and every later h3 dial on it fails at once with the same error.
 - Spotify 9.1.86 / iOS 27 presets (`spotify-9.1.86-ios-27.0-h3`, `-h2`) with the QPACK
   dynamic table, the h2 preface and HPACK policy from the capture.
 - SOCKS5: the authentication reply `VER 0x05` is tolerated; CONNECT and UDP ASSOCIATE

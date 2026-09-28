@@ -369,6 +369,11 @@ public sealed class TlsQuicOptions
     /// <summary>The MASQUE proxy an HTTP/3 dial tunnels through (RFC 9298 CONNECT-UDP), or null
     /// to dial directly or through <see cref="TlsSessionOptions.Proxy"/>'s SOCKS5. Must be a
     /// <see cref="TlsProxy.Masque"/>. TCP requests never use it.</summary>
+    /// <remarks>The session keeps one outer connection to the proxy per proxy session (per
+    /// username), reported once as <see cref="TlsConnectEventKind.MasqueConnectionOpened"/>, and
+    /// every h3 connection on that session is one CONNECT-UDP tunnel on it
+    /// (<see cref="TlsConnectEventKind.MasqueTunnelOpened"/>). An outer connection that has ended
+    /// is replaced by the next dial; disposing the <see cref="TlsSession"/> closes them.</remarks>
     public TlsProxy? Proxy { get; set; }
 
     /// <summary>Gets or sets whether a sticky proxy session shared by
@@ -382,7 +387,8 @@ public sealed class TlsQuicOptions
     /// 10; a session first used through MASQUE carried h3 and then h2 over SOCKS5 on the same
     /// exit IP, 8 of 8. With this on, the first TCP proxy connect of such a session waits for
     /// one tunnel to the same origin to open and close, about a second, once per session, and
-    /// reports it as <see cref="TlsConnectEventKind.MasqueSessionBound"/>.</para>
+    /// reports it as <see cref="TlsConnectEventKind.MasqueSessionBound"/>. The outer connection
+    /// that tunnel was opened on is the one the session's h3 dials then share.</para>
     /// <para>Off, or when the two proxies carry different usernames, nothing is primed and the
     /// two hops bind independently.</para>
     /// </remarks>

@@ -248,7 +248,7 @@ public sealed class TlsQuicMasqueTransportTests
 
         // RFC 9297 s2.1's Quarter Stream ID (stream 0, so 0x00), then RFC 9298 s4's Context
         // ID 0, then the payload.
-        await PumpPeerUntilAsync(harness, () => harness.Peer.ReceivedDatagrams.Count > 0, ct);
+        await harness.PumpPeerUntilAsync(() => harness.Peer.ReceivedDatagrams.Count > 0, ct);
         Assert.Equal(new byte[] { 0x00, 0x00, 0xC0, 1, 2, 3 }, harness.Peer.ReceivedDatagrams[^1]);
     }
 
@@ -259,7 +259,7 @@ public sealed class TlsQuicMasqueTransportTests
         var ct = cancellation.Token;
         await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
 
-        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 9, 8, 7), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x00, 9, 8, 7), ct);
 
         var buffer = new byte[2048];
         var received = await harness.Transport.ReceiveAsync(buffer, ct);
@@ -275,8 +275,8 @@ public sealed class TlsQuicMasqueTransportTests
         var ct = cancellation.Token;
         await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
 
-        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x02, 1), ct);
-        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 5), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x02, 1), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x00, 5), ct);
 
         var buffer = new byte[2048];
         var received = await harness.Transport.ReceiveAsync(buffer, ct);
@@ -293,7 +293,7 @@ public sealed class TlsQuicMasqueTransportTests
         await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
 
         // RFC 9000 s16: 0x40 0x00 is 0 as a two-byte varint.
-        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x40, 0x00, 9, 8), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x40, 0x00, 9, 8), ct);
 
         var buffer = new byte[2048];
         var received = await harness.Transport.ReceiveAsync(buffer, ct);
@@ -314,7 +314,7 @@ public sealed class TlsQuicMasqueTransportTests
         await harness.Peer.SendOneRttRawFrameAsync(
             [0x31, (byte)(0x40 | (length >> 8)), (byte)(length & 0xFF), 0x00, 0x00, .. new byte[ceiling + 1]],
             ct);
-        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 5), ct);
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x00, 5), ct);
 
         var buffer = new byte[2048];
         var received = await harness.Transport.ReceiveAsync(buffer, ct);
@@ -370,8 +370,8 @@ public sealed class TlsQuicMasqueTransportTests
         await harness.Peer.SendOneRttRawFrameAsync([0x01], ct);
         await sends[absorbed].WaitAsync(TimeSpan.FromSeconds(5), ct);
 
-        await PumpPeerUntilAsync(
-            harness, () => harness.Peer.ReceivedDatagrams.Count >= absorbed + 1, ct);
+        await harness.PumpPeerUntilAsync(
+            () => harness.Peer.ReceivedDatagrams.Count >= absorbed + 1, ct);
         Assert.Equal(
             Enumerable.Range(0, absorbed + 1).Select(i => new byte[] { 0x00, 0x00, (byte)i }),
             harness.Peer.ReceivedDatagrams);
@@ -410,7 +410,7 @@ public sealed class TlsQuicMasqueTransportTests
         await harness.Transport.SendAsync(target, new byte[] { 2 }, ct);
         outer.Release();
 
-        await PumpPeerUntilAsync(harness, () => harness.Peer.ReceivedDatagrams.Count >= 2, ct);
+        await harness.PumpPeerUntilAsync(() => harness.Peer.ReceivedDatagrams.Count >= 2, ct);
         Assert.Equal(
             [new byte[] { 0x00, 0x00, 1 }, new byte[] { 0x00, 0x00, 2 }],
             harness.Peer.ReceivedDatagrams);
@@ -481,7 +481,7 @@ public sealed class TlsQuicMasqueTransportTests
         await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
 
         await harness.Peer.SendOneRttRawFrameAsync(
-            DatagramFrame(0x00, 0x00, 0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46), ct);
+            MasqueHarness.DatagramFrame(0x00, 0x00, 0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46), ct);
 
         var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
             await harness.Transport.ReceiveAsync(new byte[2048], ct));
@@ -553,41 +553,27 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
-    public async Task DisposeIsIdempotentAndClosesTheOuter()
+    public async Task DisposingTheTunnelEndsItsStreamAndDisposingTheOuterClosesTheConnection()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var ct = cancellation.Token;
         await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
 
+        // Both idempotent. The tunnel's dispose is RFC 9298 s3.4's end of the request stream
+        // (a FIN) and nothing more: the outer connection is another tunnel's to use.
         await harness.Transport.DisposeAsync();
         await harness.Transport.DisposeAsync();
-        await harness.PumpPeerAsync(ct);
+        await harness.PumpPeerUntilAsync(
+            () => harness.Peer.ReceivedStreamFrames.Any(f => f.StreamId == 0 && f.Fin), ct);
+        Assert.Null(harness.Peer.LastConnectionClose);
 
         // RFC 9114 s5.2's graceful close: H3_NO_ERROR in an application CONNECTION_CLOSE.
+        await harness.Connection.DisposeAsync();
+        await harness.Connection.DisposeAsync();
+        await harness.PumpPeerAsync(ct);
         var close = Assert.NotNull(harness.Peer.LastConnectionClose);
         Assert.Equal(0x1dUL, close.RawType);
         Assert.Equal(0x100UL, close.ErrorCode);
-    }
-
-    // RFC 9221 s4's DATAGRAM frame with a Length (type 0x31); every payload here is under 64
-    // bytes, so the length is a one-byte varint.
-    private static byte[] DatagramFrame(params byte[] payload) =>
-        [0x31, (byte)payload.Length, .. payload];
-
-    // The owner sends on its own schedule, so the peer is pumped until what the test waits
-    // for has arrived; the test's token bounds the wait.
-    private static async Task PumpPeerUntilAsync(
-        MasqueHarness harness, Func<bool> arrived, CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            await harness.PumpPeerAsync(cancellationToken);
-            if (arrived())
-            {
-                return;
-            }
-            await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
-        }
     }
 
     /// <summary>An outer transport that forwards everything and can hold one send at the

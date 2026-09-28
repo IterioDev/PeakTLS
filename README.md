@@ -317,7 +317,9 @@ closes, about a second, once per session, reported as `MasqueSessionBound`. Meas
 Oxylabs residential proxies, a session first used through the SOCKS5 front lands on an exit that
 cannot carry UDP and every later MASQUE tunnel dies with a TCP TLS alert, 10 sessions of 10; one
 first used through MASQUE carries h3 and then h2 over SOCKS5 on the same exit IP, 8 of 8.
-`options.Quic.BindSessionThroughMasque = false` turns the binding off.
+`options.Quic.BindSessionThroughMasque = false` turns the binding off. The outer connection the
+binding dials is the one the session's h3 dials then share, so the binding costs no extra
+handshake.
 
 ### MASQUE
 
@@ -353,8 +355,14 @@ static TlsQuicProxyException? ProxyFailure(Exception? e) =>
 
 `TlsProxy.Masque(address, username, password, configureOuter)` takes an `https://` address
 with an explicit UDP port other than 443. The session opens one outer QUIC connection to the
-proxy per inner connection, sends an extended CONNECT with `:protocol: connect-udp` and Basic
-`proxy-authorization`, then carries every inner datagram in an HTTP/3 DATAGRAM.
+proxy per proxy session (per username) and keeps it; every inner connection is one CONNECT-UDP
+request stream on it, opened with `:protocol: connect-udp` and Basic `proxy-authorization`, and
+every inner datagram travels in an HTTP/3 DATAGRAM routed by that stream's quarter stream id
+(RFC 9297). So a session that reaches several origins over h3 pays one outer handshake, reported
+as `MasqueConnectionOpened`, and one round trip per origin for the tunnel, reported as
+`MasqueTunnelOpened`. An outer connection that has ended (idle timeout, proxy close, failure) is
+replaced by the next dial. Disposing an inner connection ends its own request stream and nothing
+else; disposing the `TlsSession` closes the outer connections.
 
 The inner connection, the one the origin sees, is unchanged: preset, transport parameters and
 their rotation, QPACK, packet sizes. Only the proxy sees the outer connection, so its shape is
@@ -372,8 +380,9 @@ Failures are named on `TlsQuicProxyException.Error`, usually found as an inner e
 | `MasqueNotOffered` | The proxy's SETTINGS or transport parameters lack extended CONNECT, HTTP/3 datagrams, or room for a 1200-byte QUIC Initial |
 | `MasqueAuthenticationRejected` | 407: credentials refused or the account's traffic limit reached |
 | `MasqueTargetRejected` | 400: the proxy refused the target host and port |
-| `MasqueTunnelRefused` | Any other non-2xx status, or no tunnel within the deadline; the message names the dial stage |
+| `MasqueTunnelRefused` | Any other non-2xx status, or no outer connection or no tunnel within the deadline; the message names the dial stage and the proxy addresses that never answered |
 | `MasqueTunnelClosed` | The tunnel stream or outer connection ended; mid-life it surfaces on the next request and is retried like any transient h3 failure. A tunnel the proxy ends during the inner handshake is dialled again by itself, up to `Quic.MaximumAssociationAttempts` tunnels. The message says how long the tunnel lived, how many datagrams crossed it each way, and what the proxy wrote on the stream before ending it; "sent into it and 0 received back" on every attempt is a residential exit that cannot carry UDP, and only a fresh proxy session helps |
+| `MasqueExitSilent` | The tunnel opened and stayed open, inner datagrams went in, and nothing came back within the inner handshake deadline while the outer connection stayed alive: the exit behind this proxy session does not carry UDP to the target. Remembered for the session, like `RelayDeliveredTlsAlert` and an all-silent `MasqueTunnelClosed`: every later h3 dial on the same username fails at once with the same error and a message saying how long ago it was proved, until the session id changes. The TCP path on that session is untouched |
 
 Verified live against Oxylabs (`masque.oxylabs.io:50000`): the tunnel comes up in under a
 second and Google-hosted targets answer.
@@ -397,7 +406,7 @@ options.ConnectObserver = e => Console.WriteLine(
 | TCP proxy | `ProxyTunnelStarted`, `ProxyTunnelCompleted`, `ProxyTunnelFailed` |
 | TLS | `TlsHandshakeStarted`, `TlsHandshakeCompleted`, `TlsHandshakeFailed` |
 | SOCKS5 UDP | `Socks5AssociationGateEntered`, `Socks5AssociationRetried`, `Socks5AssociationFirstRequest`, `Socks5AssociationWentSilent` |
-| MASQUE | `MasqueTunnelOpened` (the proxy answered 2xx), `MasqueTunnelClosed` (a dial through the tunnel failed) |
+| MASQUE | `MasqueConnectionOpened` (the outer connection to the proxy, once per proxy session), `MasqueSessionBound` (the MASQUE-first binding, once per session), `MasqueTunnelOpened` (the proxy answered 2xx), `MasqueTunnelClosed` (a dial through the tunnel failed) |
 
 `options.HandshakeObserver` reports secret-free SharpTls handshake events.
 `TlsDiagnostics.ActivitySourceName` (`"TlsClient"`) exposes request attempts, connections, and

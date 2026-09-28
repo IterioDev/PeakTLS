@@ -21,6 +21,7 @@ TlsClient.TlsConnectEventKind.Socks5AssociationWentSilent = 16 -> TlsClient.TlsC
 TlsClient.TlsConnectEventKind.MasqueTunnelOpened = 17 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsConnectEventKind.MasqueTunnelClosed = 18 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsConnectEventKind.MasqueSessionBound = 19 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.MasqueConnectionOpened = 20 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Always = 2 -> TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Never = 3 -> TlsClient.TlsHpackHuffman

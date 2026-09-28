@@ -226,7 +226,10 @@ Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
 
 MASQUE is the other UDP-capable kind, wired through `options.Quic.Proxy` rather than
 `options.Proxy` — it is HTTP/3's own proxy hop, so it takes its own outer QUIC connection to the
-proxy rather than sharing the SOCKS5/HTTP TCP proxy slot:
+proxy rather than sharing the SOCKS5/HTTP TCP proxy slot. One outer connection per proxy session
+(per username), dialled once and reported as `MasqueConnectionOpened`; every h3 connection on
+that session is one CONNECT-UDP tunnel on it (`MasqueTunnelOpened`), so several origins cost one
+outer handshake. An outer that has ended is replaced by the next dial.
 
 ```csharp
 options.Proxy = TlsProxy.Socks5("socks5://pr.oxylabs.io:7777", user, pass);          // h2, TCP
@@ -239,11 +242,19 @@ connect (one tunnel opens and closes, about a second, once per session; connect 
 through the SOCKS5 front lands on an exit that cannot carry UDP; one first used through MASQUE
 carries h3 and, on the same exit IP, h2.
 
-A MASQUE tunnel closing mid-life — the proxy's own connection failing after the association was
-established — reaches the caller the same way a dead SOCKS5 relay does: a `TlsQuicProxyException`
-with `Error == MasqueTunnelClosed`, raised on the next request rather than out of band, and
-retried under the same retry policy as any other transient h3 failure. There is no connect event
-for it — nothing was dialled at that moment, an existing tunnel just stopped answering.
+A MASQUE tunnel closing mid-life — the proxy ending its stream, or the outer connection failing
+after the tunnel was established — reaches the caller the same way a dead SOCKS5 relay does: a
+`TlsQuicProxyException` with `Error == MasqueTunnelClosed`, raised on the next request rather than
+out of band, and retried under the same retry policy as any other transient h3 failure. There is
+no connect event for it — nothing was dialled at that moment, an existing tunnel just stopped
+answering.
+
+An exit that proved unable to carry UDP is remembered for its session: a tunnel that carried
+datagrams in and nothing back while the outer stayed alive is `MasqueExitSilent`, a TLS alert
+record answering the inner Initial is `RelayDeliveredTlsAlert`, and every tunnel of a dial ending
+with nothing back is `MasqueTunnelClosed`; after any of them, every later h3 dial on the same
+username fails at once with the same error, its message saying how long ago the exit was proved,
+until a new session id is used. The TCP path on that session is untouched.
 
 The refusal for `TlsProxy.Http` names the type, and it arrives **before** any dial — never as a
 silent fallback to TCP, which is the downgrade this library refuses to make anywhere:

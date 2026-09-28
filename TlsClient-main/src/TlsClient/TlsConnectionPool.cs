@@ -188,6 +188,10 @@ internal sealed class TlsConnectionPool : IAsyncDisposable
         {
             await entry.Connection.DisposeAsync().ConfigureAwait(false);
         }
+
+        // After the connections: an h3 connection's tunnel ends its own request stream first,
+        // then the session's outer MASQUE connections close.
+        await _masqueBinding.DisposeAsync().ConfigureAwait(false);
         _tls13SessionCache.Dispose();
     }
 

@@ -412,8 +412,8 @@ internal sealed class Http3Connection : IHttpConnection
     }
 
     /// <summary>
-    /// Opens an RFC 9298 CONNECT-UDP tunnel through <paramref name="masque"/> and runs the
-    /// ordinary inner dial over it.
+    /// Opens an RFC 9298 CONNECT-UDP tunnel on the session's outer connection to
+    /// <paramref name="masque"/> and runs the ordinary inner dial over it.
     /// </summary>
     /// <remarks>
     /// <para>THE TUNNEL IS A TRANSPORT AND NOTHING MORE. It implements
@@ -421,16 +421,24 @@ internal sealed class Http3Connection : IHttpConnection
     /// spec, ClientHello and deadlines, no SOCKS5 relay wrapper and so no liveness probe, which
     /// exists to catch an RFC 1928 association that never relays and observes that through the
     /// wrapper.</para>
+    /// <para>THE OUTER CONNECTION IS THE SESSION'S, held by <see cref="MasqueSessionBinding"/>
+    /// and shared by every h3 dial on the same proxy session: the first dial pays the outer
+    /// handshake, the rest pay one round trip for the CONNECT-UDP answer. An outer that has
+    /// ended is replaced there; one that is not ended but refuses or ends a tunnel open, after
+    /// having carried tunnels before, is what a proxy that silently forgot it looks like, and
+    /// is replaced once here.</para>
     /// <para>THE INNER PATH MTU NEEDS NO CLAMP HERE. <c>TlsQuicConnection</c> bounds its RFC
     /// 8899 search and every datagram it builds by the transport's
     /// <c>MaxDatagramPayloadSize</c>, so the tunnel's ceiling reaches the inner connection
     /// through the transport it is handed.</para>
     /// <para>OWNERSHIP MATCHES THE OTHER TWO PATHS. On success the tunnel belongs to the returned
     /// connection, whose <see cref="DisposeAsync"/> disposes it as it would a UDP socket or a
-    /// SOCKS5 relay; on any failure it is disposed here. Nothing is wrapped: a
-    /// <see cref="TlsQuicProxyException"/> from either dial reaches the caller as it is.</para>
-    /// <para>The worst case is two full deadlines: the outer dial's
-    /// <see cref="TlsQuicOptions.HandshakeDeadline"/>, then the inner handshake's.</para>
+    /// SOCKS5 relay, which ends that one request stream; on any failure it is disposed here.
+    /// Nothing is wrapped: a <see cref="TlsQuicProxyException"/> from either dial reaches the
+    /// caller as it is.</para>
+    /// <para>AN EXIT THAT PROVED UNABLE TO CARRY UDP IS REMEMBERED for the session, so the next
+    /// dial on it fails at once by the same name instead of spending another deadline; see
+    /// <see cref="MasqueSessionBinding"/>.</para>
     /// </remarks>
     private static async ValueTask<IHttpConnection> CreateThroughMasqueAsync(
         Uri origin,
@@ -442,7 +450,21 @@ internal sealed class Http3Connection : IHttpConnection
         Guid connectionId,
         CancellationToken cancellationToken)
     {
-        var options = MasqueOptionsFor(origin, masque, configuration);
+        if (masqueBinding.RememberedFailure(masque) is { } remembered)
+        {
+            TlsConnectTelemetry.Emit(
+                configuration.ConnectObserver,
+                connectionId,
+                TlsConnectEventKind.MasqueTunnelClosed,
+                origin.IdnHost,
+                origin.Port,
+                exception: remembered);
+            throw remembered;
+        }
+
+        // Never resolved and never compared: the inner connection sends to it and nothing reads
+        // a received datagram's source, so the unspecified address will do.
+        var target = new IPEndPoint(IPAddress.Any, origin.Port);
 
         // A TUNNEL THE PROXY ENDS DURING THE INNER HANDSHAKE IS DIALLED AGAIN, up to
         // MaximumAssociationAttempts tunnels in all, the same count that governs a SOCKS5
@@ -451,21 +473,26 @@ internal sealed class Http3Connection : IHttpConnection
         // nothing back. Sometimes that is the exit hiccuping and a fresh tunnel succeeds;
         // sometimes the exit cannot carry UDP at all and every tunnel ends the same way,
         // which the last exception then says. Nothing of the request has been sent when this
-        // happens, so the retry is safe for every method. A tunnel that never opened, or one
-        // the proxy refused by name, is not retried here: those are immediate, named failures.
+        // happens, so the retry is safe for every method. A tunnel the proxy refused by name is
+        // not retried: that is an immediate, named failure.
         var attempts = Math.Max(1, configuration.Quic.MaximumAssociationAttempts);
         for (var attempt = 1; ; attempt++)
         {
             var startedAt = Stopwatch.GetTimestamp();
+            ITlsQuicMasqueConnection? outer = null;
+            var reused = false;
             TlsQuicMasqueTransport tunnel;
             try
             {
-                tunnel = await TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken)
+                outer = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
+                    .ConfigureAwait(false);
+                reused = outer.TunnelsRequested > 0;
+                tunnel = await outer.OpenTunnelAsync(origin.IdnHost, origin.Port, target, cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (Exception exception)
             {
-                // Every failure of the outer dial, not only the named ones: a socket error or
+                // Every failure of the outer side, not only the named ones: a socket error or
                 // a cancellation is still a tunnel that did not open.
                 TlsConnectTelemetry.Emit(
                     configuration.ConnectObserver,
@@ -475,6 +502,18 @@ internal sealed class Http3Connection : IHttpConnection
                     origin.Port,
                     elapsed: Stopwatch.GetElapsedTime(startedAt),
                     exception: exception);
+                if (outer is not null
+                    && reused
+                    && attempt < attempts
+                    && !cancellationToken.IsCancellationRequested
+                    && exception is TlsQuicProxyException
+                    {
+                        Error: TlsQuicProxyError.MasqueTunnelClosed or TlsQuicProxyError.MasqueTunnelRefused,
+                    })
+                {
+                    await masqueBinding.DiscardAsync(masque, outer).ConfigureAwait(false);
+                    continue;
+                }
                 throw;
             }
             TlsConnectTelemetry.Emit(
@@ -493,7 +532,7 @@ internal sealed class Http3Connection : IHttpConnection
                     factory,
                     tls13SessionCache,
                     tunnel,
-                    options.TargetEndPoint,
+                    target,
                     relay: null,
                     probing: false,
                     HandshakeTimeout(configuration),
@@ -514,30 +553,50 @@ internal sealed class Http3Connection : IHttpConnection
                     origin.Port,
                     elapsed: Stopwatch.GetElapsedTime(startedAt),
                     exception: exception);
+                var sent = tunnel.DatagramsSent;
+                var received = tunnel.DatagramsReceived;
                 await tunnel.DisposeAsync().ConfigureAwait(false);
-                if (exception is TlsQuicProxyException { Error: TlsQuicProxyError.MasqueTunnelClosed } ended
-                    && !cancellationToken.IsCancellationRequested)
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    if (attempt < attempts)
-                    {
-                        continue;
-                    }
-                    throw new TlsQuicProxyException(
-                        TlsQuicProxyError.MasqueTunnelClosed,
-                        $"{attempts} MASQUE tunnel(s) in a row ended during the inner QUIC "
-                            + $"handshake with '{origin.IdnHost}'. The last one: {ended.Message}");
+                    throw;
                 }
-                throw;
+                switch (exception)
+                {
+                    case TlsQuicProxyException { Error: TlsQuicProxyError.MasqueTunnelClosed } ended:
+                        if (attempt < attempts)
+                        {
+                            continue;
+                        }
+                        var exhausted = new TlsQuicProxyException(
+                            TlsQuicProxyError.MasqueTunnelClosed,
+                            $"{attempts} MASQUE tunnel(s) in a row ended during the inner QUIC "
+                                + $"handshake with '{origin.IdnHost}'. The last one: {ended.Message}");
+                        if (sent > 0 && received == 0)
+                        {
+                            masqueBinding.Remember(masque, exhausted);
+                        }
+                        throw exhausted;
+                    case TlsQuicProxyException { Error: TlsQuicProxyError.RelayDeliveredTlsAlert } alert:
+                        masqueBinding.Remember(masque, alert);
+                        throw;
+                    default:
+                        if (MasqueSessionBinding.JudgeSilence(
+                                exception, origin.IdnHost, sent, received, outer.IsClosed) is { } silent)
+                        {
+                            masqueBinding.Remember(masque, silent);
+                            throw silent;
+                        }
+                        throw;
+                }
             }
         }
     }
 
-    /// <summary>The MASQUE tunnel options for <paramref name="origin"/> through
-    /// <paramref name="masque"/>: only the proxy sees the outer connection, so it takes the
-    /// library's default QUIC shape with PMTUD off and SETTINGS_H3_DATAGRAM on, then the proxy's
-    /// own ConfigureOuterQuic hook.</summary>
+    /// <summary>The outer MASQUE connection's options for <paramref name="masque"/>: only the
+    /// proxy sees the outer connection, so it takes the library's default QUIC shape with PMTUD
+    /// off and SETTINGS_H3_DATAGRAM on, then the proxy's own ConfigureOuterQuic hook. A tunnel's
+    /// target goes to <see cref="ITlsQuicMasqueConnection.OpenTunnelAsync"/>.</summary>
     internal static TlsQuicMasqueOptions MasqueOptionsFor(
-        Uri origin,
         TlsProxy masque,
         TlsSessionConfiguration configuration)
     {
@@ -547,11 +606,6 @@ internal sealed class Http3Connection : IHttpConnection
         return new TlsQuicMasqueOptions
         {
             ProxyEndPoint = new DnsEndPoint(masque.Address.IdnHost, masque.EffectivePort),
-            TargetHost = origin.IdnHost,
-            TargetPort = origin.Port,
-            // Never resolved and never compared: the inner connection sends to it and nothing
-            // reads a received datagram's source, so the unspecified address will do.
-            TargetEndPoint = new IPEndPoint(IPAddress.Any, origin.Port),
             Username = credentials.UserName,
             Password = credentials.Password,
             OuterSpec = outer.ConnectionSpec,
@@ -563,21 +617,27 @@ internal sealed class Http3Connection : IHttpConnection
     }
 
     /// <summary>Binds a sticky proxy session on the MASQUE side: opens one CONNECT-UDP tunnel to
-    /// <paramref name="origin"/> and closes it, reporting the outcome as
-    /// <see cref="TlsConnectEventKind.MasqueSessionBound"/>. See
-    /// <see cref="MasqueSessionBinding"/> for why the order of first use matters.</summary>
+    /// <paramref name="origin"/> on the session's outer connection (dialled now if it has none)
+    /// and closes it, reporting the outcome as
+    /// <see cref="TlsConnectEventKind.MasqueSessionBound"/>. The outer connection stays for the
+    /// session's h3 dials. See <see cref="MasqueSessionBinding"/> for why the order of first use
+    /// matters.</summary>
     internal static async Task PrimeMasqueSessionAsync(
         Uri origin,
         TlsProxy masque,
         TlsSessionConfiguration configuration,
+        MasqueSessionBinding masqueBinding,
         CancellationToken cancellationToken)
     {
         var connectionId = Guid.NewGuid();
         var startedAt = Stopwatch.GetTimestamp();
         try
         {
-            var tunnel = await TlsQuicMasqueTransport.ConnectAsync(
-                MasqueOptionsFor(origin, masque, configuration), cancellationToken).ConfigureAwait(false);
+            var outer = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
+                .ConfigureAwait(false);
+            var tunnel = await outer.OpenTunnelAsync(
+                origin.IdnHost, origin.Port, new IPEndPoint(IPAddress.Any, origin.Port), cancellationToken)
+                .ConfigureAwait(false);
             await tunnel.DisposeAsync().ConfigureAwait(false);
         }
         catch (Exception exception)

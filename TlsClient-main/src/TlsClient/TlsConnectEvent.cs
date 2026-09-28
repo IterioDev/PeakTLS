@@ -149,9 +149,10 @@ public enum TlsConnectEventKind
     /// <summary>An RFC 9298 CONNECT-UDP tunnel through a MASQUE proxy answered 2xx and is ready
     /// to carry the inner QUIC dial's datagrams.</summary>
     /// <remarks>
-    /// <para><see cref="TlsConnectEvent.Elapsed"/> is the outer dial: the time from opening the
-    /// tunnel's own HTTP/3 connection to the proxy to the CONNECT-UDP response, not the inner
-    /// dial the tunnel goes on to carry.</para>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> is the open alone: the time from sending the
+    /// CONNECT-UDP on the session's outer connection to its response, not the inner dial the
+    /// tunnel goes on to carry, and not the outer connection's own dial, which is
+    /// <see cref="MasqueConnectionOpened"/>.</para>
     /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy. A direct
     /// UDP dial or a SOCKS5-relayed one has no such tunnel and reports nothing.</para>
     /// </remarks>
@@ -161,11 +162,12 @@ public enum TlsConnectEventKind
     /// tunnel was torn down.</summary>
     /// <remarks>
     /// <para>TWO CASES, TOLD APART BY <see cref="MasqueTunnelOpened"/>. Without one before it
-    /// under the same <see cref="TlsConnectEvent.ConnectionId"/>, the outer dial failed — a
-    /// refused CONNECT-UDP, a failure to reach the proxy itself, or an outer QUIC dial that never
-    /// completed — and the inner dial never started: a broken MASQUE hop. With one, the tunnel
-    /// opened and the inner dial over it failed: a broken origin, or a tunnel that died
-    /// mid-handshake. <see cref="TlsConnectEvent.Exception"/> says which failure it was.</para>
+    /// under the same <see cref="TlsConnectEvent.ConnectionId"/>, no tunnel opened — a refused
+    /// CONNECT-UDP, an outer connection that could not be dialled, a session whose exit was
+    /// already remembered as unable to carry UDP — and the inner dial never started: a broken
+    /// MASQUE hop. With one, the tunnel opened and the inner dial over it failed: a broken
+    /// origin, or a tunnel that died mid-handshake. <see cref="TlsConnectEvent.Exception"/> says
+    /// which failure it was.</para>
     /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
     /// </remarks>
     MasqueTunnelClosed = 18,
@@ -184,6 +186,21 @@ public enum TlsConnectEventKind
     /// <see cref="TlsSession"/>.</para>
     /// </remarks>
     MasqueSessionBound = 19,
+
+    /// <summary>The outer HTTP/3 connection to the MASQUE proxy was dialled for a proxy
+    /// session: the QUIC handshake with the proxy front and its SETTINGS.
+    /// <see cref="TlsConnectEvent.Elapsed"/> is what that cost; <see cref="TlsConnectEvent.Exception"/>
+    /// is set when no address of the proxy completed it, or it did not offer CONNECT-UDP.</summary>
+    /// <remarks>
+    /// <para>ONE PER PROXY SESSION, NOT ONE PER TUNNEL. Every h3 dial on the same session (the
+    /// same proxy username) opens its tunnel on this connection, so a session that carries h3
+    /// to several origins reports this once and <see cref="MasqueTunnelOpened"/> once per
+    /// origin. A second one for the same session means the first had ended (its idle timeout,
+    /// a proxy close, a failure) and was replaced. The host and port are the proxy's, not an
+    /// origin's.</para>
+    /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
+    /// </remarks>
+    MasqueConnectionOpened = 20,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

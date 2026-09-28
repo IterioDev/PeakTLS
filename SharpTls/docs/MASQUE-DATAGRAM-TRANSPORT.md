@@ -8,25 +8,35 @@ association. Everything above the `ITlsQuicDatagramTransport` seam — the inner
 `TlsQuicHttp3Connection`, TlsClient's `Http3Connection`, the fingerprint knobs and their tests —
 is unaware which transport it is talking to.
 
-One outer QUIC connection is opened per inner connection, and one CONNECT-UDP request stream per
-outer connection. The outer connection's only job is to move the inner connection's datagrams to
-and from the proxy; its own TLS fingerprint is irrelevant, since only the proxy ever terminates
-it. The exit node re-emits the inner connection's datagrams byte for byte, so the inner
-connection's QUIC fingerprint — transport parameter rotation, packet sizes, everything —
-reaches the target exactly as the client built it.
+Two types share the work. `TlsQuicMasqueConnection` is the outer HTTP/3 connection to the proxy,
+dialled once per proxy session; `TlsQuicMasqueTransport` is one CONNECT-UDP tunnel on it, one
+request stream, opened per inner connection with `OpenTunnelAsync`. RFC 9298 lets one HTTP/3
+connection carry any number of tunnels, and RFC 9297 §2.1's quarter stream id routes each
+datagram to its tunnel, so a session that reaches several origins pays one outer handshake rather
+than one per origin (two hundred sessions in lockstep were putting five or six bursts of two
+hundred handshakes onto one proxy front, which went silent under them). The outer connection's
+only job is to move the inner connections' datagrams to and from the proxy; its own TLS
+fingerprint is irrelevant, since only the proxy ever terminates it. The exit node re-emits the
+inner connection's datagrams byte for byte, so the inner connection's QUIC fingerprint —
+transport parameter rotation, packet sizes, everything — reaches the target exactly as the client
+built it.
 
 ## The dial
 
-`TlsQuicMasqueTransport.ConnectAsync` runs four steps. Step 1 tries every address the proxy name
-resolves to, in resolver order, each under the outer connection's own `HandshakeDeadline`: UDP has
-no refusal to report, so a dead address costs one deadline and says nothing, and the next one is
-tried. A backstop 1 s behind the sum of those deadlines bounds DNS and steps 2 to 4, and the grace
-lets a stalled outer handshake be reported by the receiver (what it discarded and why) rather than
-by a bare cancellation. A missed deadline is `MasqueTunnelRefused`; its message names the stage the
-dial was in and lists the addresses that never answered. Steps 2 to 4 run once, against the address
-that completed the handshake: what the proxy answers there is not an address problem. An outer spec advertising fewer than three
+`TlsQuicMasqueConnection.ConnectAsync` runs steps 1 and 2; `OpenTunnelAsync` runs steps 3 and 4
+for each tunnel. Step 1 tries every address the proxy name resolves to, in resolver order, each
+under the outer connection's own `HandshakeDeadline`: UDP has no refusal to report, so a dead
+address costs one deadline and says nothing, and the next one is tried. A backstop 1 s behind the
+sum of those deadlines bounds DNS and step 2, and the grace lets a stalled outer handshake be
+reported by the receiver (what it discarded and why) rather than by a bare cancellation. A missed
+deadline is `MasqueTunnelRefused`; its message names the stage the dial was in and lists the
+addresses that never answered. Step 2 runs once, against the address that completed the handshake:
+what the proxy answers there is not an address problem. An outer spec advertising fewer than three
 unidirectional streams (RFC 9114 §6.2) is refused with `ArgumentException` before any packet
-leaves, since the proxy could never open its control stream and send SETTINGS.
+leaves, since the proxy could never open its control stream and send SETTINGS. Each tunnel's open
+(steps 3 and 4) runs under one `HandshakeDeadline` of its own; an open the proxy never answers is
+`MasqueTunnelRefused` naming the stage, and its request stream is ended when the answer does
+arrive, so the proxy keeps no tunnel for nobody. The outer connection survives a refused open.
 
 1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, chain and hostname validation on,
    revocation checking off (`X509RevocationMode.NoCheck`: an OCSP fetch inside the pump loop
@@ -73,7 +83,34 @@ leaves, since the proxy could never open its control stream and send SETTINGS.
    status is `MasqueTunnelRefused`, carrying the status. A RESET_STREAM or connection close
    before the header section arrives is `MasqueTunnelClosed`, carrying the proxy's error code.
 
-With a 2xx in hand the dial starts the owner task and returns a live `TlsQuicMasqueTransport`.
+With a 2xx in hand the owner registers the tunnel under its stream id and `OpenTunnelAsync`
+returns a live `TlsQuicMasqueTransport`. The owner task itself starts when `ConnectAsync`
+returns, before any tunnel exists, and runs until the connection ends.
+
+## One connection, many tunnels
+
+The first tunnel is stream 0, the second stream 4, the third stream 8: the client's bidirectional
+streams in order, one CONNECT-UDP each, all on one outer connection. Nothing about a tunnel
+depends on the others except the shared send path: a congestion-blocked outer holds every
+tunnel's payloads, in each tunnel's own order.
+
+A tunnel ends in one of three ways, and only the last touches the others:
+
+- **Disposed by its owner.** `TlsQuicMasqueTransport.DisposeAsync` fails the tunnel's own sends
+  and receives, then asks the owner to end its request stream with a FIN (RFC 9298 §3.4: closing
+  the request stream ends the tunnel) and forget it. The outer connection and every other tunnel
+  are untouched. TlsClient's `Http3Connection` disposes its tunnel with the inner connection, so a
+  pooled h3 connection going away costs one FIN, not an outer close.
+- **Ended by the proxy or the exit.** A RESET_STREAM or FIN on the tunnel's stream, or a TLS
+  alert record through it, fails that tunnel alone with the message described under the error
+  model; the rest go on.
+- **The outer connection ends.** Its idle timeout, a CONNECTION_CLOSE from the proxy, a failure
+  in the pump, or `TlsQuicMasqueConnection.DisposeAsync`: every tunnel fails with the same
+  `MasqueTunnelClosed` naming the cause, every open still waiting for its answer fails the same
+  way, `IsClosed` turns true, and every later `OpenTunnelAsync` fails at once. A caller keeping
+  one connection per proxy session (TlsClient's `MasqueSessionBinding`) sees `IsClosed` and
+  dials a new one; `TunnelsRequested` tells it whether a connection was ever used, which decides
+  whether a refused open means a stale connection or a real refusal.
 
 ## Framing on the wire
 
@@ -100,26 +137,29 @@ be on a direct UDP path.
 ## Ownership and backpressure
 
 The outer `TlsQuicConnection` is not thread-safe, so exactly one owner task touches it after
-`ConnectAsync` returns. Each iteration drains every queued payload: the held one first, then
-non-blocking reads from the outbound channel (an awaiting read would starve the pump), each handed
-to the HTTP/3 layer, which prefixes the quarter stream id (`SendAsync` already wrote the context
-id) and queues it on the outer connection, until that queue refuses one or the channel is empty.
-A refused payload is held in `_stalled` and goes first next time, so the channel's order holds.
-The owner drives the outer connection's send path, refilling between sends until a send builds
-nothing, then pumps the HTTP/3 connection once and drains any received datagrams into the inbound
-channel.
+`ConnectAsync` returns. Anything else that has to reach it — an open, a tunnel's close — is
+posted to the owner as a command and runs at the top of its next iteration. Each iteration then
+drains every tunnel's queued payloads: the tunnel's held one first, then non-blocking reads from
+its outbound channel (an awaiting read would starve the pump), each handed to the HTTP/3 layer,
+which prefixes the quarter stream id (`SendAsync` already wrote the context id) and queues it on
+the outer connection, until that queue refuses one or every channel is empty. A refused payload
+is held in its tunnel's `_stalled` and goes first next time, so each tunnel's order holds. The
+owner drives the outer connection's send path, refilling between sends until a send builds
+nothing, then pumps the HTTP/3 connection once, answers any open whose response has arrived, and
+hands each tunnel what arrived for it.
 
-Three queues and one held payload sit around that loop:
+Per tunnel, two queues and one held payload sit around that loop, plus the outer connection's
+own queue:
 
 - **Outbound**: a bounded channel, capacity 64, `BoundedChannelFullMode.Wait`. `SendAsync`
   writes to it and awaits when it is full.
 - **The held payload**: `_stalled`, the one payload the outer connection's FIFO last refused.
-- **The outer connection's own FIFO**: a second 64-entry bound inside `TlsQuicConnection` itself
-  (`DatagramQueueBound`), ahead of the wire.
+- **The outer connection's own FIFO**: a 64-entry bound inside `TlsQuicConnection` itself
+  (`DatagramQueueBound`), ahead of the wire, shared by every tunnel.
 - **Inbound**: an unbounded channel that `ReceiveAsync` reads from.
 
 A blocked outer connection therefore absorbs 64 (its FIFO) + 1 (held) + 64 (the outbound
-channel) = 129 payloads before a `SendAsync` waits.
+channel) = 129 payloads from one tunnel before that tunnel's `SendAsync` waits.
 
 Backpressure is delay, never drop, at both bounds — RFC 9221 §5.4 permits either, and this
 transport always chooses delay. A congestion-window-blocked outer connection simply leaves
@@ -131,12 +171,12 @@ sends something or a timer fires, a writer that shows up mid-block needs to wake
 calls `WakeableTransport.Wake`, and the wake cancels only the socket receive inside that
 decorator, which returns an empty datagram — the same shape as the connection's own timer
 wake-up — so no packet is read and the pump's send pass and HTTP/3 processing still run. The
-pump's own token is the tunnel lifetime's alone: a wake never reaches the pump itself, so a send
-in progress is never cancelled and no payload already dequeued and recorded as sent is lost.
+pump's own token is the connection lifetime's alone: a wake never reaches the pump itself, so a
+send in progress is never cancelled and no payload already dequeued and recorded as sent is lost.
 
 ## Error model
 
-All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException`:
+The errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException`:
 
 | Value | Fires when |
 | --- | --- |
@@ -144,11 +184,14 @@ All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException
 | `MasqueAuthenticationRejected` | the CONNECT-UDP response is 407 |
 | `MasqueTargetRejected` | the CONNECT-UDP response is 400 |
 | `RelayDeliveredTlsAlert` | the answer to the inner Initial through the tunnel is a TLS alert record (`15 03 01 00 02 02 46`, fatal protocol_version): the exit behind this proxy session wrote the datagram into a TCP TLS connection, so no inner packet will cross it and no second tunnel on the same session reaches a different exit. Named at once, without the tunnel retries |
-| `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status, or the dial missed its deadline in any of the four steps (the message names the stage) |
-| `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout. The message says how long the tunnel lived and how many datagrams crossed it each way; datagrams in and none back is an exit that cannot carry UDP to the target, cured by a fresh proxy session rather than a retry of the same one |
+| `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status, or the outer dial or the tunnel's open missed its deadline (the message names the stage) |
+| `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, the outer connection's own idle timeout, or the connection's disposal. The message says how long the tunnel lived and how many datagrams crossed it each way; datagrams in and none back is an exit that cannot carry UDP to the target, cured by a fresh proxy session rather than a retry of the same one |
+| `MasqueExitSilent` | raised by TlsClient, not here: an inner handshake through a tunnel that carried datagrams in and none back while the outer stayed alive. TlsClient remembers it for the proxy session; see its `MasqueSessionBinding` |
 
-Once `MasqueTunnelClosed` fires, every subsequent `SendAsync` and `ReceiveAsync` call throws it
-immediately; there is no partial-failure state.
+Once a tunnel has failed, every subsequent `SendAsync` and `ReceiveAsync` call on it throws the
+same exception immediately; there is no partial-failure state. `DatagramsSent` and
+`DatagramsReceived` stay readable afterwards, which is how TlsClient tells an exit's silence from
+a proxy's.
 
 Local misconfiguration is not a proxy error: sending a payload larger than
 `MaxDatagramPayloadSize` throws `ArgumentOutOfRangeException` naming the ceiling, since that is a
@@ -184,15 +227,15 @@ ceiling never binds here: the 1392-byte outer packet already sits well under it.
 
 - **Wrong context id** — an inbound HTTP datagram whose context id is not `0x00` (RFC 9298 §4).
 - **Oversize inbound** — a decapsulated payload larger than `MaxDatagramPayloadSize`.
-- **Wrong stream** — an HTTP datagram whose quarter stream id names a stream other than the one
-  the tunnel opened (counted by the HTTP/3 layer, surfaced here).
+- **Wrong stream** — an HTTP datagram whose quarter stream id names a stream nothing reads
+  (counted by the HTTP/3 layer for the whole outer connection, surfaced on every tunnel).
 
 None of these end the tunnel; they are defence in depth against a malfunctioning or hostile
 proxy, the same posture `SOCKS5-DATAGRAM-TRANSPORT.md`'s inbound validation takes.
 
 `TlsQuicMasqueOptions` also carries a small set of options that exist only for tests, never for
 production dials: `OuterTransport` substitutes a scripted outer datagram transport in place of a
-real UDP socket, `OuterRemoteEndPoint` pins the outer connection's peer address without a DNS
+real UDP socket, `OuterRemoteEndPoints` lists the outer connection's peer addresses without a DNS
 resolution, and `DangerouslySkipOuterCertificateValidation` turns off the outer connection's
 certificate validation. All three exist so the offline test suite can script a fake MASQUE proxy
 without a network; none of them is reachable from `TlsProxy.Masque(...)`.

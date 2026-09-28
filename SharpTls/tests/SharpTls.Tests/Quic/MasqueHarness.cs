@@ -7,9 +7,11 @@ using static SharpTls.Tests.Quic.TlsQuicConnectionTests;
 
 namespace SharpTls.Tests.Quic;
 
-/// <summary>An outer "proxy" for <see cref="TlsQuicMasqueTransport"/>'s dial: a
-/// <see cref="LoopbackQuicPeer"/> server on an in-memory pair, driven by one scripted task
-/// while the client pumps itself inside <see cref="TlsQuicMasqueTransport.ConnectAsync"/>.</summary>
+/// <summary>An outer "proxy" for <see cref="TlsQuicMasqueConnection"/>'s dial and the first
+/// tunnel on it: a <see cref="LoopbackQuicPeer"/> server on an in-memory pair, driven by one
+/// scripted task while the client pumps itself inside
+/// <see cref="TlsQuicMasqueConnection.ConnectAsync"/> and
+/// <see cref="TlsQuicMasqueConnection.OpenTunnelAsync"/>.</summary>
 /// <remarks>
 /// <para>THE SERVER IS BUILT AFTER THE DIAL STARTS, because <see cref="Server"/> needs the
 /// client's original Destination Connection ID for s7.3's
@@ -35,6 +37,7 @@ internal sealed class MasqueHarness : IAsyncDisposable
         CustomTlsQuicServer server,
         InMemoryDatagramTransport clientTransport,
         LoopbackQuicPeer peer,
+        TlsQuicMasqueConnection connection,
         TlsQuicMasqueTransport transport,
         int peerConsumed)
     {
@@ -43,11 +46,15 @@ internal sealed class MasqueHarness : IAsyncDisposable
         _server = server;
         ClientTransport = clientTransport;
         Peer = peer;
+        Connection = connection;
         Transport = transport;
         _peerConsumed = peerConsumed;
     }
 
-    /// <summary>The dialled tunnel.</summary>
+    /// <summary>The outer connection the tunnel was opened on.</summary>
+    internal TlsQuicMasqueConnection Connection { get; }
+
+    /// <summary>The dialled tunnel: the outer's first request, stream 0.</summary>
     internal TlsQuicMasqueTransport Transport { get; }
 
     /// <summary>The proxy's side of the outer connection.</summary>
@@ -132,9 +139,6 @@ internal sealed class MasqueHarness : IAsyncDisposable
             HandshakeDeadline = handshakeDeadline ?? TimeSpan.FromSeconds(10),
             InnerDatagramCeiling = innerCeiling,
             ProxyEndPoint = new DnsEndPoint("proxy.test", 50000),
-            TargetHost = "target.test",
-            TargetPort = 443,
-            TargetEndPoint = new IPEndPoint(IPAddress.Loopback, 443),
             Username = "user",
             Password = "pass",
             OuterSpec = outerSpec ?? OuterSpec(),
@@ -152,8 +156,24 @@ internal sealed class MasqueHarness : IAsyncDisposable
             DangerouslySkipOuterCertificateValidation = true,
         };
 
+        // The two steps a caller takes: the outer connection, then the first tunnel on it. A
+        // tunnel that fails to open takes the outer down with it here, as a caller's would.
         var dial = Task.Run(
-            () => TlsQuicMasqueTransport.ConnectAsync(options, cancellationToken),
+            async () =>
+            {
+                var connection = await TlsQuicMasqueConnection.ConnectAsync(options, cancellationToken);
+                try
+                {
+                    var tunnel = await connection.OpenTunnelAsync(
+                        "target.test", 443, new IPEndPoint(IPAddress.Loopback, 443), cancellationToken);
+                    return (connection, tunnel);
+                }
+                catch (Exception)
+                {
+                    await connection.DisposeAsync();
+                    throw;
+                }
+            },
             cancellationToken);
         while (clientTransport.Sent.Count == 0 && !dial.IsCompleted)
         {
@@ -197,10 +217,11 @@ internal sealed class MasqueHarness : IAsyncDisposable
             answerWithClose,
             scriptCancellation.Token);
 
+        TlsQuicMasqueConnection connection;
         TlsQuicMasqueTransport transport;
         try
         {
-            transport = await dial;
+            (connection, transport) = await dial;
         }
         catch (Exception)
         {
@@ -231,7 +252,37 @@ internal sealed class MasqueHarness : IAsyncDisposable
 
         var pumped = await script;
         return new MasqueHarness(
-            pki, credential, server, clientTransport, peer, transport, pumped);
+            pki, credential, server, clientTransport, peer, connection, transport, pumped);
+    }
+
+    /// <summary>Opens a further tunnel on <see cref="Connection"/> and answers its CONNECT-UDP
+    /// as the proxy: pumps the peer until the request's HEADERS arrive on
+    /// <paramref name="streamId"/>, then sends a <paramref name="status"/> response.</summary>
+    /// <param name="streamId">The request stream the client will open next: 4 for the second
+    /// tunnel, 8 for the third.</param>
+    /// <param name="status">The response status.</param>
+    /// <param name="cancellationToken">Bounds the open.</param>
+    /// <param name="host">The target host in the request's path.</param>
+    /// <returns>The tunnel.</returns>
+    /// <exception cref="TlsQuicProxyException">The open failed, by name.</exception>
+    internal async ValueTask<TlsQuicMasqueTransport> OpenTunnelAsync(
+        ulong streamId, int status, CancellationToken cancellationToken, string host = "second.test")
+    {
+        var open = Connection.OpenTunnelAsync(
+            host, 443, new IPEndPoint(IPAddress.Loopback, 443), cancellationToken);
+        while (!Peer.ReceivedStreamFrames.Any(frame => frame.StreamId == streamId))
+        {
+            if (open.IsCompleted)
+            {
+                // Failed before the request left; the await rethrows it.
+                return await open;
+            }
+            await PumpPeerAsync(cancellationToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+        }
+        await Peer.SendStreamFramesAsync(
+            [Stream(streamId, 0, ResponseBytes(status, [], []))], cancellationToken);
+        return await open;
     }
 
     /// <summary>Pumps the peer once per datagram the client has sent since the last call, and
@@ -246,12 +297,38 @@ internal sealed class MasqueHarness : IAsyncDisposable
         }
     }
 
-    /// <summary>Disposes the tunnel, then tears down the peer side and the transport pair.
-    /// </summary>
+    /// <summary>Pumps the peer until <paramref name="arrived"/> holds; the owner sends on its
+    /// own schedule, so a test waits for what it expects rather than pumping a fixed count. The
+    /// token bounds the wait.</summary>
+    /// <param name="arrived">What the test waits for.</param>
+    /// <param name="cancellationToken">Bounds the wait.</param>
+    internal async Task PumpPeerUntilAsync(Func<bool> arrived, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await PumpPeerAsync(cancellationToken);
+            if (arrived())
+            {
+                return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+        }
+    }
+
+    /// <summary>RFC 9221 s4's DATAGRAM frame with a Length (type 0x31); every payload here is
+    /// under 64 bytes, so the length is a one-byte varint.</summary>
+    /// <param name="payload">The frame's payload: quarter stream id, context id, bytes.</param>
+    /// <returns>The frame.</returns>
+    internal static byte[] DatagramFrame(params byte[] payload) =>
+        [0x31, (byte)payload.Length, .. payload];
+
+    /// <summary>Disposes the tunnel and the outer connection, then tears down the peer side and
+    /// the transport pair.</summary>
     /// <remarks>No null guard: a dial that failed returned no harness.</remarks>
     public async ValueTask DisposeAsync()
     {
         await Transport.DisposeAsync();
+        await Connection.DisposeAsync();
         await Peer.DisposeAsync();
         await _server.DisposeAsync();
         await ClientTransport.DisposeAsync();

@@ -2,7 +2,9 @@ using System.Net;
 
 namespace SharpTls.Quic;
 
-/// <summary>Everything one MASQUE tunnel needs (RFC 9298 CONNECT-UDP over HTTP/3). Internal,
+/// <summary>Everything one outer MASQUE connection needs (RFC 9298 CONNECT-UDP over HTTP/3):
+/// the proxy, the credentials every tunnel on it sends, and the outer connection's shape. A
+/// tunnel's target is given to <see cref="TlsQuicMasqueConnection.OpenTunnelAsync"/>. Internal,
 /// like the spec types it carries; TlsClient reaches it through InternalsVisibleTo.</summary>
 internal sealed class TlsQuicMasqueOptions
 {
@@ -10,15 +12,6 @@ internal sealed class TlsQuicMasqueOptions
     /// Its host and port are also the CONNECT-UDP request's <c>:authority</c> and the outer
     /// ClientHello's server name.</summary>
     public required DnsEndPoint ProxyEndPoint { get; init; }
-
-    /// <summary>The tunnel's target, written into the RFC 9298 s2 URI template.</summary>
-    public required string TargetHost { get; init; }
-
-    /// <summary>The tunnel's target UDP port, written into the RFC 9298 s2 URI template.</summary>
-    public required int TargetPort { get; init; }
-
-    /// <summary>Echoed in every receive result; the inner connection never compares it.</summary>
-    public required IPEndPoint TargetEndPoint { get; init; }
 
     /// <summary>The proxy account's user name, sent as HTTP Basic credentials (RFC 7617) in
     /// <c>proxy-authorization</c> (RFC 9110 s11.7.2).</summary>
@@ -37,7 +30,8 @@ internal sealed class TlsQuicMasqueOptions
     /// <summary>Shapes the outer ClientHello; TlsClient passes its default.</summary>
     public required Action<ClientHelloBuilder> ConfigureOuterClientHello { get; init; }
 
-    /// <summary>Bounds steps 1 to 4 of the dial as one deadline.</summary>
+    /// <summary>Bounds the outer dial per proxy address (the QUIC handshake, then the proxy's
+    /// SETTINGS), and each tunnel's open on its own (the CONNECT-UDP response).</summary>
     public TimeSpan HandshakeDeadline { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>A ceiling on the inner UDP payload below the one the outer connection's frame

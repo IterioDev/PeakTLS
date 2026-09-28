@@ -99,6 +99,32 @@ public sealed class MasqueLiveTests
         }
     }
 
+    /// <summary>One outer connection per proxy session: two origins on one session cost one
+    /// outer dial and two tunnels, not two outer dials.</summary>
+    [Fact]
+    public async Task OneSessionDialsTheProxyOnceForSeveralOrigins()
+    {
+        var events = new List<TlsConnectEventKind>();
+        if (Options(o => o.ConnectObserver = e => { lock (events) { events.Add(e.Kind); } }) is not { } options)
+        {
+            return;
+        }
+        await using var session = new TlsSession(options);
+
+        var first = await session.SendAsync(SpotifyPresetLiveParityTests.NewRequest());
+        Assert.Equal(HttpVersion.Version30, first.HttpVersion);
+        var request = new HttpRequestMessage(HttpMethod.Get, "https://spclient.wg.spotify.com/");
+        request.AddHeader("user-agent", "Spotify/9.1.86 iOS/27.0 (iPhone17,2)");
+        var second = await session.SendAsync(request);
+        Assert.Equal(HttpVersion.Version30, second.HttpVersion);
+
+        lock (events)
+        {
+            Assert.Equal(1, events.Count(k => k == TlsConnectEventKind.MasqueConnectionOpened));
+            Assert.Equal(2, events.Count(k => k == TlsConnectEventKind.MasqueTunnelOpened));
+        }
+    }
+
     [Fact]
     public async Task AGoogleHostedTargetAnswersThroughTheTunnel()
     {
