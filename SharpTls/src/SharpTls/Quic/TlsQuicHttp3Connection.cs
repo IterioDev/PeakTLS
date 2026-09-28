@@ -88,6 +88,15 @@ internal enum TlsQuicHttp3RequestRefusal
     /// <summary>The connection has already taken an s8.1 connection error, so there is no
     /// state in which a new request could be answered.</summary>
     ConnectionErrored,
+
+    /// <summary>The request carries RFC 9220 s3's <c>:protocol</c> pseudo-header (an extended
+    /// CONNECT), but the peer's SETTINGS have not carried SETTINGS_ENABLE_CONNECT_PROTOCOL =
+    /// 1.</summary>
+    /// <remarks>RFC 8441 s3, via RFC 9220 s3's HTTP/3 mapping: "a client MAY use the Extended
+    /// CONNECT method ... upon receipt of the SETTINGS_ENABLE_CONNECT_PROTOCOL parameter".
+    /// MAY use, not may attempt and be refused on the wire - so this is caught here, before
+    /// the request is encoded, rather than left for the peer to reject.</remarks>
+    ExtendedConnectNotEnabled,
 }
 
 // Task C11: the HTTP/3 connection - C1-C10 wired into one object, replacing the throwaway
@@ -622,6 +631,19 @@ internal sealed class TlsQuicHttp3Connection
         if (_streams.PeerGoawayStreamId is not null)
         {
             refusal = TlsQuicHttp3RequestRefusal.GoawayReceived;
+            return null;
+        }
+
+        // RFC 8441 s3's gate on the peer's SETTINGS_ENABLE_CONNECT_PROTOCOL - see
+        // ExtendedConnectNotEnabled's remarks for the quoted text. request.Protocol is
+        // non-null only for an extended CONNECT (see TlsQuicHttp3Request.Protocol), and this
+        // is the one place that setting can be read: TlsQuicHttp3Request has no reference to
+        // the peer's SETTINGS at all.
+        if (request.Protocol is not null
+            && TlsQuicHttp3Settings.Value(_streams.PeerSettings, TlsQuicHttp3Spec.EnableConnectProtocolIdentifier)
+                != 1)
+        {
+            refusal = TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled;
             return null;
         }
 

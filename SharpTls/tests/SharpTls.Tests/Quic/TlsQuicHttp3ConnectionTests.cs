@@ -2416,7 +2416,7 @@ public sealed partial class TlsQuicConnectionTests
 
     // The peer's s6.2.1 opening flight: the stream-type varint and a SETTINGS frame, as one
     // STREAM frame at offset 0 with no FIN.
-    private static TlsQuicFrame PeerControl(params TlsQuicHttp3Setting[] settings)
+    internal static TlsQuicFrame PeerControl(params TlsQuicHttp3Setting[] settings)
     {
         var bytes = new List<byte> { (byte)TlsQuicHttp3StreamType.Control };
         var payload = new List<byte>();

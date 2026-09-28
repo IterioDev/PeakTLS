@@ -7,7 +7,7 @@ using System.Text;
 
 namespace SharpTls.Quic;
 
-/// <summary>Reasons a SOCKS5 proxy association failed.</summary>
+/// <summary>Reasons a SOCKS5 proxy association or a MASQUE CONNECT-UDP tunnel failed.</summary>
 public enum TlsQuicProxyError
 {
     /// <summary>The proxy offered no authentication method this client supports.</summary>
@@ -27,10 +27,24 @@ public enum TlsQuicProxyError
     /// TLS server produces: the proxy writes UDP ASSOCIATE payload into a TCP connection to the
     /// destination port, so it cannot carry QUIC at all.</summary>
     RelayDeliveredTlsAlert,
+
+    /// <summary>The MASQUE proxy's SETTINGS or transport parameters lack extended CONNECT
+    /// (SETTINGS_ENABLE_CONNECT_PROTOCOL), HTTP datagrams (SETTINGS_H3_DATAGRAM), or a usable
+    /// max_datagram_frame_size, so it does not offer CONNECT-UDP (RFC 9298).</summary>
+    MasqueNotOffered,
+    /// <summary>The proxy answered the CONNECT-UDP request with 407: credentials refused or the account's traffic limit reached.</summary>
+    MasqueAuthenticationRejected,
+    /// <summary>The proxy answered 400: it refused the target host and port.</summary>
+    MasqueTargetRejected,
+    /// <summary>The proxy answered CONNECT-UDP with any other non-2xx status, or the tunnel did not come up within the deadline.</summary>
+    MasqueTunnelRefused,
+    /// <summary>The tunnel stream or the outer connection ended, before or after the response; the message carries the proxy's error code or the underlying failure.</summary>
+    MasqueTunnelClosed,
 }
 
-/// <summary>A SOCKS5 proxy failure. Distinct from <see cref="TlsQuicTransportException"/>,
-/// which carries an RFC 9000 transport error code.</summary>
+/// <summary>A SOCKS5 proxy failure or a MASQUE CONNECT-UDP tunnel failure. Distinct from
+/// <see cref="TlsQuicTransportException"/>, which carries an RFC 9000 transport error
+/// code.</summary>
 public sealed class TlsQuicProxyException : IOException
 {
     /// <summary>Creates a proxy failure.</summary>
