@@ -62,16 +62,13 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// stream or its response. The 0x20 literal is 65535 as a four-byte varint.</remarks>
     /// <param name="congestionController">Replaces NewReno, for a test that shuts the
     /// window.</param>
-    /// <param name="initialRtt">Pins RFC 9002 s6.2.2's initial RTT.</param>
     internal static TlsQuicConnectionSpec OuterSpec(
-        ITlsQuicCongestionController? congestionController = null,
-        TimeSpan? initialRtt = null) => new()
+        ITlsQuicCongestionController? congestionController = null) => new()
     {
         PathMtuDiscovery = false,
         BasePathMtu = 1392,
         MaximumPathMtu = 1392,
         DestinationConnectionIdLength = 8,
-        InitialRttRange = initialRtt is { } rtt ? (rtt, rtt) : null,
         Recovery = new TlsQuicRecoverySpec
         {
             CongestionController =
@@ -100,6 +97,9 @@ internal sealed class MasqueHarness : IAsyncDisposable
     /// <param name="answerWithClose">Answer by closing the outer connection with
     /// H3_NO_ERROR instead of a response.</param>
     /// <param name="outerSpec">Replaces <see cref="OuterSpec"/>.</param>
+    /// <param name="wrapOuter">Wraps the client half of the pair before the dial uses it, for a
+    /// test that has to see or hold the outer connection's sends; it stays the harness's to
+    /// dispose.</param>
     /// <exception cref="Exception">Whatever the dial threw, after the peer is torn down; or
     /// the script's own failure, when it failed.</exception>
     internal static async ValueTask<MasqueHarness> CreateAsync(
@@ -109,7 +109,8 @@ internal sealed class MasqueHarness : IAsyncDisposable
         int answerStatus = 200,
         bool answerWithReset = false,
         TlsQuicConnectionSpec? outerSpec = null,
-        bool answerWithClose = false)
+        bool answerWithClose = false,
+        Func<ITlsQuicDatagramTransport, ITlsQuicDatagramTransport>? wrapOuter = null)
     {
         var pki = TestPki.Create();
         var credential = Credential(pki);
@@ -125,7 +126,7 @@ internal sealed class MasqueHarness : IAsyncDisposable
             OuterSpec = outerSpec ?? OuterSpec(),
             OuterHttp3Spec = new TlsQuicHttp3Spec { Settings = TestHttp3Settings.DatagramCapable },
             ConfigureOuterClientHello = _ => { },
-            OuterTransport = clientTransport,
+            OuterTransport = wrapOuter is null ? clientTransport : wrapOuter(clientTransport),
             OuterRemoteEndPoint = serverTransport.LocalEndPoint,
 
             // TestPki's root is not machine-trusted and the leaf does not name proxy.test.
