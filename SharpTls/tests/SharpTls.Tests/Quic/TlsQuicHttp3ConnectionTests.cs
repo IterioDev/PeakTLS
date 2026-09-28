@@ -895,7 +895,7 @@ public sealed partial class TlsQuicConnectionTests
     // s19.4's frame as the PEER sends it, built here for the reason Stream's own note in
     // TlsQuicConnectionStreamTests gives: these are the peer's frames, and a helper that reused
     // the send path's construction would make the two directions one implementation.
-    private static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
+    internal static TlsQuicFrame Reset(ulong streamId, ulong finalSize, ulong errorCode) => new()
     {
         RawType = (ulong)TlsQuicFrameType.ResetStream,
         StreamId = streamId,
@@ -2013,7 +2013,7 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(1, harness.Http3.Streams.EncoderPolicy.Table!.BlockedStreamCount);
     }
 
-    private static byte[] HeadersPayload(byte[] streamData)
+    internal static byte[] HeadersPayload(byte[] streamData)
     {
         var offset = 0;
         Assert.Equal(
@@ -2454,7 +2454,7 @@ public sealed partial class TlsQuicConnectionTests
     // side produced, so the field-line layout has evidence outside this file. What these tests
     // add is the SEQUENCE - that a field section reaches a reader through a QUIC stream, a
     // frame layer and a response state machine, in that order.
-    private static byte[] ResponseBytes(
+    internal static byte[] ResponseBytes(
         int status, (string Name, string Value)[] fields, byte[] body)
     {
         var section = new byte[4096];
