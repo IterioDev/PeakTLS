@@ -497,9 +497,10 @@ internal sealed class Http3Connection : IHttpConnection
 
             // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
             // constructor refuses unless the ClientHello also advertised a non-zero
-            // max_datagram_frame_size. The default transport parameter preset does, so the
-            // pair agrees by construction — a narrowed preset that drops 0x20 would be told
-            // here rather than by a peer's H3_SETTINGS_ERROR.
+            // max_datagram_frame_size. The default transport parameter preset is
+            // RfcMinimumParameters, which does NOT carry it — callers wanting H3 datagrams
+            // must select or build a preset that does, or this constructor is the one that
+            // tells them, rather than a peer's H3_SETTINGS_ERROR.
             var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
             http3.OpenLocalStreams();
             if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))

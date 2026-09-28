@@ -18,6 +18,8 @@ TlsClient.TlsConnectEventKind.Socks5AssociationGateEntered = 13 -> TlsClient.Tls
 TlsClient.TlsConnectEventKind.Socks5AssociationRetried = 14 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsConnectEventKind.Socks5AssociationFirstRequest = 15 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsConnectEventKind.Socks5AssociationWentSilent = 16 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.MasqueTunnelOpened = 17 -> TlsClient.TlsConnectEventKind
+TlsClient.TlsConnectEventKind.MasqueTunnelClosed = 18 -> TlsClient.TlsConnectEventKind
 TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Always = 2 -> TlsClient.TlsHpackHuffman
 TlsClient.TlsHpackHuffman.Never = 3 -> TlsClient.TlsHpackHuffman

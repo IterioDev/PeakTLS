@@ -144,7 +144,29 @@ public enum TlsConnectEventKind
     /// <see cref="TlsConnectEvent.Exception"/> is what the caller was given.</para>
     /// <para>Emitted only for a proxied HTTP/3 connection.</para>
     /// </remarks>
-    Socks5AssociationWentSilent,
+    Socks5AssociationWentSilent = 16,
+
+    /// <summary>An RFC 9298 CONNECT-UDP tunnel through a MASQUE proxy answered 2xx and is ready
+    /// to carry the inner QUIC dial's datagrams.</summary>
+    /// <remarks>
+    /// <para><see cref="TlsConnectEvent.Elapsed"/> is the outer dial: the time from opening the
+    /// tunnel's own HTTP/3 connection to the proxy to the CONNECT-UDP response, not the inner
+    /// dial the tunnel goes on to carry.</para>
+    /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy. A direct
+    /// UDP dial or a SOCKS5-relayed one has no such tunnel and reports nothing.</para>
+    /// </remarks>
+    MasqueTunnelOpened = 17,
+
+    /// <summary>The outer dial to a MASQUE proxy's RFC 9298 CONNECT-UDP tunnel failed, so the
+    /// inner QUIC dial it was meant to carry never started.</summary>
+    /// <remarks>
+    /// <para><see cref="TlsConnectEvent.Exception"/> says why the outer dial failed — a refused
+    /// CONNECT-UDP, a TLS or TCP failure to the proxy itself, or an outer QUIC dial that never
+    /// completed — so a broken MASQUE hop and a broken origin are told apart by which of this
+    /// event and the inner dial's own failure fired.</para>
+    /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
+    /// </remarks>
+    MasqueTunnelClosed = 18,
 }
 
 /// <summary>Reports a structured, non-secret connection-establishment event.</summary>

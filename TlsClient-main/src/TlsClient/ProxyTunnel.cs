@@ -24,6 +24,9 @@ internal static class ProxyTunnel
                 origin,
                 proxy,
                 cancellationToken),
+            TlsProxyType.Masque => throw new NotSupportedException(
+                "MASQUE carries UDP; set options.Quic.Proxy to the MASQUE proxy and give options.Proxy a "
+                + "SOCKS5 or HTTP proxy for TCP."),
             _ => throw new ArgumentOutOfRangeException(nameof(proxy)),
         };
 
