@@ -50,6 +50,10 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// it.</summary>
     private readonly ITlsQuicDatagramTransport? _ownedOuter;
 
+    /// <summary>The outer transport as <see cref="_connection"/> reads it, so a writer can wake
+    /// the owner's receive.</summary>
+    private readonly WakeableTransport _wakeable;
+
     /// <summary>The CONNECT-UDP request stream.</summary>
     private readonly ulong _streamId;
 
@@ -79,14 +83,6 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// <see cref="_http3"/> between the dial and <see cref="DisposeAsync"/>.</summary>
     private Task? _owner;
 
-    /// <summary>The source that cancels the owner's current pump, or <see langword="null"/>
-    /// between pumps.</summary>
-    private CancellationTokenSource? _pumpInterrupt;
-
-    /// <summary>Wake-ups requested since the owner last reset it; see
-    /// <see cref="InterruptPump"/>.</summary>
-    private int _interruptRequests;
-
     /// <summary>The one payload the connection's full DATAGRAM queue refused, held so the
     /// channel's order survives the retry.</summary>
     private byte[]? _stalled;
@@ -104,12 +100,14 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     private TlsQuicMasqueTransport(
         TlsQuicConnection connection,
         TlsQuicHttp3Connection http3,
+        WakeableTransport wakeable,
         ITlsQuicDatagramTransport? ownedOuter,
         ulong streamId,
         IPEndPoint targetEndPoint)
     {
         _connection = connection;
         _http3 = http3;
+        _wakeable = wakeable;
         _ownedOuter = ownedOuter;
         _streamId = streamId;
         _targetEndPoint = targetEndPoint;
@@ -194,8 +192,12 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 AlpnProtocols = [TlsQuicClientHelloProfileFactory.Http3AlpnToken],
                 Tls = options.ConfigureOuterClientHello,
             };
+
+            // The connection reads through the wrapper for its whole life; nothing wakes the
+            // dial's own pumps, so they read exactly as they would from the socket.
+            var wakeable = new WakeableTransport(outer, proxy);
             connection = new TlsQuicConnection(
-                new TlsQuicConnectionOptions(outer, proxy, options.OuterSpec)
+                new TlsQuicConnectionOptions(wakeable, proxy, options.OuterSpec)
                 {
                     HandshakeDeadline = options.HandshakeDeadline,
                 },
@@ -326,6 +328,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             var transport = new TlsQuicMasqueTransport(
                 connection,
                 http3,
+                wakeable,
                 outer == options.OuterTransport ? null : outer,
                 stream.Id,
                 options.TargetEndPoint);
@@ -426,7 +429,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         {
             throw closed.InnerException as TlsQuicProxyException ?? Closed(closed);
         }
-        InterruptPump();
+        _wakeable.Wake();
     }
 
     /// <summary>Receives one inner UDP payload the proxy forwarded, with its RFC 9297 s2.1
@@ -519,12 +522,16 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// connection's queue, send, repeat until a send builds nothing (window shut or queue
     /// empty); a bounded loop, never a hot one. A payload the full queue refuses waits in
     /// <see cref="_stalled"/> so the channel keeps its order.</para>
-    /// <para>THE PUMP BLOCKS UNTIL THE PROXY SENDS OR A TIMER FIRES, and a writer interrupts
-    /// it through <see cref="InterruptPump"/>. That cancellation is safe to take mid-receive:
-    /// TlsQuicConnection.ReceiveWithinDeadlineAsync lets a caller's cancellation leave as
-    /// OperationCanceledException before any state changes (its catch filters on the
-    /// deadline's source with the caller's token NOT cancelled), and the HTTP/3 pump never
-    /// reaches TryProcess on that path; a datagram not yet read stays in the transport.</para>
+    /// <para>THE PUMP BLOCKS UNTIL THE PROXY SENDS OR A TIMER FIRES, and a writer wakes the
+    /// socket receive inside it through <see cref="WakeableTransport.Wake"/>, never the pump
+    /// itself. The woken receive returns an empty datagram, TlsQuicConnection's own wake-up
+    /// (ReceiveWithinDeadlineAsync returns one when a recovery, pacing or delayed-ACK deadline
+    /// falls due): no packet is read, PumpOnceAsync still runs its send pass, and the HTTP/3
+    /// pump still reaches TryProcess. A cancelled pump token would reach whatever the pump was
+    /// doing when the writer ran, including an answer whose DATAGRAM was already dequeued and
+    /// recorded as sent before the socket write threw: a payload lost, and a loss later
+    /// declared for a packet that never left. So the pump's token is the lifetime's
+    /// alone.</para>
     /// <para>ANY FAILURE ENDS THE TUNNEL: both channels complete with a
     /// <see cref="TlsQuicProxyError.MasqueTunnelClosed"/> naming the cause, which the next
     /// send or receive throws.</para>
@@ -555,39 +562,12 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 }
                 while (await _connection.SendPendingAsync(_lifetime.Token).ConfigureAwait(false));
 
-                using (var interrupt = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token))
+                if (!await _http3.PumpOnceAsync(_lifetime.Token).ConfigureAwait(false))
                 {
-                    // Interlocked.Exchange, not Volatile.Write: the store of the source and the
-                    // load of the request counter below must not reorder, or a writer that ran
-                    // between them sees null and this sees 0 - a lost wake-up with nothing else
-                    // to end the receive. Http3StreamMultiplexer.cs (TlsClient) explains the
-                    // same pair.
-                    Interlocked.Exchange(ref _pumpInterrupt, interrupt);
-                    try
-                    {
-                        if (Volatile.Read(ref _interruptRequests) > 0)
-                        {
-                            interrupt.Cancel();
-                        }
-                        if (!await _http3.PumpOnceAsync(interrupt.Token).ConfigureAwait(false))
-                        {
-                            throw new TlsQuicProxyException(
-                                TlsQuicProxyError.MasqueTunnelClosed,
-                                "The outer HTTP/3 connection failed with error "
-                                    + $"0x{_http3.ConnectionErrorCode:x}.");
-                        }
-                    }
-                    catch (OperationCanceledException) when (!_lifetime.IsCancellationRequested)
-                    {
-                        // Stepped aside for a writer; its payload is in the channel.
-                    }
-                    finally
-                    {
-                        // Reset BEFORE the refill at the top: a request cleared here belongs
-                        // to a payload already in the channel, which that refill takes.
-                        Interlocked.Exchange(ref _pumpInterrupt, null);
-                        Interlocked.Exchange(ref _interruptRequests, 0);
-                    }
+                    throw new TlsQuicProxyException(
+                        TlsQuicProxyError.MasqueTunnelClosed,
+                        "The outer HTTP/3 connection failed with error "
+                            + $"0x{_http3.ConnectionErrorCode:x}.");
                 }
 
                 foreach (var datagram in _http3.DrainDatagrams(_streamId))
@@ -634,21 +614,97 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         }
     }
 
-    /// <summary>Wakes the owner out of its pump so it takes a payload just queued.</summary>
-    /// <remarks>The counter covers the window before the owner has published its source: it
-    /// reads the counter after publishing and cancels its own pump if a request is waiting.
-    /// </remarks>
-    private void InterruptPump()
+    /// <summary>The outer transport as the connection reads it: every member forwards, except
+    /// that <see cref="Wake"/> ends the receive in progress, or the next one, with an empty
+    /// datagram instead of an exception.</summary>
+    /// <remarks>Disposing it disposes the inner transport; the tunnel never does, and disposes
+    /// only an inner it opened itself.</remarks>
+    /// <param name="inner">The socket, or the caller's
+    /// <see cref="TlsQuicMasqueOptions.OuterTransport"/>.</param>
+    /// <param name="proxy">What an empty datagram reports as its sender, as the connection's
+    /// own wake-up does.</param>
+    private sealed class WakeableTransport(ITlsQuicDatagramTransport inner, IPEndPoint proxy)
+        : ITlsQuicDatagramTransport
     {
-        Interlocked.Increment(ref _interruptRequests);
-        try
+        /// <summary>The source that ends the receive in progress, or <see langword="null"/>
+        /// between receives.</summary>
+        private CancellationTokenSource? _receiving;
+
+        /// <summary>1 from a <see cref="Wake"/> until the receive that answers it
+        /// returns.</summary>
+        private int _woken;
+
+        /// <inheritdoc/>
+        public int MaxDatagramPayloadSize => inner.MaxDatagramPayloadSize;
+
+        /// <inheritdoc/>
+        /// <remarks>Forwarded explicitly: the interface's default would report 0 whatever the
+        /// inner transport encapsulates.</remarks>
+        public int DatagramOverhead => inner.DatagramOverhead;
+
+        /// <summary>Ends the receive in progress with an empty datagram, or the next one before
+        /// it waits.</summary>
+        /// <remarks>The flag covers the window before a receive has published its source: the
+        /// receive reads it after publishing. Interlocked on both sides, so the store and the
+        /// load on each side do not reorder, or a wake-up that ran between them sees no source
+        /// while the receive sees no flag - a lost wake-up with nothing else to end the
+        /// receive. Http3StreamMultiplexer.cs (TlsClient) explains the same pair.</remarks>
+        public void Wake()
         {
-            Volatile.Read(ref _pumpInterrupt)?.Cancel();
+            Interlocked.Exchange(ref _woken, 1);
+            try
+            {
+                Volatile.Read(ref _receiving)?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // That receive has returned; the refill after its pump takes the payload.
+            }
         }
-        catch (ObjectDisposedException)
+
+        /// <inheritdoc/>
+        public ValueTask SendAsync(
+            IPEndPoint destination, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken) =>
+            inner.SendAsync(destination, payload, cancellationToken);
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// <para>THE CALLER'S CANCELLATION OUTRANKS A WAKE-UP. The connection's token carries
+        /// its deadlines, so an already-cancelled one leaves as the exception its
+        /// ReceiveWithinDeadlineAsync turns into loss recovery or abandonment; a pending wake-up
+        /// loses nothing by waiting, because its payload is already in the channel.</para>
+        /// <para>THE FLAG CLEARS WHEN THE RECEIVE RETURNS, whether a wake-up or a datagram
+        /// ended it. A wake-up cleared here belongs to a payload already in the channel, and the
+        /// owner's refill after this pump takes it.</para>
+        /// </remarks>
+        public async ValueTask<TlsQuicDatagramReceiveResult> ReceiveAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken)
         {
-            // The owner finished that pump and disposed its source; it refills next anyway.
+            cancellationToken.ThrowIfCancellationRequested();
+            using var receiving = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            Interlocked.Exchange(ref _receiving, receiving);
+            try
+            {
+                if (Volatile.Read(ref _woken) != 0)
+                {
+                    return new TlsQuicDatagramReceiveResult(0, proxy);
+                }
+                return await inner.ReceiveAsync(buffer, receiving.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                receiving.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                return new TlsQuicDatagramReceiveResult(0, proxy);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _receiving, null);
+                Interlocked.Exchange(ref _woken, 0);
+            }
         }
+
+        /// <inheritdoc/>
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
 
     /// <summary>A <see cref="TlsQuicProxyError.MasqueTunnelClosed"/> carrying its cause in

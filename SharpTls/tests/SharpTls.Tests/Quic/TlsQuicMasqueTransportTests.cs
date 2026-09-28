@@ -207,6 +207,43 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task AZeroContextIdInALongerEncodingIsStillContextZero()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        // RFC 9000 s16: 0x40 0x00 is 0 as a two-byte varint.
+        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x40, 0x00, 9, 8), ct);
+
+        var buffer = new byte[2048];
+        var received = await harness.Transport.ReceiveAsync(buffer, ct);
+        Assert.Equal(new byte[] { 9, 8 }, buffer[..received.Length]);
+    }
+
+    [Fact]
+    public async Task AnOversizeInboundDatagramIsDroppedAndCounted()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+        var ceiling = harness.Transport.MaxDatagramPayloadSize;
+
+        // Quarter Stream ID 0, Context ID 0, then one byte past the ceiling; the frame's Length
+        // needs a two-byte varint.
+        var length = 2 + ceiling + 1;
+        await harness.Peer.SendOneRttRawFrameAsync(
+            [0x31, (byte)(0x40 | (length >> 8)), (byte)(length & 0xFF), 0x00, 0x00, .. new byte[ceiling + 1]],
+            ct);
+        await harness.Peer.SendOneRttRawFrameAsync(DatagramFrame(0x00, 0x00, 5), ct);
+
+        var buffer = new byte[2048];
+        var received = await harness.Transport.ReceiveAsync(buffer, ct);
+        Assert.Equal(new byte[] { 5 }, buffer[..received.Length]);
+        Assert.Contains($"1 for exceeding {ceiling} bytes inbound", harness.Transport.DropSummary);
+    }
+
+    [Fact]
     public async Task AnOversizePayloadIsRefusedByNameNotDropped()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -227,13 +264,13 @@ public sealed class TlsQuicMasqueTransportTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var ct = cancellation.Token;
 
-        // OPEN FOR THE DIAL, which needs the window, and shut once the tunnel is up. The 5 s
-        // initial RTT keeps an RFC 9002 s6.2 probe out of the 200 ms window.
+        // OPEN FOR THE DIAL, which needs the window, and shut once the tunnel is up. An RFC 9002
+        // s6.2 probe may leave inside the 200 ms window below, but a probe carries only PING and
+        // a DATAGRAM frame is packed only past the gate, so no payload leaves the connection's
+        // queue and no room opens for the last send.
         var gate = new ScriptedSendGate { Open = true };
         await using var harness = await MasqueHarness.CreateAsync(
-            ct,
-            peerSettings: FullOffer,
-            outerSpec: MasqueHarness.OuterSpec(gate, initialRtt: TimeSpan.FromSeconds(5)));
+            ct, peerSettings: FullOffer, outerSpec: MasqueHarness.OuterSpec(gate));
         gate.Open = false;
 
         // What a shut outer absorbs before a send waits: TlsQuicConnection's DATAGRAM queue
@@ -249,7 +286,7 @@ public sealed class TlsQuicMasqueTransportTests
         Assert.False(sends[absorbed].IsCompleted, "a send beyond the bound completed");
 
         // A PROPERTY FLIP WAKES NOTHING: the owner is parked in its pump, and the last send in
-        // the channel write before it reaches InterruptPump. A PING from the proxy wakes it.
+        // the channel write before it wakes the owner. A PING from the proxy wakes it.
         gate.Open = true;
         await harness.Peer.SendOneRttRawFrameAsync([0x01], ct);
         await sends[absorbed].WaitAsync(TimeSpan.FromSeconds(5), ct);
@@ -258,6 +295,45 @@ public sealed class TlsQuicMasqueTransportTests
             harness, () => harness.Peer.ReceivedDatagrams.Count >= absorbed + 1, ct);
         Assert.Equal(
             Enumerable.Range(0, absorbed + 1).Select(i => new byte[] { 0x00, 0x00, (byte)i }),
+            harness.Peer.ReceivedDatagrams);
+    }
+
+    [Fact]
+    public async Task AWriterWakingTheOwnerMidAnswerLosesNoPayload()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        var gate = new ScriptedSendGate { Open = true };
+        HoldingTransport? outer = null;
+        await using var harness = await MasqueHarness.CreateAsync(
+            ct,
+            peerSettings: FullOffer,
+            outerSpec: MasqueHarness.OuterSpec(gate),
+            wrapOuter: inner => outer = new HoldingTransport(inner));
+        gate.Open = false;
+        var target = new IPEndPoint(IPAddress.Loopback, 443);
+
+        // Payload 1 waits in the connection's DATAGRAM queue once the shut gate has refused it.
+        var asked = gate.Asked.Count;
+        await harness.Transport.SendAsync(target, new byte[] { 1 }, ct);
+        while (gate.Asked.Count == asked)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(5), ct);
+        }
+
+        // The proxy's PING is answered inside the pump, and the answer carries payload 1,
+        // already dequeued and recorded as sent. Held at the socket, a second writer wakes the
+        // owner; the answer must still leave.
+        var held = outer!.HoldNextSend();
+        gate.Open = true;
+        await harness.Peer.SendOneRttRawFrameAsync([0x01], ct);
+        await held.WaitAsync(ct);
+        await harness.Transport.SendAsync(target, new byte[] { 2 }, ct);
+        outer.Release();
+
+        await PumpPeerUntilAsync(harness, () => harness.Peer.ReceivedDatagrams.Count >= 2, ct);
+        Assert.Equal(
+            [new byte[] { 0x00, 0x00, 1 }, new byte[] { 0x00, 0x00, 2 }],
             harness.Peer.ReceivedDatagrams);
     }
 
@@ -336,5 +412,52 @@ public sealed class TlsQuicMasqueTransportTests
             }
             await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
         }
+    }
+
+    /// <summary>An outer transport that forwards everything and can hold one send at the
+    /// socket, where a writer's wake-up once cancelled it.</summary>
+    /// <param name="inner">The harness's half of the pair.</param>
+    private sealed class HoldingTransport(ITlsQuicDatagramTransport inner) : ITlsQuicDatagramTransport
+    {
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private TaskCompletionSource? _held;
+
+        /// <inheritdoc/>
+        public int MaxDatagramPayloadSize => inner.MaxDatagramPayloadSize;
+
+        /// <summary>Holds the next send until <see cref="Release"/>.</summary>
+        /// <returns>A task that completes once that send is held.</returns>
+        internal Task HoldNextSend()
+        {
+            var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Volatile.Write(ref _held, held);
+            return held.Task;
+        }
+
+        /// <summary>Lets the held send go on.</summary>
+        internal void Release() => _release.TrySetResult();
+
+        /// <inheritdoc/>
+        public async ValueTask SendAsync(
+            IPEndPoint destination, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref _held, null) is { } held)
+            {
+                held.SetResult();
+                await _release.Task;
+            }
+            await inner.SendAsync(destination, payload, cancellationToken);
+        }
+
+        /// <inheritdoc/>
+        public ValueTask<TlsQuicDatagramReceiveResult> ReceiveAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken) =>
+            inner.ReceiveAsync(buffer, cancellationToken);
+
+        /// <summary>Nothing: the pair is the harness's to dispose.</summary>
+        /// <returns>A completed task.</returns>
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
