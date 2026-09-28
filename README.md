@@ -360,7 +360,7 @@ Failures are named on `TlsQuicProxyException.Error`, usually found as an inner e
 | `MasqueAuthenticationRejected` | 407: credentials refused or the account's traffic limit reached |
 | `MasqueTargetRejected` | 400: the proxy refused the target host and port |
 | `MasqueTunnelRefused` | Any other non-2xx status, or no tunnel within the deadline; the message names the dial stage |
-| `MasqueTunnelClosed` | The tunnel stream or outer connection ended; mid-life it surfaces on the next request and is retried like any transient h3 failure |
+| `MasqueTunnelClosed` | The tunnel stream or outer connection ended; mid-life it surfaces on the next request and is retried like any transient h3 failure. The message says how long the tunnel lived and how many datagrams crossed it each way; "sent into it and 0 received back" during the first dial is a residential exit that cannot carry UDP, and the cure is a fresh proxy session, not a retry of the same one |
 
 Verified live against Oxylabs (`masque.oxylabs.io:50000`): the tunnel comes up in under a
 second and Google-hosted targets answer.

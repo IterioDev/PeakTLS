@@ -428,6 +428,36 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task AProxyEndingTheTunnelStreamSaysWhatCrossedIt()
+    {
+        // A field log of 2026-09-28: the tunnel opened, the inner Initial went in, and the
+        // proxy FINned the stream 0.7 s later with nothing coming back - a residential exit
+        // that cannot carry UDP. The message must say so and point at the proxy session.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        await harness.Transport.SendAsync(
+            new IPEndPoint(IPAddress.Loopback, 443), new byte[] { 0xC0, 1, 2, 3 }, ct);
+        while (harness.Peer.ReceivedDatagrams.Count == 0)
+        {
+            await harness.PumpPeerAsync(ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(5), ct);
+        }
+
+        // RFC 9000 s19.8: the FIN sits at the offset after every byte already sent, the 200.
+        var offset = (ulong)ResponseBytes(200, [], []).Length;
+        await harness.Peer.SendStreamFramesAsync([Stream(0, offset, [], fin: true)], ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelClosed, error.Error);
+        Assert.Contains("ended the tunnel stream", error.Message);
+        Assert.Contains("1 datagram(s) sent into it and 0 received back", error.Message);
+        Assert.Contains("fresh proxy session", error.Message);
+    }
+
+    [Fact]
     public async Task AnOuterConnectionCloseSurfacesAsTunnelClosed()
     {
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));

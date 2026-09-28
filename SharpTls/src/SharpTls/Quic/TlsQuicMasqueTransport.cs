@@ -102,6 +102,16 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// <summary>1 once <see cref="DisposeAsync"/> has started.</summary>
     private int _disposed;
 
+    /// <summary>Payloads handed to the outer connection's DATAGRAM queue, and datagrams
+    /// delivered to <see cref="ReceiveAsync"/>: the two numbers that say whether a tunnel the
+    /// proxy ended ever carried anything back.</summary>
+    private ulong _sentIntoTunnel;
+
+    private ulong _receivedFromTunnel;
+
+    /// <summary>When the proxy answered 2xx, for the age in a tunnel-ended message.</summary>
+    private readonly long _openedAt = Stopwatch.GetTimestamp();
+
     private TlsQuicMasqueTransport(
         TlsQuicConnection connection,
         TlsQuicHttp3Connection http3,
@@ -127,6 +137,25 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// <summary>The largest inner UDP payload one outer DATAGRAM frame carries: the outer
     /// connection's DATAGRAM frame payload minus the Quarter Stream ID and the Context ID.</summary>
     public int MaxDatagramPayloadSize { get; }
+
+    /// <summary>The message for a tunnel the proxy ended: how, how long after it opened, and
+    /// what crossed it in each direction. A tunnel that carried datagrams in and none back is
+    /// an exit that could not reach the target over UDP (a residential exit's UDP is the
+    /// exit's, not the proxy front's), so the message says to change proxy session rather than
+    /// retry the same one.</summary>
+    private string TunnelEnded(string how)
+    {
+        var age = Stopwatch.GetElapsedTime(_openedAt);
+        var text = $"{how} {age.TotalSeconds:F1} s after it opened, with {_sentIntoTunnel} "
+            + $"datagram(s) sent into it and {_receivedFromTunnel} received back.";
+        if (_sentIntoTunnel > 0 && _receivedFromTunnel == 0)
+        {
+            text += " Nothing ever came back: the exit behind this proxy session could not carry"
+                + " UDP to the target. That is a property of the session, so retry with a fresh"
+                + " proxy session rather than the same one.";
+        }
+        return text;
+    }
 
     /// <summary>What was dropped on the way in, by reason, for a diagnostic.</summary>
     internal string DropSummary =>
@@ -634,6 +663,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                             break;
                         }
                         _stalled = null;
+                        _sentIntoTunnel++;
                     }
                 }
                 while (await _connection.SendPendingAsync(_lifetime.Token).ConfigureAwait(false));
@@ -663,6 +693,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                         continue;
                     }
                     _inbound.Writer.TryWrite(datagram[cursor..]);
+                    _receivedFromTunnel++;
                 }
 
                 var response = _http3.ResponseFor(_streamId);
@@ -670,9 +701,10 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 {
                     throw new TlsQuicProxyException(
                         TlsQuicProxyError.MasqueTunnelClosed,
-                        response is { IsReset: true }
-                            ? $"The proxy reset the tunnel stream with error 0x{response.ResetErrorCode:x}."
-                            : "The proxy ended the tunnel stream.");
+                        TunnelEnded(
+                            response is { IsReset: true }
+                                ? $"The proxy reset the tunnel stream with error 0x{response.ResetErrorCode:x}"
+                                : "The proxy ended the tunnel stream"));
                 }
             }
         }

@@ -144,7 +144,7 @@ All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException
 | `MasqueAuthenticationRejected` | the CONNECT-UDP response is 407 |
 | `MasqueTargetRejected` | the CONNECT-UDP response is 400 |
 | `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status, or the dial missed its deadline in any of the four steps (the message names the stage) |
-| `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout |
+| `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout. The message says how long the tunnel lived and how many datagrams crossed it each way; datagrams in and none back is an exit that cannot carry UDP to the target, cured by a fresh proxy session rather than a retry of the same one |
 
 Once `MasqueTunnelClosed` fires, every subsequent `SendAsync` and `ReceiveAsync` call throws it
 immediately; there is no partial-failure state.
