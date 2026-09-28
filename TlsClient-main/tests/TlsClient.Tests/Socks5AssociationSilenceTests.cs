@@ -213,8 +213,15 @@ public sealed class Socks5AssociationSilenceTests
 
         // The dialled-then-pooled-then-used shape, compressed. The idle window is what the event
         // has to carry, and nothing else on the record shows it.
+        // Measured on Stopwatch, the clock the event uses: Task.Delay alone runs on the timer
+        // queue and can return a fraction of a millisecond before Stopwatch agrees the window
+        // has passed, which read as a gap of 0.4994 s against a 0.5 s window on a CI runner.
         var idle = Silence * 2;
-        await Task.Delay(idle);
+        var idleStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (System.Diagnostics.Stopwatch.GetElapsedTime(idleStarted) < idle)
+        {
+            await Task.Delay(idle - System.Diagnostics.Stopwatch.GetElapsedTime(idleStarted));
+        }
         using var caller = new CancellationTokenSource(Silence * 8);
         await Assert
             .ThrowsAnyAsync<Exception>(() => SendAsync(connection, null, caller.Token))

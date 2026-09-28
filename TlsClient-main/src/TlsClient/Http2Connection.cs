@@ -1104,6 +1104,16 @@ internal sealed class Http2Connection : IHttpConnection
                 // detected, so the GOAWAY carries the one the throw site declared rather
                 // than a blanket PROTOCOL_ERROR.
                 await TrySendGoAwayAsync(protocolException.Http2ErrorCode).ConfigureAwait(false);
+
+                // Section 5.4.1 then says to close the TCP connection, and RFC 1122 section
+                // 4.2.2.13 says a close with unread bytes in the receive buffer is a reset,
+                // not a FIN - and a reset discards what this side sent in flight, the GOAWAY
+                // included. The bytes that are unread here are the offending frame's own
+                // payload, which this loop stopped reading at its header. Read and discard
+                // them, briefly, so the close that follows is a FIN the peer reads after the
+                // GOAWAY. Seen as a CI flake: a loopback server that never got the GOAWAY and
+                // saw "connection forcibly closed" instead.
+                await DrainBeforeCloseAsync().ConfigureAwait(false);
             }
             FailAll(
                 exception is TlsHttpProtocolException
@@ -1111,6 +1121,31 @@ internal sealed class Http2Connection : IHttpConnection
                     : new IOException("The HTTP/2 connection failed.", exception),
                 preserveEndedStreams: true);
             SignalStreamSlot();
+        }
+    }
+
+    /// <summary>How long a connection ended by a protocol error keeps reading and discarding
+    /// what the peer already sent, so its close is a FIN rather than a reset.</summary>
+    private static readonly TimeSpan DrainBeforeCloseBudget = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Reads and discards inbound bytes until the peer closes or
+    /// <see cref="DrainBeforeCloseBudget"/> runs out. A courtesy to the GOAWAY already sent;
+    /// never a second failure.</summary>
+    private async ValueTask DrainBeforeCloseAsync()
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        budget.CancelAfter(DrainBeforeCloseBudget);
+        var sink = new byte[16 * 1024];
+        try
+        {
+            while (await _transport.Stream.ReadAsync(sink, budget.Token).ConfigureAwait(false) > 0)
+            {
+            }
+        }
+        catch (Exception)
+        {
+            // The peer closed first, the budget ran out, or the connection is being disposed:
+            // each one ends the drain, and the protocol error is the failure being reported.
         }
     }
 
