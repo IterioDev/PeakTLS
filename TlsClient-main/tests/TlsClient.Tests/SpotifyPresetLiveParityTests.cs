@@ -50,7 +50,7 @@ public sealed class SpotifyPresetLiveParityTests
 
     /// <summary>The 9.1.86 spclient GET image without the per-account credentials: the same
     /// sequence samples/TlsClient.SpotifyIos26/Program.cs adds, and USAGE.md section 3c shows.</summary>
-    private static HttpRequestMessage NewRequest()
+    internal static HttpRequestMessage NewRequest()
     {
         var request = new HttpRequestMessage(HttpMethod.Get, Endpoint);
         request.AddHeader("spotify-app-version", "9.1.86.2428");
@@ -117,6 +117,15 @@ public sealed class SpotifyPresetLiveParityTests
         }
 
         using var document = await DialAsync();
+        AssertHandsetFingerprint(document);
+    }
+
+    /// <summary>The field-by-field assertions against the 2026-09-26 capture: JA3 hash and
+    /// text, cipher list, transport-parameter rotation, SETTINGS, and header order. Shared with
+    /// <c>MasqueLiveTests</c>, which dials the same endpoint through a MASQUE tunnel and expects
+    /// the tunnel to be invisible to the fingerprint.</summary>
+    internal static void AssertHandsetFingerprint(JsonDocument document)
+    {
         var root = document.RootElement;
         var tls = root.GetProperty("tls");
         var http3 = root.GetProperty("http3");
