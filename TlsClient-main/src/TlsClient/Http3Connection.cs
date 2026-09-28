@@ -1150,6 +1150,9 @@ internal sealed class Http3Connection : IHttpConnection
             TlsQuicHttp3RequestRefusal.FieldSectionTooLargeForPeer => new HttpRequestException(
                 "The HTTP/3 request field section exceeds the peer's advertised " +
                 "SETTINGS_MAX_FIELD_SECTION_SIZE."),
+            TlsQuicHttp3RequestRefusal.ExtendedConnectNotEnabled => new TlsHttpProtocolException(
+                "The peer did not send SETTINGS_ENABLE_CONNECT_PROTOCOL, so an extended " +
+                "CONNECT cannot be sent on this connection (RFC 8441 section 3)."),
             _ => new TlsHttpProtocolException(
                 $"The HTTP/3 request was refused ({refusal})."),
         };

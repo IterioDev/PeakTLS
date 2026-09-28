@@ -214,6 +214,9 @@ internal sealed class TlsQuicHttp3Spec
     /// checkable rather than copied.</remarks>
     internal const ulong H3DatagramIdentifier = 0x33;
 
+    /// <summary>RFC 9220 s3's <c>SETTINGS_ENABLE_CONNECT_PROTOCOL</c>.</summary>
+    internal const ulong EnableConnectProtocolIdentifier = 0x08;
+
     /// <summary>The largest <see cref="QpackEncoderDynamicTableCapacity"/> accepted: what a
     /// four-byte varint carries, 2^30 - 1.</summary>
     /// <remarks>Not a capture value. A capacity is a varint that runs to 2^62 - 1 on the wire;

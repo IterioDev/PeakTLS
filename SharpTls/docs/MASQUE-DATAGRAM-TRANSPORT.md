@@ -1,0 +1,175 @@
+# MASQUE CONNECT-UDP datagram transport
+
+`TlsQuicMasqueTransport` is the third `ITlsQuicDatagramTransport` implementation, alongside
+`TlsQuicUdpDatagramTransport` and `TlsQuicSocks5Transport` (see
+`SOCKS5-DATAGRAM-TRANSPORT.md`). It carries an unchanged inner QUIC connection through an
+RFC 9298 CONNECT-UDP proxy running over HTTP/3, instead of over a raw socket or a SOCKS5 UDP
+association. Everything above the `ITlsQuicDatagramTransport` seam — the inner connection,
+`TlsQuicHttp3Connection`, TlsClient's `Http3Connection`, the fingerprint knobs and their tests —
+is unaware which transport it is talking to.
+
+One outer QUIC connection is opened per inner connection, and one CONNECT-UDP request stream per
+outer connection. The outer connection's only job is to move the inner connection's datagrams to
+and from the proxy; its own TLS fingerprint is irrelevant, since only the proxy ever terminates
+it. The exit node re-emits the inner connection's datagrams byte for byte, so the inner
+connection's QUIC fingerprint — transport parameter rotation, packet sizes, everything —
+reaches the target exactly as the client built it.
+
+## The dial
+
+`TlsQuicMasqueTransport.ConnectAsync` runs five steps under one `HandshakeDeadline`:
+
+1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, standard (non-overridden)
+   certificate validation, PMTUD off, both path MTUs fixed at 1392. No default transport
+   parameter set advertises `max_datagram_frame_size`, so the outer ClientHello adds it
+   explicitly as a literal transport parameter (id `0x20`); without it the proxy has no basis to
+   accept HTTP/3 datagrams (RFC 9221 §3). The outer HTTP/3 settings send
+   `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1).
+2. **Wait for the proxy's SETTINGS.** The proxy must advertise
+   `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` (RFC 8441 §3, carried into HTTP/3 by RFC 9220 §3) and
+   `SETTINGS_H3_DATAGRAM = 1` (RFC 9297 §2.1.1), and its transport parameters must carry a
+   `max_datagram_frame_size` large enough that the resulting datagram capacity is at least 1200
+   bytes — an inner QUIC Initial (RFC 9000 §14.1). Any of these missing, or the capacity short,
+   fails the dial with `MasqueNotOffered`, naming what was missing. This is the transport's only
+   size floor; nothing else checks a size at dial time.
+3. **The CONNECT-UDP request**, sent as an extended CONNECT (RFC 8441 §4, RFC 9220 §3) with the
+   HEADERS frame **not** carrying FIN — RFC 9297 §2.1 forbids HTTP datagrams unless the stream's
+   send side stays open, and RFC 9298 §3.1 ties the tunnel's lifetime to the request stream:
+
+   ```
+   :method               CONNECT
+   :protocol             connect-udp
+   :scheme               https
+   :authority            {proxy host}:{proxy port}
+   :path                 /.well-known/masque/udp/{target host}/{target port}/
+   proxy-authorization   Basic {base64(user:pass)}
+   capsule-protocol      ?1
+   ```
+
+   The path is the RFC 9298 §2 URI template; the target host is percent-encoded per that
+   section (a plain hostname needs no encoding). `capsule-protocol: ?1` is an RFC 9297 §3.4
+   SHOULD that this proxy expects. Response capsules are never parsed — a tunnel that never
+   FINs would otherwise buffer without bound — so any body chunks the proxy sends are dropped as
+   they arrive.
+4. **The response.** Any 2xx status means the tunnel is up (RFC 9298 §3.5). 407 is
+   `MasqueAuthenticationRejected` (credentials refused, or the account's traffic limit was
+   reached). 400 is `MasqueTargetRejected`, naming the target host and port as sent. Any other
+   status is `MasqueTunnelRefused`, carrying the status. A RESET_STREAM or connection close
+   before the header section arrives is `MasqueTunnelClosed`, carrying the proxy's error code.
+5. **Start the owner task and return** a live `TlsQuicMasqueTransport`.
+
+## Framing on the wire
+
+Every inner datagram travels inside one outer HTTP/3 DATAGRAM frame (frame type `0x31`,
+RFC 9221 §4):
+
+```
+0x31 frame:  [ length varint ][ quarter stream id varint ][ context id: 0x00 ][ inner payload ]
+                                \_______________ HTTP Datagram Payload ______________/
+```
+
+The quarter stream id is the CONNECT-UDP request stream id divided by four (RFC 9297 §2.1) — it
+is how the HTTP/3 layer routes a datagram to the exchange that opened the tunnel; that layer
+knows nothing about the byte after it. The context id is always `0x00`, meaning "UDP payload,
+no extra encoding" (RFC 9298 §4); this transport is the only layer that reads or writes it.
+Sending strips neither byte from the inner payload — both are prefixed on the way out and
+stripped on the way back in — so the inner connection's own datagram is passed through
+unmodified.
+
+DATAGRAM frames are ack-eliciting but never retransmitted after loss (RFC 9221 §5.2): a lost
+inner datagram is the inner connection's problem to notice and recover from, exactly as it would
+be on a direct UDP path.
+
+## Ownership and backpressure
+
+The outer `TlsQuicConnection` is not thread-safe, so exactly one owner task touches it after
+`ConnectAsync` returns. Each iteration: pull one payload from the outbound channel with a
+non-blocking read (an awaiting read would starve the pump), prefix it with the quarter stream id
+and context id and hand it to the outer connection's send queue, drive the outer connection's
+send path, then pump the HTTP/3 connection once and drain any received datagrams into the inbound
+channel.
+
+Two queues sit on either side of that loop:
+
+- **Outbound**: a bounded channel, capacity 64, `BoundedChannelFullMode.Wait`. `SendAsync`
+  writes to it and awaits when it is full.
+- **The outer connection's own FIFO**: a second 64-entry bound inside `TlsQuicConnection` itself,
+  ahead of the wire.
+- **Inbound**: an unbounded channel that `ReceiveAsync` reads from.
+
+Backpressure is delay, never drop, at both bounds — RFC 9221 §5.4 permits either, and this
+transport always chooses delay. A congestion-window-blocked outer connection simply leaves
+datagrams queued until the window opens; an inner burst that fills the outbound channel makes
+the inner connection's own `SendAsync` await, rather than silently losing datagrams.
+
+Because the owner task otherwise blocks inside the outer connection's receive until the proxy
+sends something or a timer fires, a writer that shows up mid-block needs to wake it: the same
+pump-interrupt mechanism `Http3StreamMultiplexer` already uses — a cancellation source the
+outbound writer signals and the owner task replaces on the next iteration, which the connection's
+receive path treats as ordinary caller cancellation, not an error.
+
+## Error model
+
+All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException`:
+
+| Value | Fires when |
+| --- | --- |
+| `MasqueNotOffered` | the proxy's SETTINGS or transport parameters lack extended CONNECT, HTTP/3 datagrams, or enough datagram capacity for a 1200-byte inner Initial |
+| `MasqueAuthenticationRejected` | the CONNECT-UDP response is 407 |
+| `MasqueTargetRejected` | the CONNECT-UDP response is 400 |
+| `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status |
+| `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout |
+
+Once `MasqueTunnelClosed` fires, every subsequent `SendAsync` and `ReceiveAsync` call throws it
+immediately; there is no partial-failure state.
+
+Local misconfiguration is not a proxy error: sending a payload larger than
+`MaxDatagramPayloadSize` throws `ArgumentOutOfRangeException` naming the ceiling, since that is a
+caller mistake, not something the network refused.
+
+## MTU arithmetic
+
+Outer packets are fixed at 1392 bytes. Working down from there to the inner connection's usable
+datagram capacity:
+
+| Deduction | Bytes | Running total |
+| --- | --- | --- |
+| Outer packet size | — | 1392 |
+| Short header (1) + 8-byte DCID + packet number (up to 4) + AEAD tag (16) | 29 | 1363 |
+| DATAGRAM frame type (1) + length varint (2) | 3 | 1360 |
+| Quarter stream id (1) + context id (1) | 2 | **1358** |
+
+1358 is the inner connection's usable datagram payload for an 8-byte server connection ID; a
+longer connection ID lowers it by exactly the difference. The transport asserts this capacity is
+at least 1200 bytes — an inner Initial (RFC 9000 §14.1) — at dial time (step 2 above) and fails
+with `MasqueNotOffered` rather than let a handshake hang. The proxy's own 1500-byte UDP datagram
+ceiling never binds here: the 1392-byte outer packet already sits well under it.
+
+## `DropSummary` and test-only options
+
+`DropSummary` counts datagrams that were discarded without failing the connection:
+
+- **Wrong context id** — an inbound HTTP datagram whose context id is not `0x00` (RFC 9298 §4).
+- **Oversize inbound** — a decapsulated payload larger than the receive buffer.
+- **Wrong stream** — an HTTP datagram whose quarter stream id names a stream other than the one
+  the tunnel opened (counted by the HTTP/3 layer, surfaced here).
+
+None of these end the tunnel; they are defence in depth against a malfunctioning or hostile
+proxy, the same posture `SOCKS5-DATAGRAM-TRANSPORT.md`'s inbound validation takes.
+
+`TlsQuicMasqueOptions` also carries a small set of options that exist only for tests, never for
+production dials: `OuterTransport` substitutes a scripted outer datagram transport in place of a
+real UDP socket, `OuterRemoteEndPoint` pins the outer connection's peer address without a DNS
+resolution, and `DangerouslySkipOuterCertificateValidation` turns off the outer connection's
+certificate validation. All three exist so the offline test suite can script a fake MASQUE proxy
+without a network; none of them is reachable from `TlsProxy.Masque(...)`.
+
+## See also
+
+- `SOCKS5-DATAGRAM-TRANSPORT.md` — the other `ITlsQuicDatagramTransport` proxy path, and why a
+  provider that only tunnels UDP into TCP cannot carry QUIC at all.
+- RFC 9221 (QUIC Datagram), §3, §4, §5.2, §5.4.
+- RFC 9297 (HTTP Datagrams and the Capsule Protocol), §2.1, §3.4.
+- RFC 9298 (CONNECT-UDP), §2, §3.1, §3.5, §4.
+- RFC 8441 (Bootstrapping WebSockets with HTTP/2, extended CONNECT), §3, §4.
+- RFC 9220 (Bootstrapping WebSockets with HTTP/3), §3.
