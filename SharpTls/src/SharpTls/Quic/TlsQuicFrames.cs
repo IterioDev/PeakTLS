@@ -990,9 +990,9 @@ internal static class TlsQuicFrames
             // RFC 9221 s3's send-side MUST NOT ("An endpoint MUST NOT send DATAGRAM
             // frames until it has received the max_datagram_frame_size transport
             // parameter with a non-zero value during the handshake") is enforced above
-            // this writer, not in it: nothing here yet reads a peer's value of that
-            // parameter, so gating on it is left to whichever future caller queues a
-            // DATAGRAM to send.
+            // this writer, not in it: TlsQuicConnection.TryQueueDatagram, the sender,
+            // reads the peer's value (PeerMaxDatagramFrameSize, null for absent or zero)
+            // and refuses to queue when there is none or the payload exceeds it.
             case TlsQuicFrameType.Datagram:
                 TlsQuicConnectionFrames.WriteDatagramFrameFields(destination, frame);
                 return;

@@ -596,12 +596,13 @@ explicit RFC 8701 check will not find one, and should not conclude the rule is u
 
 `Quic/TlsQuicFrames.cs` now writes RFC 9221 §4 DATAGRAM frames in their 0x31 (length-bearing)
 form; it still refuses the 0x30 (length-less) form, pinned by
-`TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten`. Nothing yet queues a DATAGRAM to
-send, so the RFC 9221 §3 MUST NOT quoted beside the old refusal ("An endpoint MUST NOT send
-DATAGRAM frames until it has received the max_datagram_frame_size transport parameter with a
-non-zero value during the handshake") is not currently violated, but it is no longer satisfied
-by construction the way it was before this writer existed - a future sender must gate on the
-peer's advertised value itself.
+`TlsQuicFramesTests.TheLengthLessDatagramFormIsNeverWritten`. The RFC 9221 §3 MUST NOT quoted
+beside the old refusal ("An endpoint MUST NOT send DATAGRAM frames until it has received the
+max_datagram_frame_size transport parameter with a non-zero value during the handshake") is no
+longer satisfied by construction the way it was before this writer existed; the sender,
+`TlsQuicConnection.TryQueueDatagram`, enforces it by reading the peer's advertised value
+(`PeerMaxDatagramFrameSize`, null when the peer sent none or zero) and refusing to queue when
+there is none or the payload exceeds it.
 
 The receive side was NOT, and is now (**FIXED**, `d6ffad4`). RFC 9221 §3 requires
 PROTOCOL_VIOLATION on a DATAGRAM frame received without having advertised support and on one

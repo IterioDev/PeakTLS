@@ -6,6 +6,8 @@ namespace TlsClient.Tests;
 
 /// <summary>Dials through a real MASQUE proxy. Runs only when TLSCLIENT_LIVE_MASQUE holds
 /// https://user:pass@host:port; the credential never lives in this repository.</summary>
+/// <remarks>Without that variable each test returns green rather than skipping, so a pass
+/// proves nothing unless the variable was set.</remarks>
 public sealed class MasqueLiveTests
 {
     private static TlsSessionOptions? Options(Action<TlsSessionOptions>? adjust = null)

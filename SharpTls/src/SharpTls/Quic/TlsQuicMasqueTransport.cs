@@ -37,7 +37,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
 
     /// <summary>How many framed payloads <see cref="SendAsync"/> queues ahead of the owner
     /// before it waits.</summary>
-    /// <remarks>The second of three stages a blocked outer fills, after the connection's own
+    /// <remarks>The third of three stages a blocked outer fills, after the connection's own
     /// DATAGRAM queue (TlsQuicConnection.DatagramQueueBound, 64) and the one payload the owner
     /// holds in <see cref="_stalled"/>.</remarks>
     private const int OutboundBound = 64;
@@ -141,8 +141,9 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// RFC 9297 s2.1.1's SETTINGS_H3_DATAGRAM) plus RFC 9221 s3's max_datagram_frame_size, the
     /// extended CONNECT itself, and its response.</para>
     /// <para>A REFUSED DIAL SAYS GOODBYE: an outer connection that got as far as HTTP/3 is
-    /// closed with H3_NO_ERROR (RFC 9114 s8.1) before the exception leaves, so the proxy does
-    /// not hold a half-open connection until its idle timeout.</para>
+    /// closed with the RFC 9114 s8.1 code it recorded (H3_DATAGRAM_ERROR, say), or H3_NO_ERROR
+    /// when it recorded none, before the exception leaves, so the proxy does not hold a
+    /// half-open connection until its idle timeout.</para>
     /// </remarks>
     /// <param name="options">The tunnel to build.</param>
     /// <param name="cancellationToken">Cancels the dial.</param>
@@ -150,6 +151,9 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// <exception cref="TlsQuicProxyException">The proxy does not offer CONNECT-UDP, refused
     /// the request, reset it, closed the outer connection, or the tunnel did not come up
     /// within <see cref="TlsQuicMasqueOptions.HandshakeDeadline"/>.</exception>
+    /// <exception cref="ArgumentException"><see cref="TlsQuicMasqueOptions.OuterSpec"/>
+    /// advertises fewer than three unidirectional streams (initial_max_streams_uni), so the
+    /// proxy could never open its control and QPACK streams (RFC 9114 s6.2).</exception>
     public static async Task<TlsQuicMasqueTransport> ConnectAsync(
         TlsQuicMasqueOptions options, CancellationToken cancellationToken)
     {
@@ -383,13 +387,13 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         finally
         {
             // A refused dial says goodbye: the proxy should not hold a half-open connection
-            // until its idle timeout. Best effort, never a second exception.
+            // until its idle timeout. The close carries the s8.1 code the HTTP/3 layer recorded,
+            // or H3_NO_ERROR if it recorded none. Best effort, never a second exception.
             if (http3Owned is not null)
             {
                 try
                 {
-                    await http3Owned.CloseAsync(
-                            TlsQuicHttp3ErrorCode.H3NoError, CancellationToken.None)
+                    await http3Owned.CloseWithCurrentErrorAsync(CancellationToken.None)
                         .ConfigureAwait(false);
                 }
                 catch (Exception)
@@ -483,8 +487,8 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         return new TlsQuicDatagramReceiveResult(datagram.Length, _targetEndPoint);
     }
 
-    /// <summary>Ends the tunnel: stops the owner, closes the outer connection with
-    /// H3_NO_ERROR (RFC 9114 s8.1), and fails every pending and later send and receive with
+    /// <summary>Ends the tunnel: stops the owner, closes the outer connection with the
+    /// RFC 9114 s8.1 code the HTTP/3 layer recorded (H3_NO_ERROR if none), and fails every pending and later send and receive with
     /// <see cref="TlsQuicProxyError.MasqueTunnelClosed"/>. Idempotent.</summary>
     /// <remarks>An outer transport the caller supplied through
     /// <see cref="TlsQuicMasqueOptions.OuterTransport"/> stays the caller's to dispose.
@@ -514,10 +518,12 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             }
         }
 
-        // Only now: the owner has exited, so nothing else is driving the connection.
+        // Only now: the owner has exited, so nothing else is driving the connection. A tunnel
+        // that took an HTTP/3 connection error (H3_DATAGRAM_ERROR, say) tells the proxy so; a
+        // healthy one closes with H3_NO_ERROR.
         try
         {
-            await _http3.CloseAsync(TlsQuicHttp3ErrorCode.H3NoError, CancellationToken.None)
+            await _http3.CloseWithCurrentErrorAsync(CancellationToken.None)
                 .ConfigureAwait(false);
         }
         catch (Exception)

@@ -622,12 +622,13 @@ internal sealed class Http3Connection : IHttpConnection
                     $"HTTP/3 (it selected '{tlsClient?.NegotiatedApplicationProtocol}').");
             }
 
-            // The spec's default settings carry SETTINGS_H3_DATAGRAM (0x33) = 1, which the
-            // constructor refuses unless the ClientHello also advertised a non-zero
-            // max_datagram_frame_size. The default transport parameter preset is
-            // RfcMinimumParameters, which does NOT carry it — callers wanting H3 datagrams
-            // must select or build a preset that does, or this constructor is the one that
-            // tells them, rather than a peer's H3_SETTINGS_ERROR.
+            // The spec's default settings are empty, so they carry no SETTINGS_H3_DATAGRAM
+            // (0x33). A caller who adds 0x33 = 1 must also advertise a non-zero
+            // max_datagram_frame_size (0x20) transport parameter in the ClientHello, which the
+            // constructor checks before it accepts the setting. The default transport parameter
+            // preset is RfcMinimumParameters, which does NOT carry it — callers wanting H3
+            // datagrams must select or build a preset that does, or this constructor is the one
+            // that tells them, rather than a peer's H3_SETTINGS_ERROR.
             var http3 = new TlsQuicHttp3Connection(connection, configuration.Quic.Http3Spec);
             http3.OpenLocalStreams();
             if (!await connection.SendPendingAsync(cancellationToken).ConfigureAwait(false))

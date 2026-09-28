@@ -17,10 +17,17 @@ reaches the target exactly as the client built it.
 
 ## The dial
 
-`TlsQuicMasqueTransport.ConnectAsync` runs five steps under one `HandshakeDeadline`:
+`TlsQuicMasqueTransport.ConnectAsync` runs four steps under one deadline. The outer
+connection's own `HandshakeDeadline` bounds step 1; a backstop 1 s behind it bounds DNS and steps
+2 to 4, and the grace lets a stalled outer handshake be reported by the receiver (what it
+discarded and why) rather than by a bare cancellation. A missed deadline is `MasqueTunnelRefused`,
+and its message names the stage the dial was in. An outer spec advertising fewer than three
+unidirectional streams (RFC 9114 §6.2) is refused with `ArgumentException` before any packet
+leaves, since the proxy could never open its control stream and send SETTINGS.
 
-1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, standard (non-overridden)
-   certificate validation, PMTUD off, both path MTUs fixed at 1392. The default transport
+1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, chain and hostname validation on,
+   revocation checking off (`X509RevocationMode.NoCheck`: an OCSP fetch inside the pump loop
+   would spend the handshake deadline between two datagrams), PMTUD off, both path MTUs fixed at 1392. The default transport
    parameter list is `initial_source_connection_id` alone, which advertises no flow control at
    all: the proxy could open zero unidirectional streams, would never send its SETTINGS, and the
    dial would idle out after a completed handshake. The outer ClientHello therefore places the
@@ -44,14 +51,15 @@ reaches the target exactly as the client built it.
    ```
    :method               CONNECT
    :protocol             connect-udp
-   :scheme               https
    :authority            {proxy host}:{proxy port}
+   :scheme               https
    :path                 /.well-known/masque/udp/{target host}/{target port}/
    proxy-authorization   Basic {base64(user:pass)}
    capsule-protocol      ?1
    ```
 
-   The path is the RFC 9298 §2 URI template; the target host is percent-encoded per that
+   The fields go out in exactly this order, pinned by
+   `TlsQuicMasqueTransportTests.TheConnectUdpRequestIsExactlyWhatTheGuideAsksFor`. The path is the RFC 9298 §2 URI template; the target host is percent-encoded per that
    section (a plain hostname needs no encoding). `capsule-protocol: ?1` is an RFC 9297 §3.4
    SHOULD that this proxy expects. Response capsules are never parsed — a tunnel that never
    FINs would otherwise buffer without bound — so any body chunks the proxy sends are dropped as
@@ -61,7 +69,8 @@ reaches the target exactly as the client built it.
    reached). 400 is `MasqueTargetRejected`, naming the target host and port as sent. Any other
    status is `MasqueTunnelRefused`, carrying the status. A RESET_STREAM or connection close
    before the header section arrives is `MasqueTunnelClosed`, carrying the proxy's error code.
-5. **Start the owner task and return** a live `TlsQuicMasqueTransport`.
+
+With a 2xx in hand the dial starts the owner task and returns a live `TlsQuicMasqueTransport`.
 
 ## Framing on the wire
 
@@ -88,19 +97,26 @@ be on a direct UDP path.
 ## Ownership and backpressure
 
 The outer `TlsQuicConnection` is not thread-safe, so exactly one owner task touches it after
-`ConnectAsync` returns. Each iteration: pull one payload from the outbound channel with a
-non-blocking read (an awaiting read would starve the pump), prefix it with the quarter stream id
-and context id and hand it to the outer connection's send queue, drive the outer connection's
-send path, then pump the HTTP/3 connection once and drain any received datagrams into the inbound
+`ConnectAsync` returns. Each iteration drains every queued payload: the held one first, then
+non-blocking reads from the outbound channel (an awaiting read would starve the pump), each handed
+to the HTTP/3 layer, which prefixes the quarter stream id (`SendAsync` already wrote the context
+id) and queues it on the outer connection, until that queue refuses one or the channel is empty.
+A refused payload is held in `_stalled` and goes first next time, so the channel's order holds.
+The owner drives the outer connection's send path, refilling between sends until a send builds
+nothing, then pumps the HTTP/3 connection once and drains any received datagrams into the inbound
 channel.
 
-Two queues sit on either side of that loop:
+Three queues and one held payload sit around that loop:
 
 - **Outbound**: a bounded channel, capacity 64, `BoundedChannelFullMode.Wait`. `SendAsync`
   writes to it and awaits when it is full.
-- **The outer connection's own FIFO**: a second 64-entry bound inside `TlsQuicConnection` itself,
-  ahead of the wire.
+- **The held payload**: `_stalled`, the one payload the outer connection's FIFO last refused.
+- **The outer connection's own FIFO**: a second 64-entry bound inside `TlsQuicConnection` itself
+  (`DatagramQueueBound`), ahead of the wire.
 - **Inbound**: an unbounded channel that `ReceiveAsync` reads from.
+
+A blocked outer connection therefore absorbs 64 (its FIFO) + 1 (held) + 64 (the outbound
+channel) = 129 payloads before a `SendAsync` waits.
 
 Backpressure is delay, never drop, at both bounds — RFC 9221 §5.4 permits either, and this
 transport always chooses delay. A congestion-window-blocked outer connection simply leaves
@@ -108,10 +124,12 @@ datagrams queued until the window opens; an inner burst that fills the outbound 
 the inner connection's own `SendAsync` await, rather than silently losing datagrams.
 
 Because the owner task otherwise blocks inside the outer connection's receive until the proxy
-sends something or a timer fires, a writer that shows up mid-block needs to wake it: the same
-pump-interrupt mechanism `Http3StreamMultiplexer` already uses — a cancellation source the
-outbound writer signals and the owner task replaces on the next iteration, which the connection's
-receive path treats as ordinary caller cancellation, not an error.
+sends something or a timer fires, a writer that shows up mid-block needs to wake it. `SendAsync`
+calls `WakeableTransport.Wake`, and the wake cancels only the socket receive inside that
+decorator, which returns an empty datagram — the same shape as the connection's own timer
+wake-up — so no packet is read and the pump's send pass and HTTP/3 processing still run. The
+pump's own token is the tunnel lifetime's alone: a wake never reaches the pump itself, so a send
+in progress is never cancelled and no payload already dequeued and recorded as sent is lost.
 
 ## Error model
 
@@ -122,7 +140,7 @@ All five errors are `TlsQuicProxyError` members raised as `TlsQuicProxyException
 | `MasqueNotOffered` | the proxy's SETTINGS or transport parameters lack extended CONNECT, HTTP/3 datagrams, or enough datagram capacity for a 1200-byte inner Initial |
 | `MasqueAuthenticationRejected` | the CONNECT-UDP response is 407 |
 | `MasqueTargetRejected` | the CONNECT-UDP response is 400 |
-| `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status |
+| `MasqueTunnelRefused` | the CONNECT-UDP response is any other non-2xx status, or the dial missed its deadline in any of the four steps (the message names the stage) |
 | `MasqueTunnelClosed` | the tunnel stream or the outer connection ends, before or after the response — a proxy-initiated close, a stream reset, or the outer connection's own idle timeout |
 
 Once `MasqueTunnelClosed` fires, every subsequent `SendAsync` and `ReceiveAsync` call throws it
@@ -155,7 +173,7 @@ ceiling never binds here: the 1392-byte outer packet already sits well under it.
 `DropSummary` counts datagrams that were discarded without failing the connection:
 
 - **Wrong context id** — an inbound HTTP datagram whose context id is not `0x00` (RFC 9298 §4).
-- **Oversize inbound** — a decapsulated payload larger than the receive buffer.
+- **Oversize inbound** — a decapsulated payload larger than `MaxDatagramPayloadSize`.
 - **Wrong stream** — an HTTP datagram whose quarter stream id names a stream other than the one
   the tunnel opened (counted by the HTTP/3 layer, surfaced here).
 
