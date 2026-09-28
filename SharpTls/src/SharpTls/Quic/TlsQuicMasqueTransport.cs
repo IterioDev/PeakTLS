@@ -16,6 +16,11 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     // narrower than that cannot carry the inner connection's first flight at all.
     private const int InnerInitialSize = 1200;
 
+    /// <summary>How far behind the outer connection's own handshake deadline the dial's backstop
+    /// runs, so a stalled handshake is reported by the receiver (what it discarded and why)
+    /// rather than by a bare cancellation.</summary>
+    private static readonly TimeSpan DeadlineGrace = TimeSpan.FromSeconds(1);
+
     /// <summary>The length of the Context ID this tunnel writes: context 0 as a one-byte
     /// varint.</summary>
     /// <remarks>RFC 9298 s4: every HTTP Datagram on a CONNECT-UDP stream starts with a Context
@@ -147,9 +152,14 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         TlsQuicMasqueOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+        // The outer connection's own HandshakeDeadline bounds step 1 and, when it fires, names
+        // what the receiver discarded and why; this backstop runs a grace period behind it so
+        // that report wins the race, and bounds DNS and steps 2 to 4 on its own.
+        var budget = options.HandshakeDeadline + DeadlineGrace;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(options.HandshakeDeadline);
+        deadline.CancelAfter(budget);
         var ct = deadline.Token;
+        var stage = "resolving the proxy";
 
         var outer = options.OuterTransport;
         TlsQuicConnection? connection = null;
@@ -207,9 +217,11 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                     client.CertificateValidation.RevocationMode = X509RevocationMode.NoCheck;
                     return new CustomTlsQuicClient(client);
                 });
+            stage = $"the outer QUIC handshake with {proxy}";
             await connection.ConnectAsync(ct).ConfigureAwait(false);
 
             // Step 2: the proxy must offer extended CONNECT and datagrams.
+            stage = "waiting for the proxy's SETTINGS";
             var http3 = new TlsQuicHttp3Connection(connection, options.OuterHttp3Spec);
             http3Owned = http3;
             http3.OpenLocalStreams();
@@ -269,6 +281,7 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             await FlushAsync(connection, ct).ConfigureAwait(false);
 
             // Step 4: the response. Any 2xx is a tunnel (RFC 9298 s3.5).
+            stage = "waiting for the CONNECT-UDP response";
             TlsQuicHttp3Response response;
             while (true)
             {
@@ -328,13 +341,13 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                 && !cancellationToken.IsCancellationRequested)
             || exception is TimeoutException)
         {
-            // Two clocks run to the same value: this method's linked deadline and the outer
-            // TlsQuicConnection's own HandshakeDeadline, which throws TimeoutException.
+            // The outer TlsQuicConnection's own HandshakeDeadline throws TimeoutException with
+            // the receiver's discard report; the backstop throws OperationCanceledException.
             // TlsQuicProxyException has one constructor, (error, message); the cause rides in
             // the text.
             throw new TlsQuicProxyException(
                 TlsQuicProxyError.MasqueTunnelRefused,
-                $"The MASQUE tunnel did not come up within {options.HandshakeDeadline} "
+                $"The MASQUE tunnel did not come up within {budget} during {stage} "
                     + $"({exception.GetType().Name}: {exception.Message}).");
         }
         catch (InvalidOperationException exception)
