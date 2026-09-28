@@ -247,6 +247,10 @@ public sealed class TlsQuicOptions
     private static readonly string AssociationSilenceParameter =
         nameof(AssociationSilenceDeadline);
 
+    // Same reason again: this rejection belongs to the Proxy property, not to a parameter of
+    // Snapshot.
+    private static readonly string ProxyParameter = nameof(Proxy);
+
 
     // THE FOUR MTU DEFAULTS BELOW READ SpecDefaults LIKE EVERY OTHER PROPERTY IN THIS CLASS.
     // They used to be two local constants - 1200 and 1472 - re-typed here beside a spec that
@@ -361,6 +365,11 @@ public sealed class TlsQuicOptions
     /// </remarks>
     public int MaximumAssociationAttempts { get; set; } =
         Http3Connection.DefaultMaximumAssociationAttempts;
+
+    /// <summary>The MASQUE proxy an HTTP/3 dial tunnels through (RFC 9298 CONNECT-UDP), or null
+    /// to dial directly or through <see cref="TlsSessionOptions.Proxy"/>'s SOCKS5. Must be a
+    /// <see cref="TlsProxy.Masque"/>. TCP requests never use it.</summary>
+    public TlsProxy? Proxy { get; set; }
 
     /// <summary>
     /// Gets or sets how long a request on a proxied HTTP/3 connection may wait while its RFC
@@ -596,6 +605,33 @@ public sealed class TlsQuicOptions
             .WithKeyShares(NamedGroup.X25519);
     }
 
+    /// <summary>The outer connection's options for a MASQUE dial: this library's default
+    /// ClientHello, PMTUD off at 1392 both ways, an explicit max_datagram_frame_size, and
+    /// SETTINGS_H3_DATAGRAM = 1 on the HTTP/3 options that go with it. <paramref name="configure"/>
+    /// runs last.</summary>
+    internal static TlsQuicOptions CreateMasqueOuter(Action<TlsQuicOptions>? configure)
+    {
+        var outer = new TlsQuicOptions
+        {
+            PathMtuDiscovery = false,
+            BasePathMtu = 1392,
+            MaximumPathMtu = 1392,
+        };
+        outer.TransportParameters.Entries.Add(
+            TlsQuicTransportParameterEntry.Literal(0x20, [0x80, 0x00, 0xFF, 0xFF])); // 65535 as a varint
+        configure?.Invoke(outer);
+        return outer;
+    }
+
+    /// <summary>The HTTP/3 options for the outer MASQUE connection: SETTINGS_H3_DATAGRAM = 1 on
+    /// top of the defaults.</summary>
+    internal static TlsHttp3Options CreateMasqueOuterHttp3()
+    {
+        var http3 = new TlsHttp3Options();
+        http3.Settings.Add(new TlsHttp3Setting(0x33, 1));
+        return http3;
+    }
+
     internal TlsQuicConfiguration Snapshot(TlsHttp3Options http3)
     {
         ArgumentNullException.ThrowIfNull(http3);
@@ -720,6 +756,17 @@ public sealed class TlsQuicOptions
             Recovery = Recovery.Snapshot(),
         };
 
+        // A NON-MASQUE PROXY HERE WOULD DIAL SOMETHING THIS LAYER CANNOT SPEAK. SOCKS5 and HTTP
+        // CONNECT are TCP-shaped and are configured through TlsSessionOptions.Proxy instead; an
+        // h3 dial's own proxy hop is RFC 9298 CONNECT-UDP, which only TlsProxy.Masque describes.
+        if (Proxy is { Type: not TlsProxyType.Masque })
+        {
+            throw new ArgumentException(
+                "TlsQuicOptions.Proxy must be a TlsProxy.Masque; SOCKS5 and HTTP proxies go in " +
+                    "TlsSessionOptions.Proxy.",
+                ProxyParameter);
+        }
+
         var configureClientHello = ConfigureClientHello ?? ApplyDefaultClientHello;
         return new TlsQuicConfiguration(
             connectionSpec,
@@ -731,7 +778,8 @@ public sealed class TlsQuicOptions
             AssociationWaitTimeout,
             AssociationLivenessDeadline,
             MaximumAssociationAttempts,
-            AssociationSilenceDeadline);
+            AssociationSilenceDeadline,
+            Proxy);
     }
 }
 
@@ -750,4 +798,5 @@ internal sealed record TlsQuicConfiguration(
     TimeSpan AssociationWaitTimeout,
     TimeSpan AssociationLivenessDeadline,
     int MaximumAssociationAttempts,
-    TimeSpan AssociationSilenceDeadline);
+    TimeSpan AssociationSilenceDeadline,
+    TlsProxy? Proxy);

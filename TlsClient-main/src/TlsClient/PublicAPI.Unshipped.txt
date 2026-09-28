@@ -296,6 +296,8 @@ TlsClient.TlsQuicOptions.AssociationLivenessDeadline.get -> System.TimeSpan
 TlsClient.TlsQuicOptions.AssociationLivenessDeadline.set -> void
 TlsClient.TlsQuicOptions.MaximumAssociationAttempts.get -> int
 TlsClient.TlsQuicOptions.MaximumAssociationAttempts.set -> void
+TlsClient.TlsQuicOptions.Proxy.get -> TlsClient.TlsProxy?
+TlsClient.TlsQuicOptions.Proxy.set -> void
 TlsClient.TlsQuicOptions.AssociationSilenceDeadline.get -> System.TimeSpan
 TlsClient.TlsQuicOptions.AssociationSilenceDeadline.set -> void
 TlsClient.TlsQuicOptions.BasePathMtu.get -> int

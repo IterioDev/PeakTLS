@@ -540,6 +540,36 @@ public sealed class Http3QuicOptionsTests
         Assert.Equal<string>(["h3", "h3-29"], options.Snapshot().Quic.AlpnProtocols);
     }
 
+    [Fact]
+    public void QuicProxyAcceptsOnlyMasque()
+    {
+        var options = new TlsSessionOptions();
+        options.Quic.Proxy = TlsProxy.Socks5("socks5://127.0.0.1:1080");
+
+        var exception = Assert.Throws<ArgumentException>(() => options.Snapshot());
+        Assert.Contains("Masque", exception.Message);
+    }
+
+    [Fact]
+    public void TheOuterOptionsAreTheLibraryDefaultsPlusWhatTheGuideAsksFor()
+    {
+        var outer = TlsQuicOptions.CreateMasqueOuter(configure: null);
+        var snapshot = outer.Snapshot(new TlsHttp3Options());
+
+        Assert.False(snapshot.ConnectionSpec.PathMtuDiscovery);
+        Assert.Equal(1392, snapshot.ConnectionSpec.BasePathMtu);
+        Assert.Equal(1392, snapshot.ConnectionSpec.MaximumPathMtu);
+        Assert.Contains(outer.TransportParameters.Entries, e => e.Id == 0x20);
+        Assert.Equal(1UL, TlsQuicHttp3Settings.Value(TlsQuicOptions.CreateMasqueOuterHttp3().Snapshot().Settings, 0x33));
+    }
+
+    [Fact]
+    public void TheOuterHookRunsLast()
+    {
+        var outer = TlsQuicOptions.CreateMasqueOuter(o => o.MaximumPathMtu = 1300);
+        Assert.Equal(1300, outer.MaximumPathMtu);
+    }
+
     // ------------------------------------------------------------------------------
     // Nothing crashes; bad input is rejected by name.
     // ------------------------------------------------------------------------------
