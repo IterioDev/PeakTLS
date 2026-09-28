@@ -97,6 +97,57 @@ internal sealed class MsQuicLoopbackServer : IAsyncDisposable
     /// slow network, and A4-minimal has no retransmission to wait for.</summary>
     internal static readonly TimeSpan HandshakeDeadline = TimeSpan.FromSeconds(10);
 
+    /// <summary>The client's spec, and the ONE place its transport parameters are written: the
+    /// ClientHello list is composed from it, so what the wire advertises and what the
+    /// connection enforces are the same numbers (RFC 9000 s4.1 makes a receiver's limits the
+    /// ones it advertised). A handwritten list beside a bare spec put these limits on the wire
+    /// while the connection enforced s18.2's absent-parameter zero, and MsQuic's control
+    /// stream 3 then died with StreamLimitError on every run.</summary>
+    /// <remarks>PaddingTarget is RFC 9000 s14.1's 1200-byte floor; MsQuic drops a smaller
+    /// Initial without answering. The flow-control limits are here for C11, not for the
+    /// handshake: without them the server may open no stream and send no byte, and HTTP/3
+    /// cannot start. RFC 9221 s3's 0x20 is the transport half of the
+    /// <c>TestHttp3Settings.DatagramCapable</c> claim every HTTP/3 caller of this fixture
+    /// sends; 65536 is a client capture's value.</remarks>
+    internal static readonly TlsQuicConnectionSpec ClientSpec = new()
+    {
+        PaddingTarget = 1200,
+        LocalFlowControl = new TlsQuicLocalFlowControlSpec
+        {
+            InitialMaxData = 1 << 20,
+            InitialMaxStreamDataBidiLocal = 1 << 20,
+            InitialMaxStreamDataBidiRemote = 1 << 20,
+            InitialMaxStreamDataUni = 1 << 20,
+            InitialMaxStreamsUni = 16,
+            InitialMaxStreamsBidi = 0,
+        },
+        TransportParameters = new TlsQuicTransportParameterSpec
+        {
+            Parameters =
+            [
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId),
+                TlsQuicTransportParameterSlot.Literal(
+                    (ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit, [0x02]),
+                TlsQuicTransportParameterSlot.Literal(
+                    (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
+                    [0x80, 0x01, 0x00, 0x00]),   // 65536 as a four-byte varint
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxData),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamDataUni),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamsUni),
+                TlsQuicTransportParameterSlot.Placed(
+                    (ulong)TlsQuicTransportParameterId.InitialMaxStreamsBidi),
+            ],
+        },
+    };
+
     private readonly TestPki _pki;
     private readonly X509Certificate2 _certificate;
     private readonly QuicListener _listener;
@@ -172,11 +223,8 @@ internal sealed class MsQuicLoopbackServer : IAsyncDisposable
         ITlsQuicDatagramTransport transport,
         CancellationToken cancellationToken = default)
     {
-        // PaddingTarget is RFC 9000 s14.1's 1200-byte floor; MsQuic drops a smaller Initial
-        // without answering. Every other knob is the spec's default.
-        var spec = new TlsQuicConnectionSpec { PaddingTarget = 1200 };
         var connection = new TlsQuicConnection(
-            new TlsQuicConnectionOptions(transport, EndPoint, spec)
+            new TlsQuicConnectionOptions(transport, EndPoint, ClientSpec)
             {
                 HandshakeDeadline = HandshakeDeadline,
                 IdleTimeout = HandshakeDeadline,
@@ -215,44 +263,9 @@ internal sealed class MsQuicLoopbackServer : IAsyncDisposable
                 // - would end the attempt with an error that looks like loss.
                 .WithKeyShares(NamedGroup.X25519, NamedGroup.Secp256r1)
                 .WithAlpn(Alpn)
-                .WithQuicTransportParameters(new TlsQuicTransportParameters(
-                [
-                    new TlsQuicTransportParameter(
-                        (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId,
-                        sourceConnectionId.ToArray()),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.ActiveConnectionIdLimit, 2),
-
-                    // RFC 9221 s3's 0x20 IS HERE FOR THE SAME REASON THE FLOW-CONTROL LIMITS
-                    // BELOW ARE, and it was missed for the same reason. Every HTTP/3 caller of
-                    // this fixture sends SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable, whose 51:1 claims
-                    // willingness to receive HTTP/3 datagrams; 0x20 is the transport half of
-                    // that claim and TlsQuicHttp3Connection now refuses one half without the
-                    // other. MsQuic tolerates the inconsistent pair - which is precisely why
-                    // this fixture never noticed, and why fp.impersonate.pro's 0x109 was the
-                    // first thing that did. 65536 is a client capture's value, cited by
-                    // TlsQuicTransportParameterSpec.RfcMinimumParameters row 3.
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.MaxDatagramFrameSize, 65536),
-
-                    // THE FLOW-CONTROL LIMITS ARE HERE FOR C11, NOT FOR THE HANDSHAKE. Without
-                    // them every peer limit defaults to 0, the server may open no stream and
-                    // send no byte, and HTTP/3 cannot start at all - the finding the throwaway
-                    // Http3GetSpike produced. A handshake-only test never notices, which is
-                    // exactly why they are set in the shared fixture rather than in C11.
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxData, 1 << 20),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxStreamDataBidiLocal, 1 << 20),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxStreamDataBidiRemote, 1 << 20),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxStreamDataUni, 1 << 20),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxStreamsUni, 16),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.InitialMaxStreamsBidi, 0),
-                ]))),
+                // Composed from ClientSpec, never written twice: see its summary.
+                .WithQuicTransportParameters(
+                    ClientSpec.TransportParameters.Compose(ClientSpec, sourceConnectionId.Span))),
             CertificateValidation = new CustomTlsCertificateValidationOptions
             {
                 // Setup requirement 3. The certificate is self-signed and generated at test

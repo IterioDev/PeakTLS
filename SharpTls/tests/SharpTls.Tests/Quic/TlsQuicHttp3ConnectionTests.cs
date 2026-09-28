@@ -3220,8 +3220,7 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
         await using var transport =
             TlsQuicUdpDatagramTransport.Create(endPoint.AddressFamily);
         await using var connection = new TlsQuicConnection(
-            new TlsQuicConnectionOptions(
-                transport, endPoint, new TlsQuicConnectionSpec { PaddingTarget = 1200 })
+            new TlsQuicConnectionOptions(transport, endPoint, LiveSpec)
             {
                 HandshakeDeadline = handshakeDeadline,
                 IdleTimeout = handshakeDeadline + responseDeadline,
@@ -3283,6 +3282,33 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
     // src/ offers h3, so every caller that has negotiated it in this repo has built its own
     // through .WithAlpn("h3") - here, and in MsQuicLoopbackServer. Supplying one is subsystem
     // B's and E's, and C's tests do not assume it.
+    /// <summary>The live client's spec, and the ONE place its transport parameters are written:
+    /// LiveClient composes its ClientHello list from it, so the limits on the wire and the
+    /// limits the connection enforces are the same numbers (RFC 9000 s4.1). The harness's
+    /// flow control because a bare spec advertises s18.2's zero for all six and a server
+    /// granting zero is one this client can open nothing against; RFC 9221 s3's 0x20 at a
+    /// client capture's 65536 because this client sends
+    /// <c>TestHttp3Settings.DatagramCapable</c>, whose 51:1 claims it will receive HTTP/3
+    /// datagrams, and fp.impersonate.pro refuses one half of that claim without the other
+    /// (its 0x109); PaddingTarget is s14.1's 1200-byte floor.</summary>
+    private static readonly TlsQuicConnectionSpec LiveSpec = new()
+    {
+        PaddingTarget = 1200,
+        LocalFlowControl = TestQuicSpecValues.HarnessFlowControl,
+        TransportParameters = new TlsQuicTransportParameterSpec
+        {
+            Parameters =
+            [
+                .. TestQuicSpecValues.HarnessParameters.Parameters,
+                TlsQuicTransportParameterSlot.Literal(
+                    (ulong)TlsQuicTransportParameterId.ActiveConnectionIdLimit, [0x02]),
+                TlsQuicTransportParameterSlot.Literal(
+                    (ulong)TlsQuicTransportParameterId.MaxDatagramFrameSize,
+                    [0x80, 0x01, 0x00, 0x00]),   // 65536 as a four-byte varint
+            ],
+        },
+    };
+
     private static CustomTlsQuicClient LiveClient(ReadOnlyMemory<byte> sourceConnectionId) =>
         new(new CustomTlsQuicClientOptions
         {
@@ -3296,33 +3322,9 @@ public sealed class TlsQuicHttp3PublicEndpointInteropTests
                     NamedGroup.X25519, NamedGroup.Secp256r1)
                 .WithKeyShares(NamedGroup.X25519)
                 .WithAlpn("h3")
-                .WithQuicTransportParameters(new TlsQuicTransportParameters(
-                [
-                    new TlsQuicTransportParameter(
-                        (ulong)TlsQuicTransportParameterId.InitialSourceConnectionId,
-                        sourceConnectionId.ToArray()),
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.ActiveConnectionIdLimit, 2),
-
-                    // RFC 9221 s3's 0x20, at a client capture's 65536, for the reason the
-                    // offline Harness passes the same number: this client sends
-                    // SharpTls.Tests.Quic.TestHttp3Settings.DatagramCapable, whose 51:1 says it will receive HTTP/3
-                    // datagrams, and TlsQuicHttp3Connection's constructor refuses that claim
-                    // when the ClientHello carries no transport half of it. MsQuic tolerates
-                    // the inconsistent pair and fp.impersonate.pro does not - which is exactly
-                    // why the loopback test never caught it and the live one did.
-                    TlsQuicTransportParameter.VariableInteger(
-                        TlsQuicTransportParameterId.MaxDatagramFrameSize, 65536),
-
-                    // THE SIX FLOW-CONTROL LIMITS COME FROM THE HARNESS'S SPEC, and they have
-                    // to come from a populated one: a bare TlsQuicConnectionSpec advertises RFC
-                    // 9000 s18.2's zero for all six now that SharpTls ships no captured
-                    // persona, and a server granting zero is a server this client can open
-                    // nothing against. Spec() is the same object the client side uses, so the
-                    // two halves of the loopback still agree by construction - which is the
-                    // property the spike's second finding was about.
-                    .. TestQuicSpecValues.HarnessFlowControl.ToTransportParameters(),
-                ]))),
+                // Composed from LiveSpec, never written twice: see its summary.
+                .WithQuicTransportParameters(
+                    LiveSpec.TransportParameters.Compose(LiveSpec, sourceConnectionId.Span))),
             CertificateValidation = new CustomTlsCertificateValidationOptions
             {
                 // An OCSP fetch inside the pump loop would be recorded as QUIC loss, which is
