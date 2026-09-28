@@ -7,7 +7,7 @@ supported-version table, and API baseline must agree.
 
 ## Before tagging
 
-1. Confirm every intended `ROADMAP.md` exit gate and record any explicit deferral.
+1. Confirm the intended release scope and record any explicit deferral.
 2. Confirm the commit-bound maintainer evidence in `PROTOCOL-REVIEW.md` is current.
    Independent third-party review is welcome but is not a release gate.
 3. Run the complete local verification set:

@@ -49,7 +49,7 @@ An external process fuzzer can repeatedly invoke this form and treat a non-zero 
 a finding. Before filing an issue, minimize the input, reproduce in Release, record the
 target, operating system, architecture, .NET SDK/runtime, TlsClient commit, SharpTls
 version, and whether the failure is deterministic. Fuzz findings that may be exploitable
-follow `SECURITY.md`, not a public issue.
+are reported privately to the maintainers, not as a public issue.
 
 All targets cap input and parser output. The harness must never disable production
 limits merely to increase coverage; add small injectable limits when a new parser needs

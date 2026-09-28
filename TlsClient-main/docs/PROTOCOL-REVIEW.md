@@ -5,7 +5,7 @@ Status: **maintainer review complete for `0.5.0-preview.1`**.
 This is a first-party, source-assisted, hostile-peer-oriented review of the protocol
 and request lifecycle code that forms the final 1.0 hardening gate. It is not an
 independent audit or certification. Independent third-party review remains welcome,
-and suspected vulnerabilities must follow `SECURITY.md`, but neither is represented as
+and suspected vulnerabilities must be reported privately to the maintainers, but neither is represented as
 a completed external sign-off or required release gate.
 
 ## Review method

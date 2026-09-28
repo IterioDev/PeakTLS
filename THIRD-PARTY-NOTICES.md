@@ -1,5 +1,10 @@
 # Third-party notices
 
+Notices for both packages in this repository. SharpTls first, then TlsClient.
+
+# SharpTls
+
+
 ## ZstdSharp.Port
 
 The SharpTls runtime package takes exactly one third-party dependency: `ZstdSharp.Port`
@@ -120,3 +125,13 @@ headers. The upstream Go source is distributed under the following license:
 > WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 > ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 > POSSIBILITY OF SUCH DAMAGE.
+
+# TlsClient
+
+
+## .NET Runtime HPACK Huffman decoder
+
+`src/TlsClient/HpackHuffman.cs` is adapted from the .NET Runtime project at tag
+`v9.0.2`, file `Huffman.cs`. Copyright .NET Foundation and contributors. It is
+used under the MIT License. The source repository is
+<https://github.com/dotnet/runtime>.
