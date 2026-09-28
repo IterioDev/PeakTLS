@@ -145,6 +145,14 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
 
     private const int RememberedSizes = 6;
 
+    /// <summary>A received datagram too short to be a QUIC packet is a message from the proxy
+    /// or its exit rather than from the target, so its bytes are kept for the tunnel-ended
+    /// report. RFC 9000 s14.1's 1200-byte Initial floor is far above this; a 7-byte answer to
+    /// an inner Initial was a proxy refusing the target.</summary>
+    private const int ShortDatagramLength = 64;
+
+    private byte[]? _lastShortReceived;
+
     private static void Remember(Queue<int> sizes, int size)
     {
         sizes.Enqueue(size);
@@ -175,6 +183,14 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
             text += " Nothing ever came back: the exit behind this proxy session could not carry"
                 + " UDP to the target. That is a property of the session, so retry with a fresh"
                 + " proxy session rather than the same one.";
+        }
+        if (_lastShortReceived is { } shortDatagram)
+        {
+            var printable = shortDatagram.All(b => b is >= 0x20 and < 0x7f);
+            text += $" The last datagram received was {shortDatagram.Length} bytes, too short"
+                + $" for a QUIC packet: {Convert.ToHexString(shortDatagram)}"
+                + (printable ? $" (ASCII '{Encoding.ASCII.GetString(shortDatagram)}')" : string.Empty)
+                + ". That is the proxy or its exit answering, not the target.";
         }
         if (response is { DiscardedBodyBytes: > 0 })
         {
@@ -728,6 +744,10 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
                     _inbound.Writer.TryWrite(datagram[cursor..]);
                     _receivedFromTunnel++;
                     Remember(_receivedSizes, datagram.Length - cursor);
+                    if (datagram.Length - cursor <= ShortDatagramLength)
+                    {
+                        _lastShortReceived = datagram[cursor..];
+                    }
                 }
 
                 var response = _http3.ResponseFor(_streamId);

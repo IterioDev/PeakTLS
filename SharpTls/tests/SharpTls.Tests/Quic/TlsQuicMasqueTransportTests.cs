@@ -470,6 +470,30 @@ public sealed class TlsQuicMasqueTransportTests
     }
 
     [Fact]
+    public async Task AShortDatagramBeforeTheTunnelEndsIsShownAsTheProxysOwnAnswer()
+    {
+        // A field log of 2026-09-28: two 1200-byte Initials in, one 7-byte datagram back, FIN.
+        // Seven bytes is no QUIC packet; it is the proxy or its exit speaking, and the report
+        // has to show the bytes so a reader can tell what it said.
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        // Quarter stream id 0, context id 0, then ASCII "BLOCKED", as one DATAGRAM frame.
+        byte[] answer = [0x00, 0x00, .. "BLOCKED"u8.ToArray()];
+        await harness.Peer.SendOneRttRawFrameAsync([0x31, (byte)answer.Length, .. answer], ct);
+        var received = await harness.Transport.ReceiveAsync(new byte[2048], ct);
+        Assert.Equal(7, received.Length);
+
+        var offset = (ulong)ResponseBytes(200, [], []).Length;
+        await harness.Peer.SendStreamFramesAsync([Stream(0, offset, [], fin: true)], ct);
+
+        var error = await Assert.ThrowsAsync<TlsQuicProxyException>(async () =>
+            await harness.Transport.ReceiveAsync(new byte[2048], ct));
+        Assert.Contains("7 bytes, too short for a QUIC packet: 424C4F434B4544 (ASCII 'BLOCKED')", error.Message);
+    }
+
+    [Fact]
     public async Task WhatTheProxyWroteBeforeEndingTheTunnelStreamIsInTheMessage()
     {
         // RFC 9297 s3.2 capsules are the one place a proxy can explain an ended tunnel.
