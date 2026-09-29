@@ -40,6 +40,22 @@ internal sealed class TlsQuicMasqueOptions
     /// which an inner Initial needs.</summary>
     public int? InnerDatagramCeiling { get; init; }
 
+    /// <summary>Resolves the proxy name, or <see langword="null"/> for the system resolver.
+    /// TlsClient passes the session's own, so the proxy hop follows the same resolution policy
+    /// as everything else the session dials.</summary>
+    public Func<string, CancellationToken, ValueTask<IReadOnlyList<IPAddress>>>? ProxyResolver { get; init; }
+
+    /// <summary>How long one lookup of the proxy name serves every outer dial in the process.
+    /// Zero looks the name up for every dial; <see cref="Timeout.InfiniteTimeSpan"/> keeps the
+    /// first answer.</summary>
+    /// <remarks>Longer than the records' own lifetime on purpose. A provider's front publishes
+    /// its addresses for seconds (ten, measured), so a resolver cache is empty again for the
+    /// next wave of dials, and a lookup that takes seconds on a host with a slow resolver in
+    /// its list is then paid inside every dial's deadline. An address that stops answering
+    /// costs one deadline and the dial moves to the next; when none answers, the name is
+    /// forgotten and looked up afresh.</remarks>
+    public TimeSpan ProxyAddressLifetime { get; init; } = TimeSpan.FromMinutes(1);
+
     /// <summary>Tests only: an already-connected outer transport, so no socket is opened and no
     /// name is resolved. The caller keeps ownership and disposes it.</summary>
     internal ITlsQuicDatagramTransport? OuterTransport { get; init; }

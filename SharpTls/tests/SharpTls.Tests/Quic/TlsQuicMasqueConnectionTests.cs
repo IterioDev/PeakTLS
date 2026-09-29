@@ -190,6 +190,38 @@ public sealed class TlsQuicMasqueConnectionTests
         Assert.Equal(1, harness.Connection.TunnelCount);
     }
 
+    // A live run of 2026-09-29, 200 sessions: a proxy's 522 carries a body and a content-length,
+    // its DATA arrived a pump before its FIN, the tunnel exchange had already dropped the DATA
+    // (a datagram exchange keeps no body), and RFC 9114 s4.1.2's content-length check at the
+    // FIN compared the declared length with the emptied buffer. That is H3_MESSAGE_ERROR, which
+    // this HTTP/3 layer treats as the connection's, so one refused tunnel closed the outer
+    // connection under every other tunnel of the session.
+    [Fact]
+    public async Task ARefusalWhoseBodyArrivesBeforeItsFinLeavesTheOuterAndItsTunnelsUp()
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = cancellation.Token;
+        await using var harness = await MasqueHarness.CreateAsync(ct, peerSettings: FullOffer);
+
+        var open = harness.Connection.OpenTunnelAsync("second.test", 443, AnyTarget, ct);
+        await harness.PumpPeerUntilAsync(
+            () => harness.Peer.ReceivedStreamFrames.Any(f => f.StreamId == 4), ct);
+        var response = ResponseBytes(522, [("content-length", "5")], "gone!"u8.ToArray());
+        await harness.Peer.SendStreamFramesAsync([Stream(4, 0, response)], ct);
+        var refused = await Assert.ThrowsAsync<TlsQuicProxyException>(async () => await open);
+        Assert.Equal(TlsQuicProxyError.MasqueTunnelRefused, refused.Error);
+
+        // The FIN in a packet of its own, after the body has been read and dropped.
+        await harness.Peer.SendStreamFramesAsync(
+            [Stream(4, (ulong)response.Length, [], fin: true)], ct);
+
+        await harness.Peer.SendOneRttRawFrameAsync(MasqueHarness.DatagramFrame(0x00, 0x00, 7), ct);
+        var buffer = new byte[2048];
+        var received = await harness.Transport.ReceiveAsync(buffer, ct);
+        Assert.Equal(new byte[] { 7 }, buffer[..received.Length]);
+        Assert.False(harness.Connection.IsClosed);
+    }
+
     [Fact]
     public async Task ARefusedSecondTunnelIsNamedAndTheOuterStaysUp()
     {

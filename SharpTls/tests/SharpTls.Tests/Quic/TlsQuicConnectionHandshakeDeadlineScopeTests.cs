@@ -150,6 +150,37 @@ public sealed partial class TlsQuicConnectionTests
         Assert.False(connection.IsHandshakeConfirmed);
     }
 
+    // THE MESSAGE SAYS HOW FAR THE HANDSHAKE GOT. A field report of 2026-09-29 carried one
+    // discarded Initial and nothing else: no count of what arrived, no word on whether TLS had
+    // finished or a probe had gone out, and a sentence claiming nothing is ever resent, which
+    // stopped being true when RFC 9002 recovery landed. A timeout that arrives from the field is
+    // the only evidence there is, so it has to say which half of the exchange went missing.
+    [Fact]
+    public async Task TheDeadlineMessageSaysHowFarTheHandshakeGot()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        await using var transport = new ScriptedDatagramTransport();
+        await using var connection = Connection(
+            transport,
+            pki,
+            handshakeDeadline: TimeSpan.FromSeconds(1),
+            idleTimeout: TimeSpan.FromHours(1));
+        transport.EnqueueReceive([1, 2, 3, 4], delay: TimeSpan.FromSeconds(2));
+
+        await connection.StartAsync(cancellation.Token);
+        var error = await Assert.ThrowsAsync<TimeoutException>(
+            async () => await connection.PumpOnceAsync(cancellation.Token));
+
+        // The scripted answer counts as received when it is what carries the clock past the
+        // deadline, so the counts are asserted for being there rather than for their values.
+        Assert.Matches(@"PROGRESS: [1-9]\d* datagram\(s\) sent, \d+ received", error.Message);
+        Assert.Contains("TLS has not finished its handshake", error.Message, StringComparison.Ordinal);
+        Assert.Contains("0 HANDSHAKE_DONE", error.Message, StringComparison.Ordinal);
+        Assert.Contains("keys: Initial Installed, Handshake NeverInstalled", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("A3 is deferred", error.Message, StringComparison.Ordinal);
+    }
+
     // RFC 9000 s10.1 STILL ENDS A CONFIRMED CONNECTION, AND THIS IS THE TEST THAT SAYS THE FIX
     // IS A NARROWING RATHER THAN A REMOVAL. A confirmed connection whose peer goes silent is
     // exactly the state s10.1 was written for - "the connection is silently closed and its state

@@ -130,6 +130,31 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
                 + $"{failure.Message})");
     }
 
+    /// <summary>Whether an inner dial that failed through a tunnel is dialled again on a fresh
+    /// one: its handshake ran out of its deadline, something did come back through the tunnel
+    /// (nothing back is <see cref="JudgeSilence"/>'s), and attempts remain. A failure that is
+    /// not a deadline is the origin's or TLS's answer and is reported as it is.</summary>
+    /// <param name="failure">What the inner dial threw.</param>
+    /// <param name="received">Datagrams the tunnel carried back.</param>
+    /// <param name="attempt">The attempt that failed, from one.</param>
+    /// <param name="attempts">How many attempts a dial may make.</param>
+    /// <returns>Whether to dial again.</returns>
+    internal static bool ShouldDialAgain(Exception failure, ulong received, int attempt, int attempts)
+    {
+        if (received == 0 || attempt >= attempts)
+        {
+            return false;
+        }
+        for (var cursor = failure; cursor is not null; cursor = cursor.InnerException)
+        {
+            if (cursor is TimeoutException)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>The session's outer connection, dialled now if it has none or the one it had
     /// has ended. Callers arriving during a dial share it.</summary>
     /// <remarks>The dial runs under its own deadlines rather than a caller's token: a caller

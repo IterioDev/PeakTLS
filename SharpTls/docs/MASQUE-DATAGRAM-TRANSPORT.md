@@ -38,6 +38,16 @@ leaves, since the proxy could never open its control stream and send SETTINGS. E
 `MasqueTunnelRefused` naming the stage, and its request stream is ended when the answer does
 arrive, so the proxy keeps no tunnel for nobody. The outer connection survives a refused open.
 
+The proxy name is looked up once for the whole process and the answer serves every dial for
+`ProxyAddressLifetime` (one minute by default; TlsClient passes the session's
+`DnsRefreshInterval`), through `ProxyResolver` when the caller has one. That is longer than the
+records' own lifetime on purpose: the provider measured publishes its five addresses for ten
+seconds, so a resolver cache is empty again for the next wave of dials, and on a host with a slow
+resolver in its list each lookup took two to four seconds of the dial's deadline. Consecutive
+dials lead with different addresses of the answer, and each still has all of them to fall
+through. A lookup that fails is reported and not kept; a dial that no address completed forgets
+the answer, so the next one looks the name up afresh.
+
 1. **Outer QUIC handshake.** ALPN `h3`, SNI the proxy host, chain and hostname validation on,
    revocation checking off (`X509RevocationMode.NoCheck`: an OCSP fetch inside the pump loop
    would spend the handshake deadline between two datagrams), PMTUD off, both path MTUs fixed at 1392. The default transport

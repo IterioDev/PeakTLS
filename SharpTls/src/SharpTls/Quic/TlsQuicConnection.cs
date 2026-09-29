@@ -1459,6 +1459,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             await _options.Transport
                 .SendAsync(_options.RemoteEndPoint, payload, cancellationToken)
                 .ConfigureAwait(false);
+            DatagramsSent++;
         }
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.MessageSize)
         {
@@ -2026,6 +2027,36 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     /// <summary>How many pieces of CRYPTO stream have been handed to the TLS client.</summary>
     internal int DeliveredCryptoChunks { get; private set; }
+
+    /// <summary>Datagrams handed to the transport, and non-empty datagrams it handed back: the
+    /// two numbers that say which direction of an attempt went missing.</summary>
+    internal int DatagramsSent { get; private set; }
+
+    /// <summary>See <see cref="DatagramsSent"/>.</summary>
+    internal int DatagramsReceived { get; private set; }
+
+    /// <summary>When the last non-empty datagram arrived, or <see langword="null"/> if none
+    /// has.</summary>
+    private DateTimeOffset? _lastDatagramReceivedAt;
+
+    /// <summary>How far an attempt got, for the deadline's message: what crossed the transport
+    /// each way, what TLS made of it, which keys exist, and what loss recovery did.</summary>
+    private string DescribeProgress()
+    {
+        var lastReceived = _lastDatagramReceivedAt is { } at
+            ? $"the last {(_options.TimeProvider.GetUtcNow() - at).TotalSeconds:F1} s before this"
+            : "none ever";
+        return $"PROGRESS: {DatagramsSent} datagram(s) sent, {DatagramsReceived} received "
+            + $"({lastReceived}); {DeliveredCryptoChunks} CRYPTO chunk(s) delivered and TLS "
+            + (IsHandshakeComplete ? "has finished its handshake" : "has not finished its handshake")
+            + $"; {HandshakeDoneFramesReceived} HANDSHAKE_DONE; keys: Initial "
+            + $"{WriteStateOf(TlsQuicEncryptionLevel.Initial)}, Handshake "
+            + $"{WriteStateOf(TlsQuicEncryptionLevel.Handshake)}, Application "
+            + $"{WriteStateOf(TlsQuicEncryptionLevel.Application)}; {LossDetectionTimeouts} loss "
+            + $"detection timeout(s), {ProbeDatagramsSent} probe datagram(s) sent, "
+            + $"{PacketsDeclaredLost} packet(s) declared lost, {FramesRetransmitted} frame(s) "
+            + "retransmitted. ";
+    }
 
     /// <summary>How many coalesced packets were ignored under RFC 9000 s12.2's Destination
     /// Connection ID clause; see <see cref="PumpOnceAsync"/>.</summary>
@@ -5281,10 +5312,14 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             + "TlsQuicConnectionSpec.RetainedPacketBufferBytes ceiling was full - and that is "
             + "the stall. Retained far above replayed means the keys never came, so the "
             + "handshake failed before the buffer could be drained. "
-            + "THIS IS A TIMEOUT, NOT A RETRANSMISSION: A3 is deferred, so nothing here "
-            + "resents a lost packet and there is nothing to resend - recovering from one "
-            + "means starting a new attempt at the process level. "
-            + $"DISCARD REASONS: {_receiver.DescribeDiscards()}. AuthenticationFailed on the "
+            + DescribeProgress()
+            + "READ PROGRESS BY DIRECTION: nothing received is a path that carries nothing "
+            + "back; TLS finished with no HANDSHAKE_DONE is a client flight the server never "
+            + "got, or a HANDSHAKE_DONE lost on the way back; TLS unfinished with datagrams "
+            + "received is a server flight that arrived in part. RFC 9002 loss recovery ran "
+            + "for the whole attempt, so the probe and retransmission counts are what it "
+            + "tried before the deadline. "
+            + $"DISCARD REASONS:{_receiver.DescribeDiscards()}. AuthenticationFailed on the "
             + "server's first packet means its Initial keys were derived from a Destination "
             + "Connection ID this attempt did not send, or the datagram belongs to another "
             + "connection - through a SOCKS5 relay, a UDP association reused across "
@@ -5348,6 +5383,12 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             received = await _options.Transport
                 .ReceiveAsync(buffer, linked.Token)
                 .ConfigureAwait(false);
+            if (received.Length > 0)
+            {
+                // An empty one is a transport's wake-up, not the peer.
+                DatagramsReceived++;
+                _lastDatagramReceivedAt = _options.TimeProvider.GetUtcNow();
+            }
         }
         catch (OperationCanceledException) when (deadlineSource.IsCancellationRequested
             && !cancellationToken.IsCancellationRequested)

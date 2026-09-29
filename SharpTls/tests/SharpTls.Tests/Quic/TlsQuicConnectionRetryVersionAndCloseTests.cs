@@ -1431,7 +1431,7 @@ public sealed partial class TlsQuicConnectionTests
             async () => await connection.PumpOnceAsync(cancellation.Token));
 
         Assert.False(connection.IdleTimedOut);
-        Assert.Contains("NOT A RETRANSMISSION", error.Message, StringComparison.Ordinal);
+        Assert.Contains("PROGRESS:", error.Message, StringComparison.Ordinal);
 
         // s20.1 NO_ERROR (0x00): "An endpoint uses this with CONNECTION_CLOSE to signal that
         // the connection is being closed abruptly in the absence of any error."

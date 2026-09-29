@@ -21,9 +21,24 @@ All notable changes to both packages in this repository are documented here, Sha
   `TlsQuicProxyError.Masque*` (including `MasqueExitSilent` for TlsClient's use), a timeout
   names the dial stage, and every address the proxy name resolves to is tried in turn before the
   dial is refused.
+- One lookup of a MASQUE proxy name serves every outer dial in the process for
+  `TlsQuicMasqueOptions.ProxyAddressLifetime` (the records themselves live ten seconds on the
+  provider measured, and a lookup cost two to four seconds on a host with a slow resolver in
+  its list), through the caller's resolver when it has one; consecutive dials lead with
+  different addresses, and a dial no address completed forgets the answer.
+- A handshake deadline's message says how far the attempt got: datagrams each way and when
+  the last arrived, CRYPTO delivered, whether TLS finished, HANDSHAKE_DONE, the keys at each
+  level, and what loss recovery sent. The sentence claiming nothing is ever resent is gone.
 - QPACK dynamic-table encoder with per-spec capacity and insert policy.
 - Handshake timeouts report what the receiver discarded and why; a SOCKS5 UDP relay that
   answers with a TLS alert fails fast as `TlsQuicProxyError.RelayDeliveredTlsAlert`.
+
+### Fixed
+
+- RFC 9114 s4.1.2's content-length check counts the DATA a datagram-carrying exchange has
+  already dropped. A proxy's 522 with a body, its DATA arriving a pump before its FIN, was
+  judged malformed (H3_MESSAGE_ERROR, 0x10e), and that closed the whole outer MASQUE connection
+  under every tunnel on it.
 
 ### Changed
 
@@ -134,6 +149,15 @@ All notable changes to both packages in this repository are documented here, Sha
   datagrams in and nothing back within the inner handshake deadline while the outer stayed alive;
   `RelayDeliveredTlsAlert`; every tunnel of a dial ending with nothing back) is remembered for
   the session, and every later h3 dial on it fails at once with the same error.
+- An inner QUIC handshake through a MASQUE tunnel that runs out of its deadline while traffic
+  is coming back (acknowledgements arriving, the server's flight not) is dialled again on a
+  fresh tunnel, up to `Quic.MaximumAssociationAttempts` in all. Nothing of the request has been
+  sent at that point, so this covers every method, which the session's retry policy does not.
+  Every failed attempt reports what crossed its tunnel, with the last datagram sizes each way.
+- The MASQUE proxy name is resolved through the session's `DnsResolver` and one lookup serves
+  every outer dial in the process for `DnsRefreshInterval`.
+- Live probes behind `TLSCLIENT_LIVE_PARALLEL`: many sessions in lockstep, and every proxy
+  address under a burst of its own (`MasqueParallelLiveProbeTests`).
 - Spotify 9.1.86 / iOS 27 presets (`spotify-9.1.86-ios-27.0-h3`, `-h2`) with the QPACK
   dynamic table, the h2 preface and HPACK policy from the capture.
 - SOCKS5: the authentication reply `VER 0x05` is tolerated; CONNECT and UDP ASSOCIATE

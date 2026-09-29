@@ -189,6 +189,28 @@ public sealed class MasqueSessionBindingTests
         Assert.Contains("fresh proxy session", verdict.Message);
     }
 
+    // A live run of 2026-09-29, 200 sessions in lockstep: an inner handshake that ran out of
+    // its deadline with the server's acknowledgements arriving and its flight not, and the same
+    // dial succeeding on a fresh tunnel seconds later. Nothing of the request has been sent
+    // when a handshake fails, so a fresh tunnel is safe for every method; a session-level
+    // retry only covers idempotent ones.
+    [Theory]
+    [InlineData(true, 2UL, 1, 3, true)]     // a deadline, something came back, attempts left
+    [InlineData(true, 2UL, 3, 3, false)]    // the last attempt reports
+    [InlineData(true, 0UL, 1, 3, false)]    // nothing back is the exit's silence, not a retry
+    [InlineData(false, 2UL, 1, 3, false)]   // not a deadline: a refusal the origin gave
+    public void AHandshakeDeadlineWithTrafficBackIsDialledAgainOnAFreshTunnel(
+        bool deadline, ulong received, int attempt, int attempts, bool again)
+    {
+        Exception failure = deadline
+            ? new HttpRequestException(
+                "The HTTP/3 (QUIC) handshake with 'login5.example' failed.",
+                new TimeoutException("The QUIC handshake did not confirm within 00:00:05."))
+            : new HttpRequestException("The peer did not select ALPN 'h3'.");
+
+        Assert.Equal(again, MasqueSessionBinding.ShouldDialAgain(failure, received, attempt, attempts));
+    }
+
     private static TlsSessionConfiguration Configuration(
         string? masqueUser = User, bool bind = true)
     {

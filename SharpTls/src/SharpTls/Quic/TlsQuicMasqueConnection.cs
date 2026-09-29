@@ -183,15 +183,7 @@ internal sealed class TlsQuicMasqueConnection : ITlsQuicMasqueConnection
             IReadOnlyList<IPEndPoint> candidates;
             if (options.OuterTransport is null)
             {
-                var addresses = await System.Net.Dns.GetHostAddressesAsync(options.ProxyEndPoint.Host, ct)
-                    .ConfigureAwait(false);
-                if (addresses.Length == 0)
-                {
-                    throw new TlsQuicProxyException(
-                        TlsQuicProxyError.MasqueTunnelRefused,
-                        $"'{options.ProxyEndPoint.Host}' resolved to no address.");
-                }
-                candidates = [.. addresses.Select(a => new IPEndPoint(a, options.ProxyEndPoint.Port))];
+                candidates = await ResolveProxyAsync(options, ct).ConfigureAwait(false);
             }
             else
             {
@@ -336,6 +328,10 @@ internal sealed class TlsQuicMasqueConnection : ITlsQuicMasqueConnection
             var earlier = unreachable.Count == 0
                 ? string.Empty
                 : $" Addresses tried before it and unreachable: {string.Join(", ", unreachable)}.";
+
+            // No address of the remembered answer completed the dial, so the answer may be
+            // what is stale: the next dial looks the name up again.
+            ForgetProxyAddresses(options);
             throw new TlsQuicProxyException(
                 TlsQuicProxyError.MasqueTunnelRefused,
                 $"The MASQUE proxy connection did not come up within {budget} during {stage} "
@@ -373,6 +369,116 @@ internal sealed class TlsQuicMasqueConnection : ITlsQuicMasqueConnection
                 await outer.DisposeAsync().ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>One lookup of a proxy name, shared by every dial in the process until it
+    /// expires, and the counter that spreads those dials over its addresses.</summary>
+    private sealed class ResolvedProxy(Task<IReadOnlyList<IPAddress>> lookup)
+    {
+        public Task<IReadOnlyList<IPAddress>> Lookup { get; } = lookup;
+
+        public long StartedAt { get; } = Stopwatch.GetTimestamp();
+
+        public int Dials;
+    }
+
+    /// <summary>Lookups by proxy name and resolver, for the whole process: a proxy session is a
+    /// credential, not a name, so two hundred sessions dialling one provider resolve one name.
+    /// </summary>
+    private static readonly Dictionary<(string Host, Delegate? Resolver), ResolvedProxy> ResolvedProxies =
+        [];
+
+    /// <summary>The proxy's addresses for one dial: from the lookup every dial shares within
+    /// <see cref="TlsQuicMasqueOptions.ProxyAddressLifetime"/>, rotated so that consecutive
+    /// dials lead with different addresses and each still has all of them to fall through.
+    /// </summary>
+    /// <remarks>The lookup runs under no caller's token: a caller that gives up leaves a lookup
+    /// the next caller finds finished. A lookup that fails, or answers with no address, is
+    /// reported to everyone waiting on it and not kept.</remarks>
+    /// <param name="options">The proxy, its resolver and the lifetime.</param>
+    /// <param name="cancellationToken">Cancels this caller's wait.</param>
+    /// <returns>The endpoints to try, in order.</returns>
+    /// <exception cref="TlsQuicProxyException">The name resolved to no address.</exception>
+    internal static async Task<IReadOnlyList<IPEndPoint>> ResolveProxyAsync(
+        TlsQuicMasqueOptions options, CancellationToken cancellationToken)
+    {
+        var host = options.ProxyEndPoint.Host;
+        var key = (host.ToUpperInvariant(), (Delegate?)options.ProxyResolver);
+        ResolvedProxy resolved;
+        lock (ResolvedProxies)
+        {
+            if (!ResolvedProxies.TryGetValue(key, out resolved!) || IsExpired(resolved, options))
+            {
+                resolved = new ResolvedProxy(LookUpAsync(options));
+                ResolvedProxies[key] = resolved;
+            }
+        }
+
+        IReadOnlyList<IPAddress> addresses;
+        try
+        {
+            addresses = await resolved.Lookup.WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (addresses.Count == 0)
+            {
+                throw new TlsQuicProxyException(
+                    TlsQuicProxyError.MasqueTunnelRefused, $"'{host}' resolved to no address.");
+            }
+        }
+        catch (Exception) when (resolved.Lookup.IsCompleted)
+        {
+            Forget(key, resolved);
+            throw;
+        }
+
+        var first = (Interlocked.Increment(ref resolved.Dials) - 1) % addresses.Count;
+        var endPoints = new IPEndPoint[addresses.Count];
+        for (var index = 0; index < endPoints.Length; index++)
+        {
+            endPoints[index] = new IPEndPoint(
+                addresses[(first + index) % addresses.Count], options.ProxyEndPoint.Port);
+        }
+        return endPoints;
+    }
+
+    /// <summary>Drops the remembered lookup of the proxy name, so the next dial makes its own.
+    /// </summary>
+    /// <param name="options">The proxy and its resolver.</param>
+    internal static void ForgetProxyAddresses(TlsQuicMasqueOptions options)
+    {
+        lock (ResolvedProxies)
+        {
+            ResolvedProxies.Remove(
+                (options.ProxyEndPoint.Host.ToUpperInvariant(), options.ProxyResolver));
+        }
+    }
+
+    private static void Forget((string Host, Delegate? Resolver) key, ResolvedProxy resolved)
+    {
+        lock (ResolvedProxies)
+        {
+            if (ResolvedProxies.TryGetValue(key, out var current) && ReferenceEquals(current, resolved))
+            {
+                ResolvedProxies.Remove(key);
+            }
+        }
+    }
+
+    private static bool IsExpired(ResolvedProxy resolved, TlsQuicMasqueOptions options) =>
+        resolved.Lookup.IsFaulted
+            || resolved.Lookup.IsCanceled
+            || (options.ProxyAddressLifetime != Timeout.InfiniteTimeSpan
+                && Stopwatch.GetElapsedTime(resolved.StartedAt) >= options.ProxyAddressLifetime);
+
+    private static async Task<IReadOnlyList<IPAddress>> LookUpAsync(TlsQuicMasqueOptions options)
+    {
+        if (options.ProxyResolver is { } resolver)
+        {
+            return await resolver(options.ProxyEndPoint.Host, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        return await System.Net.Dns
+            .GetHostAddressesAsync(options.ProxyEndPoint.Host, CancellationToken.None)
+            .ConfigureAwait(false);
     }
 
     /// <summary>Opens one CONNECT-UDP tunnel to a target (RFC 9298 s3) and returns it once any

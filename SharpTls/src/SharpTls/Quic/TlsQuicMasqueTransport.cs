@@ -133,6 +133,21 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         + $"{_droppedOversize} for exceeding {MaxDatagramPayloadSize} bytes inbound; "
         + $"{_connection.DroppedDatagramsWrongStream} for a stream nothing reads.";
 
+    /// <summary>What crossed the tunnel each way, with the sizes of the last few datagrams:
+    /// for the message of a dial that failed through it. Acknowledgements arriving while
+    /// nothing above a thousand bytes does is a return path that loses the large datagrams a
+    /// server's flight is made of.</summary>
+    /// <returns>The counts and the sizes.</returns>
+    public string DescribeTraffic()
+    {
+        lock (_sentSizes)
+        {
+            return $"{DatagramsSent} datagram(s) went in and {DatagramsReceived} came back "
+                + $"(last sizes in: {string.Join(", ", _sentSizes)}; back: "
+                + $"{string.Join(", ", _receivedSizes)}; ceiling {MaxDatagramPayloadSize})";
+        }
+    }
+
     /// <summary>Queues one inner UDP payload for the tunnel as a context-0 HTTP Datagram.
     /// </summary>
     /// <remarks>
@@ -359,12 +374,17 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
         return text;
     }
 
-    private static void Remember(Queue<int> sizes, int size)
+    // Under one lock for both queues: the owner writes them and DescribeTraffic reads them from
+    // the dialling thread.
+    private void Remember(Queue<int> sizes, int size)
     {
-        sizes.Enqueue(size);
-        while (sizes.Count > RememberedSizes)
+        lock (_sentSizes)
         {
-            sizes.Dequeue();
+            sizes.Enqueue(size);
+            while (sizes.Count > RememberedSizes)
+            {
+                sizes.Dequeue();
+            }
         }
     }
 

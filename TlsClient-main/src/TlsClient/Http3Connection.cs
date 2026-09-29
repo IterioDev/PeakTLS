@@ -543,8 +543,23 @@ internal sealed class Http3Connection : IHttpConnection
                 masqueBinding.MarkBound(masque);
                 return connection;
             }
-            catch (Exception exception)
+            catch (Exception caught)
             {
+                var sent = tunnel.DatagramsSent;
+                var received = tunnel.DatagramsReceived;
+
+                // The tunnel's own count beside the connection's: what the inner connection
+                // handed over and what the proxy handed back, with the last sizes each way,
+                // which a failed handshake otherwise leaves unsaid. Said to the observer as well
+                // as to the caller, so an attempt that is dialled again is still on record.
+                var exception = caught is HttpRequestException failed
+                    ? new HttpRequestException(
+                        $"{failed.Message} Attempt {attempt} of {attempts}, each on a tunnel of "
+                            + $"its own. Through this MASQUE tunnel: {tunnel.DescribeTraffic()}; the "
+                            + $"outer connection to the proxy "
+                            + $"{(outer.IsClosed ? "had ended" : "was alive")}.",
+                        failed.InnerException)
+                    : caught;
                 TlsConnectTelemetry.Emit(
                     configuration.ConnectObserver,
                     connectionId,
@@ -553,14 +568,12 @@ internal sealed class Http3Connection : IHttpConnection
                     origin.Port,
                     elapsed: Stopwatch.GetElapsedTime(startedAt),
                     exception: exception);
-                var sent = tunnel.DatagramsSent;
-                var received = tunnel.DatagramsReceived;
                 await tunnel.DisposeAsync().ConfigureAwait(false);
                 if (cancellationToken.IsCancellationRequested)
                 {
                     throw;
                 }
-                switch (exception)
+                switch (caught)
                 {
                     case TlsQuicProxyException { Error: TlsQuicProxyError.MasqueTunnelClosed } ended:
                         if (attempt < attempts)
@@ -586,7 +599,21 @@ internal sealed class Http3Connection : IHttpConnection
                             masqueBinding.Remember(masque, silent);
                             throw silent;
                         }
-                        throw;
+                        // A HANDSHAKE THAT RAN OUT OF ITS DEADLINE WITH TRAFFIC COMING BACK IS
+                        // DIALLED AGAIN on a fresh tunnel, under the same count. The field shape:
+                        // the server's acknowledgements arrive and its flight does not, on an
+                        // exit that is losing packets rather than refusing them, and the same
+                        // dial succeeds seconds later. Nothing of the request has been sent, so
+                        // this is safe for every method, which a session-level retry is not.
+                        if (MasqueSessionBinding.ShouldDialAgain(exception, received, attempt, attempts))
+                        {
+                            continue;
+                        }
+                        if (ReferenceEquals(exception, caught))
+                        {
+                            throw;
+                        }
+                        throw exception;
                 }
             }
         }
@@ -613,6 +640,13 @@ internal sealed class Http3Connection : IHttpConnection
             ConfigureOuterClientHello = outer.ConfigureClientHello,
             HandshakeDeadline = configuration.Quic.HandshakeDeadline ?? SharpTlsHandshakeDeadline,
             InnerDatagramCeiling = masque.MaxInnerDatagramPayload,
+
+            // The session's own resolution policy for the proxy hop too: its resolver if it has
+            // one, and its refresh interval for how long one lookup of the proxy name serves.
+            // The delegate itself, not a wrapper: it is part of the key the lookups are shared
+            // under, and a wrapper made here would be a new key for every dial.
+            ProxyResolver = configuration.DnsResolver,
+            ProxyAddressLifetime = configuration.DnsRefreshInterval,
         };
     }
 

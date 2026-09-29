@@ -303,9 +303,8 @@ public sealed partial class TlsQuicConnectionTests
             $"The deadline took {wallClock.Elapsed} of wall-clock time, so it did not fire off "
                 + "the injected clock.");
 
-        // IT IS A TIMEOUT, NOT A RETRANSMISSION, and the message says so because A3 is
-        // deferred and there is nothing to resend.
-        Assert.Contains("NOT A RETRANSMISSION", error.Message, StringComparison.Ordinal);
+        // IT IS THE HANDSHAKE DEADLINE, recognised by the progress its message reports.
+        Assert.Contains("PROGRESS:", error.Message, StringComparison.Ordinal);
         Assert.Equal(TimeSpan.FromHours(2), transport.Clock.GetUtcNow() - StartOfScriptedTime);
     }
 
@@ -342,7 +341,7 @@ public sealed partial class TlsQuicConnectionTests
 
         var error = await Assert.ThrowsAsync<TimeoutException>(
             async () => await connection.PumpOnceAsync(cancellation.Token));
-        Assert.Contains("NOT A RETRANSMISSION", error.Message, StringComparison.Ordinal);
+        Assert.Contains("PROGRESS:", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -555,7 +554,7 @@ public sealed partial class TlsQuicConnectionTests
 
         Assert.Contains(
             "1 packet(s) discarded (1 for want of keys)", error.Message, StringComparison.Ordinal);
-        Assert.Contains("NOT A RETRANSMISSION", error.Message, StringComparison.Ordinal);
+        Assert.Contains("PROGRESS:", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

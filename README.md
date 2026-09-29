@@ -364,6 +364,17 @@ as `MasqueConnectionOpened`, and one round trip per origin for the tunnel, repor
 replaced by the next dial. Disposing an inner connection ends its own request stream and nothing
 else; disposing the `TlsSession` closes the outer connections.
 
+The proxy name is resolved through the session's `DnsResolver` when it has one, and one lookup
+serves every outer dial in the process for `DnsRefreshInterval`: a provider's front publishes its
+addresses for seconds, so without that every dial pays a lookup inside its own deadline.
+Consecutive dials lead with different addresses of the answer and each falls through the rest.
+
+An inner handshake that runs out of `Quic.HandshakeDeadline` while traffic is coming back through
+the tunnel is dialled again on a fresh tunnel, up to `Quic.MaximumAssociationAttempts` in all;
+nothing of the request has been sent at that point, so this holds for every method. A handshake
+deadline's message says how far the attempt got (`PROGRESS:` datagrams each way, whether TLS
+finished, what loss recovery sent) and what crossed the tunnel, with the last sizes each way.
+
 The inner connection, the one the origin sees, is unchanged: preset, transport parameters and
 their rotation, QPACK, packet sizes. Only the proxy sees the outer connection, so its shape is
 the RFC minimum rather than a persona's; the optional `configureOuter` hook receives its

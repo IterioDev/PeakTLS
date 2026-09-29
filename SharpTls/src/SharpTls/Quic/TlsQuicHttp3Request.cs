@@ -2141,9 +2141,16 @@ internal sealed class TlsQuicHttp3Response
     // Ordinal, and unparsable values skipped, for ReadStatus' two reasons: an uppercase
     // "Content-Length" is not the field s4.2 permits, and NumberStyles.None is what makes
     // " 12" and "+12" not "the value of the Content-Length header field".
+    //
+    // "RECEIVED", NOT "STILL HELD". A datagram-carrying exchange drops its DATA payloads as
+    // they arrive (DiscardBody), so the sum s4.1.2 asks for is what is held plus what was
+    // dropped. Compared against the held bytes alone, a proxy's 522 with a content-length whose
+    // DATA arrived a pump before its FIN was called malformed, and that error closed the whole
+    // outer connection under every tunnel on it.
     private bool ContentLengthAgreesWithTheBody()
     {
-        if (_body.Count == 0 && IsDefinedAsNeverHavingContent())
+        var received = _body.Count + _discardedBodyBytes;
+        if (received == 0 && IsDefinedAsNeverHavingContent())
         {
             return true;
         }
@@ -2160,7 +2167,7 @@ internal sealed class TlsQuicHttp3Response
                     NumberStyles.None,
                     CultureInfo.InvariantCulture,
                     out var declared)
-                && declared != _body.Count)
+                && declared != received)
             {
                 return false;
             }

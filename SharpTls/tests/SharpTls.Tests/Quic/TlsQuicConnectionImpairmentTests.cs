@@ -441,11 +441,11 @@ public sealed partial class TlsQuicConnectionTests
             async () => await connection.PumpOnceAsync(cancellation.Token));
         wallClock.Stop();
 
-        // A TIMEOUT, NOT A RETRANSMISSION, and the message says so because A3-8 has not landed.
-        // THIS ASSERTION IS THE ONE A3-8 MUST BREAK: a connection that recovered from a lost
-        // Initial would not reach here at all. It is written down now so that the improvement
-        // is measured against a pinned baseline instead of a remembered one.
-        Assert.Contains("NOT A RETRANSMISSION", error.Message, StringComparison.Ordinal);
+        // THE HANDSHAKE DEADLINE'S OWN MESSAGE, which since 2026-09-29 says how far the attempt
+        // got instead of claiming nothing is ever resent: that sentence predated RFC 9002
+        // recovery and a field report was read through it. Reaching here at all is this test's
+        // pinned baseline; PROGRESS is how the message is recognised as the deadline's.
+        Assert.Contains("PROGRESS:", error.Message, StringComparison.Ordinal);
         Assert.True(
             wallClock.Elapsed < TimeSpan.FromSeconds(30),
             $"The deadline took {wallClock.Elapsed} of wall-clock time, so it did not fire off "
