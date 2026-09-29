@@ -1683,8 +1683,27 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
     // connection's actual lengths rather than from the widest legal ones, because it is
     // subtracted from a per-datagram budget and the spec fixes both figures.
     private int OneRttPacketOverhead =>
-        1 + _destinationConnectionId.Length + _options.Spec.PacketNumberEncodedLength
+        1 + _destinationConnectionId.Length
+        + PacketNumberLengthFor(
+            TlsQuicEncryptionLevel.Application,
+            _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application])
         + TlsQuicPacketBuilder.AuthenticationTagLength;
+
+    /// <summary>How many bytes of <paramref name="packetNumber"/> a packet at
+    /// <paramref name="level"/> carries: the spec's width, or wider when RFC 9000 Appendix A.2
+    /// needs more.</summary>
+    /// <remarks>A.2 is a floor on the sender - "at least twice as large as the difference
+    /// between the packet number and the largest acknowledged" - and the spec's width is a
+    /// fingerprint knob chosen from a capture. The knob holds whenever it is legal, and A.2
+    /// wins when it is not: a client downloading a large response sends ACK-only packets the
+    /// server may not acknowledge (RFC 9000 s13.2.1), so its packet numbers run past the
+    /// largest acknowledged and a one-byte width stops being able to say which packet it is.
+    /// Refusing to send there killed every large download; widening is what the imitated
+    /// client's own stack does.</remarks>
+    private int PacketNumberLengthFor(TlsQuicEncryptionLevel level, ulong packetNumber) =>
+        Math.Max(
+            _options.Spec.PacketNumberEncodedLength,
+            TlsQuicPacketNumber.EncodedLength(packetNumber, _acks.LargestAcked(level)));
 
     /// <summary>Gets how many RFC 9001 s6 key updates this connection has applied, in either
     /// direction.</summary>
@@ -2041,7 +2060,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
 
     /// <summary>How far an attempt got, for the deadline's message: what crossed the transport
     /// each way, what TLS made of it, which keys exist, and what loss recovery did.</summary>
-    private string DescribeProgress()
+    internal string DescribeProgress()
     {
         var lastReceived = _lastDatagramReceivedAt is { } at
             ? $"the last {(_options.TimeProvider.GetUtcNow() - at).TotalSeconds:F1} s before this"
@@ -4979,7 +4998,11 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
             new() { RawType = (ulong)TlsQuicFrameType.Ping },
         };
 
-        PadForHeaderProtectionSample(frames, _options.Spec.PacketNumberEncodedLength);
+        PadForHeaderProtectionSample(
+            frames,
+            PacketNumberLengthFor(
+                TlsQuicEncryptionLevel.Application,
+                _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application]));
 
         // The probe is the one datagram this connection sends that is DELIBERATELY larger than
         // the current maximum datagram size - s14.2: "Both DPLPMTUD and PMTUD send datagrams
@@ -7033,7 +7056,7 @@ internal sealed partial class TlsQuicConnection : IAsyncDisposable
         // Retry or a NEW_TOKEN frame.
         Token = level == TlsQuicEncryptionLevel.Initial ? TokenForInitial : default,
         PacketNumber = packetNumber,
-        PacketNumberEncodedLength = _options.Spec.PacketNumberEncodedLength,
+        PacketNumberEncodedLength = PacketNumberLengthFor(level, packetNumber),
 
         // Task 8's ProcessAckFrame is what advances this; RFC 9000 Appendix A.2 uses it to
         // bound the encoded packet number length from below.

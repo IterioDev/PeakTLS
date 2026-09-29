@@ -192,12 +192,11 @@ public enum TlsConnectEventKind
     /// <see cref="TlsConnectEvent.Elapsed"/> is what that cost; <see cref="TlsConnectEvent.Exception"/>
     /// is set when no address of the proxy completed it, or it did not offer CONNECT-UDP.</summary>
     /// <remarks>
-    /// <para>ONE PER PROXY SESSION, NOT ONE PER TUNNEL. Every h3 dial on the same session (the
-    /// same proxy username) opens its tunnel on this connection, so a session that carries h3
-    /// to several origins reports this once and <see cref="MasqueTunnelOpened"/> once per
-    /// origin. A second one for the same session means the first had ended (its idle timeout,
-    /// a proxy close, a failure) and was replaced. The host and port are the proxy's, not an
-    /// origin's.</para>
+    /// <para>ONE PER OUTER CONNECTION, NOT ONE PER TUNNEL. A session keeps a pool of outer
+    /// connections per proxy username and reuses one whose tunnel has ended, so sequential h3
+    /// dials report this once between them; concurrent ones each get their own by default
+    /// (<see cref="TlsQuicOptions.MasqueTunnelsPerConnection"/>). The host and port are the
+    /// proxy's, not an origin's.</para>
     /// <para>Emitted only when <see cref="TlsQuicOptions.Proxy"/> names a MASQUE proxy.</para>
     /// </remarks>
     MasqueConnectionOpened = 20,

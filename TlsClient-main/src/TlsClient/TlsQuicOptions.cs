@@ -243,6 +243,8 @@ public sealed class TlsQuicOptions
     private static readonly string AssociationAttemptsParameter =
         nameof(MaximumAssociationAttempts);
 
+    private static readonly string MasqueTunnelsParameter = nameof(MasqueTunnelsPerConnection);
+
     // Same reason again.
     private static readonly string AssociationSilenceParameter =
         nameof(AssociationSilenceDeadline);
@@ -369,11 +371,12 @@ public sealed class TlsQuicOptions
     /// <summary>The MASQUE proxy an HTTP/3 dial tunnels through (RFC 9298 CONNECT-UDP), or null
     /// to dial directly or through <see cref="TlsSessionOptions.Proxy"/>'s SOCKS5. Must be a
     /// <see cref="TlsProxy.Masque"/>. TCP requests never use it.</summary>
-    /// <remarks>The session keeps one outer connection to the proxy per proxy session (per
-    /// username), reported once as <see cref="TlsConnectEventKind.MasqueConnectionOpened"/>, and
-    /// every h3 connection on that session is one CONNECT-UDP tunnel on it
-    /// (<see cref="TlsConnectEventKind.MasqueTunnelOpened"/>). An outer connection that has ended
-    /// is replaced by the next dial; disposing the <see cref="TlsSession"/> closes them.</remarks>
+    /// <remarks>The session keeps a pool of outer connections to the proxy per proxy session (per
+    /// username); each h3 connection is one CONNECT-UDP tunnel
+    /// (<see cref="TlsConnectEventKind.MasqueTunnelOpened"/>) on an outer with room, see
+    /// <see cref="MasqueTunnelsPerConnection"/>. A new outer is reported as
+    /// <see cref="TlsConnectEventKind.MasqueConnectionOpened"/>; disposing the
+    /// <see cref="TlsSession"/> closes them.</remarks>
     public TlsProxy? Proxy { get; set; }
 
     /// <summary>Gets or sets whether a sticky proxy session shared by
@@ -393,6 +396,20 @@ public sealed class TlsQuicOptions
     /// two hops bind independently.</para>
     /// </remarks>
     public bool BindSessionThroughMasque { get; set; } = true;
+
+    /// <summary>Gets or sets how many CONNECT-UDP tunnels one outer connection to the MASQUE
+    /// proxy carries at once. The default is 1.</summary>
+    /// <remarks>
+    /// <para>A SESSION KEEPS A POOL OF OUTER CONNECTIONS per proxy username. An h3 dial takes
+    /// one with room, or dials a new one; an outer whose tunnels have all ended is reused by
+    /// the next dial, so sequential dials still pay one outer handshake between them.</para>
+    /// <para>WHY ONE. Measured 2026-09-29, 100 sessions each sending 18 h3 requests at once:
+    /// with every tunnel of a session on one outer connection, the downloads shared one
+    /// congestion window at the proxy, and 200 tunnel opens a run went unanswered behind
+    /// them. Raise it only for many small concurrent exchanges on a proxy that limits
+    /// connections.</para>
+    /// </remarks>
+    public int MasqueTunnelsPerConnection { get; set; } = 1;
 
     /// <summary>
     /// Gets or sets how long a request on a proxied HTTP/3 connection may wait while its RFC
@@ -777,6 +794,14 @@ public sealed class TlsQuicOptions
                 "association undetected.");
         }
 
+        if (MasqueTunnelsPerConnection < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                MasqueTunnelsParameter,
+                MasqueTunnelsPerConnection,
+                $"{MasqueTunnelsParameter} must be at least 1.");
+        }
+
         // A NON-MASQUE PROXY HERE WOULD DIAL SOMETHING THIS LAYER CANNOT SPEAK. SOCKS5 and HTTP
         // CONNECT are TCP-shaped and are configured through TlsSessionOptions.Proxy instead; an
         // h3 dial's own proxy hop is RFC 9298 CONNECT-UDP, which only TlsProxy.Masque describes.
@@ -841,7 +866,8 @@ public sealed class TlsQuicOptions
             MaximumAssociationAttempts,
             AssociationSilenceDeadline,
             Proxy,
-            BindSessionThroughMasque);
+            BindSessionThroughMasque,
+            MasqueTunnelsPerConnection);
     }
 }
 
@@ -862,4 +888,5 @@ internal sealed record TlsQuicConfiguration(
     int MaximumAssociationAttempts,
     TimeSpan AssociationSilenceDeadline,
     TlsProxy? Proxy,
-    bool BindSessionThroughMasque);
+    bool BindSessionThroughMasque,
+    int MasqueTunnelsPerConnection);

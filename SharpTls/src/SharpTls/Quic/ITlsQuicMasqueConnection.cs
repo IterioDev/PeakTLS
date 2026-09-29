@@ -15,6 +15,14 @@ internal interface ITlsQuicMasqueConnection : IAsyncDisposable
     /// yet.</summary>
     int TunnelsRequested { get; }
 
+    /// <summary>Tunnels open on the connection right now.</summary>
+    int TunnelCount { get; }
+
+    /// <summary>Datagrams the proxy has sent on the outer connection so far. A tunnel open that
+    /// failed while this did not move is a proxy that has gone silent on this connection; one
+    /// that failed while it moved is a proxy that answered, and the connection is fine.</summary>
+    int DatagramsReceived { get; }
+
     /// <summary>Opens one RFC 9298 CONNECT-UDP tunnel to a target.</summary>
     /// <param name="targetHost">The target, written into the RFC 9298 s2 URI template.</param>
     /// <param name="targetPort">The target UDP port, written into the template.</param>

@@ -353,16 +353,18 @@ static TlsQuicProxyException? ProxyFailure(Exception? e) =>
     e as TlsQuicProxyException ?? (e is null ? null : ProxyFailure(e.InnerException));
 ```
 
-`TlsProxy.Masque(address, username, password, configureOuter)` takes an `https://` address
-with an explicit UDP port other than 443. The session opens one outer QUIC connection to the
-proxy per proxy session (per username) and keeps it; every inner connection is one CONNECT-UDP
-request stream on it, opened with `:protocol: connect-udp` and Basic `proxy-authorization`, and
-every inner datagram travels in an HTTP/3 DATAGRAM routed by that stream's quarter stream id
-(RFC 9297). So a session that reaches several origins over h3 pays one outer handshake, reported
-as `MasqueConnectionOpened`, and one round trip per origin for the tunnel, reported as
-`MasqueTunnelOpened`. An outer connection that has ended (idle timeout, proxy close, failure) is
-replaced by the next dial. Disposing an inner connection ends its own request stream and nothing
-else; disposing the `TlsSession` closes the outer connections.
+`TlsProxy.Masque(address, username, password, configureOuter)` takes an `https://` address with
+an explicit UDP port other than 443. The session keeps a pool of outer QUIC connections to the
+proxy per proxy session (per username). Each h3 connection is one CONNECT-UDP request stream on
+an outer that has room, opened with `:protocol: connect-udp` and Basic `proxy-authorization`,
+and every inner datagram travels in an HTTP/3 DATAGRAM routed by that stream's quarter stream id
+(RFC 9297). An outer carries one live tunnel at a time by default
+(`Quic.MasqueTunnelsPerConnection`), and an outer whose tunnel has ended is reused by the next
+dial: concurrent h3 connections do not share a congestion window or queue behind each other's
+traffic, and sequential ones still skip the outer handshake. A new outer is reported as
+`MasqueConnectionOpened`, each tunnel as `MasqueTunnelOpened`. An outer that has ended (idle
+timeout, proxy close, failure) is dropped and replaced. Disposing an inner connection ends its
+own request stream and nothing else; disposing the `TlsSession` closes the outer connections.
 
 The proxy name is resolved through the session's `DnsResolver` when it has one, and one lookup
 serves every outer dial in the process for `DnsRefreshInterval`: a provider's front publishes its
@@ -417,7 +419,7 @@ options.ConnectObserver = e => Console.WriteLine(
 | TCP proxy | `ProxyTunnelStarted`, `ProxyTunnelCompleted`, `ProxyTunnelFailed` |
 | TLS | `TlsHandshakeStarted`, `TlsHandshakeCompleted`, `TlsHandshakeFailed` |
 | SOCKS5 UDP | `Socks5AssociationGateEntered`, `Socks5AssociationRetried`, `Socks5AssociationFirstRequest`, `Socks5AssociationWentSilent` |
-| MASQUE | `MasqueConnectionOpened` (the outer connection to the proxy, once per proxy session), `MasqueSessionBound` (the MASQUE-first binding, once per session), `MasqueTunnelOpened` (the proxy answered 2xx), `MasqueTunnelClosed` (a dial through the tunnel failed) |
+| MASQUE | `MasqueConnectionOpened` (a new outer connection to the proxy), `MasqueSessionBound` (the MASQUE-first binding, once per session), `MasqueTunnelOpened` (the proxy answered 2xx), `MasqueTunnelClosed` (a dial through the tunnel failed) |
 
 `options.HandshakeObserver` reports secret-free SharpTls handshake events.
 `TlsDiagnostics.ActivitySourceName` (`"TlsClient"`) exposes request attempts, connections, and

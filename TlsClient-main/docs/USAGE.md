@@ -226,10 +226,10 @@ Console.WriteLine($"{response.HttpVersion} {(int)response.StatusCode}");
 
 MASQUE is the other UDP-capable kind, wired through `options.Quic.Proxy` rather than
 `options.Proxy` — it is HTTP/3's own proxy hop, so it takes its own outer QUIC connection to the
-proxy rather than sharing the SOCKS5/HTTP TCP proxy slot. One outer connection per proxy session
-(per username), dialled once and reported as `MasqueConnectionOpened`; every h3 connection on
-that session is one CONNECT-UDP tunnel on it (`MasqueTunnelOpened`), so several origins cost one
-outer handshake. An outer that has ended is replaced by the next dial.
+proxy rather than sharing the SOCKS5/HTTP TCP proxy slot. A pool of outer connections per proxy session
+(per username): each h3 connection is one CONNECT-UDP tunnel (`MasqueTunnelOpened`) on an outer
+with room, one live tunnel per outer by default (`Quic.MasqueTunnelsPerConnection`); an outer whose
+tunnel ended is reused by the next dial, and a new one is reported as `MasqueConnectionOpened`.
 
 ```csharp
 options.Proxy = TlsProxy.Socks5("socks5://pr.oxylabs.io:7777", user, pass);          // h2, TCP

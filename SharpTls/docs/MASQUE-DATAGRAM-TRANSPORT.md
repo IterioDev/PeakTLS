@@ -9,12 +9,14 @@ association. Everything above the `ITlsQuicDatagramTransport` seam — the inner
 is unaware which transport it is talking to.
 
 Two types share the work. `TlsQuicMasqueConnection` is the outer HTTP/3 connection to the proxy,
-dialled once per proxy session; `TlsQuicMasqueTransport` is one CONNECT-UDP tunnel on it, one
+which can carry many tunnels; `TlsQuicMasqueTransport` is one CONNECT-UDP tunnel on it, one
 request stream, opened per inner connection with `OpenTunnelAsync`. RFC 9298 lets one HTTP/3
 connection carry any number of tunnels, and RFC 9297 §2.1's quarter stream id routes each
-datagram to its tunnel, so a session that reaches several origins pays one outer handshake rather
-than one per origin (two hundred sessions in lockstep were putting five or six bursts of two
-hundred handshakes onto one proxy front, which went silent under them). The outer connection's
+datagram to its tunnel. TlsClient keeps a pool of these per proxy session and puts one live tunnel
+on each by default: concurrent tunnels on one outer share its congestion window at the proxy, and
+the send path puts datagrams before stream frames, so a busy tunnel delayed the next tunnel's
+CONNECT-UDP request (measured 2026-09-29, 200 opens a run unanswered at 18 concurrent requests per
+session). An outer whose tunnel has ended is reused, which keeps the saved handshake. The outer connection's
 only job is to move the inner connections' datagrams to and from the proxy; its own TLS
 fingerprint is irrelevant, since only the proxy ever terminates it. The exit node re-emits the
 inner connection's datagrams byte for byte, so the inner connection's QUIC fingerprint —
@@ -118,7 +120,7 @@ A tunnel ends in one of three ways, and only the last touches the others:
   in the pump, or `TlsQuicMasqueConnection.DisposeAsync`: every tunnel fails with the same
   `MasqueTunnelClosed` naming the cause, every open still waiting for its answer fails the same
   way, `IsClosed` turns true, and every later `OpenTunnelAsync` fails at once. A caller keeping
-  one connection per proxy session (TlsClient's `MasqueSessionBinding`) sees `IsClosed` and
+  a pool of connections (TlsClient's `MasqueSessionBinding`) sees `IsClosed` and
   dials a new one; `TunnelsRequested` tells it whether a connection was ever used, which decides
   whether a refused open means a stale connection or a real refusal.
 

@@ -421,12 +421,11 @@ internal sealed class Http3Connection : IHttpConnection
     /// spec, ClientHello and deadlines, no SOCKS5 relay wrapper and so no liveness probe, which
     /// exists to catch an RFC 1928 association that never relays and observes that through the
     /// wrapper.</para>
-    /// <para>THE OUTER CONNECTION IS THE SESSION'S, held by <see cref="MasqueSessionBinding"/>
-    /// and shared by every h3 dial on the same proxy session: the first dial pays the outer
-    /// handshake, the rest pay one round trip for the CONNECT-UDP answer. An outer that has
-    /// ended is replaced there; one that is not ended but refuses or ends a tunnel open, after
-    /// having carried tunnels before, is what a proxy that silently forgot it looks like, and
-    /// is replaced once here.</para>
+    /// <para>THE OUTER CONNECTION COMES FROM THE SESSION'S POOL, held by
+    /// <see cref="MasqueSessionBinding"/>: one with room for this tunnel, or a new dial. An outer
+    /// that is not ended but let this open go unanswered with nothing arriving meanwhile, after
+    /// having carried tunnels before, is what a proxy that silently forgot it looks like, and is
+    /// discarded once here (<see cref="MasqueSessionBinding.IsStale"/>).</para>
     /// <para>THE INNER PATH MTU NEEDS NO CLAMP HERE. <c>TlsQuicConnection</c> bounds its RFC
     /// 8899 search and every datagram it builds by the transport's
     /// <c>MaxDatagramPayloadSize</c>, so the tunnel's ceiling reaches the inner connection
@@ -481,12 +480,15 @@ internal sealed class Http3Connection : IHttpConnection
             var startedAt = Stopwatch.GetTimestamp();
             ITlsQuicMasqueConnection? outer = null;
             var reused = false;
+            var receivedBefore = 0;
             TlsQuicMasqueTransport tunnel;
             try
             {
-                outer = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
+                using var lease = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
                     .ConfigureAwait(false);
+                outer = lease.Connection;
                 reused = outer.TunnelsRequested > 0;
+                receivedBefore = outer.DatagramsReceived;
                 tunnel = await outer.OpenTunnelAsync(origin.IdnHost, origin.Port, target, cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -503,13 +505,10 @@ internal sealed class Http3Connection : IHttpConnection
                     elapsed: Stopwatch.GetElapsedTime(startedAt),
                     exception: exception);
                 if (outer is not null
-                    && reused
                     && attempt < attempts
                     && !cancellationToken.IsCancellationRequested
-                    && exception is TlsQuicProxyException
-                    {
-                        Error: TlsQuicProxyError.MasqueTunnelClosed or TlsQuicProxyError.MasqueTunnelRefused,
-                    })
+                    && MasqueSessionBinding.IsStale(
+                        exception, reused, outer.IsClosed, receivedBefore, outer.DatagramsReceived))
                 {
                     await masqueBinding.DiscardAsync(masque, outer).ConfigureAwait(false);
                     continue;
@@ -547,6 +546,7 @@ internal sealed class Http3Connection : IHttpConnection
             {
                 var sent = tunnel.DatagramsSent;
                 var received = tunnel.DatagramsReceived;
+                var backlog = tunnel.Backlog;
 
                 // The tunnel's own count beside the connection's: what the inner connection
                 // handed over and what the proxy handed back, with the last sizes each way,
@@ -594,7 +594,7 @@ internal sealed class Http3Connection : IHttpConnection
                         throw;
                     default:
                         if (MasqueSessionBinding.JudgeSilence(
-                                exception, origin.IdnHost, sent, received, outer.IsClosed) is { } silent)
+                                exception, origin.IdnHost, sent, received, outer.IsClosed, backlog) is { } silent)
                         {
                             masqueBinding.Remember(masque, silent);
                             throw silent;
@@ -667,9 +667,9 @@ internal sealed class Http3Connection : IHttpConnection
         var startedAt = Stopwatch.GetTimestamp();
         try
         {
-            var outer = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
+            using var lease = await masqueBinding.GetOuterAsync(masque, configuration, cancellationToken)
                 .ConfigureAwait(false);
-            var tunnel = await outer.OpenTunnelAsync(
+            var tunnel = await lease.Connection.OpenTunnelAsync(
                 origin.IdnHost, origin.Port, new IPEndPoint(IPAddress.Any, origin.Port), cancellationToken)
                 .ConfigureAwait(false);
             await tunnel.DisposeAsync().ConfigureAwait(false);
@@ -786,8 +786,13 @@ internal sealed class Http3Connection : IHttpConnection
             catch (Exception exception) when (
                 exception is TimeoutException or InvalidOperationException)
             {
+                // The progress in the message a caller logs, not only in the inner exception:
+                // a log that prints Message alone lost the one line that says which half of the
+                // exchange went missing. The first sentence of the cause says what ended it.
+                var cause = exception.Message.Split(". ", 2)[0].TrimEnd('.');
                 throw new HttpRequestException(
-                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed.",
+                    $"The HTTP/3 (QUIC) handshake with '{origin.IdnHost}' failed: {cause}. "
+                        + connection.DescribeProgress().TrimEnd(),
                     exception);
             }
 

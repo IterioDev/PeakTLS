@@ -99,10 +99,11 @@ public sealed class MasqueLiveTests
         }
     }
 
-    /// <summary>One outer connection per proxy session: two origins on one session cost one
-    /// outer dial and two tunnels, not two outer dials.</summary>
+    /// <summary>One live tunnel per outer connection: two origins whose h3 connections both stay
+    /// pooled cost two outer dials and two tunnels, and neither waits on the other's traffic.
+    /// </summary>
     [Fact]
-    public async Task OneSessionDialsTheProxyOnceForSeveralOrigins()
+    public async Task EachLiveTunnelRidesAnOuterConnectionOfItsOwn()
     {
         var events = new List<TlsConnectEventKind>();
         if (Options(o => o.ConnectObserver = e => { lock (events) { events.Add(e.Kind); } }) is not { } options)
@@ -120,7 +121,7 @@ public sealed class MasqueLiveTests
 
         lock (events)
         {
-            Assert.Equal(1, events.Count(k => k == TlsConnectEventKind.MasqueConnectionOpened));
+            Assert.Equal(2, events.Count(k => k == TlsConnectEventKind.MasqueConnectionOpened));
             Assert.Equal(2, events.Count(k => k == TlsConnectEventKind.MasqueTunnelOpened));
         }
     }

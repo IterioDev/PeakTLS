@@ -16,11 +16,17 @@ namespace TlsClient.Tests;
 public sealed class MasqueParallelLiveProbeTests
 {
     private static readonly string[] Http3Hosts =
-    [
-        "spclient.wg.spotify.com",
-        "gue1-spclient.spotify.com",
-        "login5.spotify.com",
-    ];
+        Environment.GetEnvironmentVariable("TLSCLIENT_LIVE_HOSTS") is { Length: > 0 } hosts
+            ? hosts.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : ["spclient.wg.spotify.com", "gue1-spclient.spotify.com", "login5.spotify.com"];
+
+    // TLSCLIENT_LIVE_CONCURRENT=1 sends a session's h3 requests all at once, REPEAT times each,
+    // which is how the consumer uses a session; otherwise one after another, once each.
+    private static readonly bool Concurrent =
+        Environment.GetEnvironmentVariable("TLSCLIENT_LIVE_CONCURRENT") == "1";
+
+    private static readonly int Repeat =
+        int.TryParse(Environment.GetEnvironmentVariable("TLSCLIENT_LIVE_REPEAT"), out var repeat) ? repeat : 1;
 
     [Fact]
     public async Task ManySessionsInLockstep()
@@ -101,9 +107,17 @@ public sealed class MasqueParallelLiveProbeTests
             h3.ConnectObserver = Observe;
             h3.Timeout = TimeSpan.FromSeconds(30);
             await using var session = new TlsSession(h3);
-            foreach (var host in Http3Hosts)
+            if (Concurrent)
             {
-                await StepAsync(session, $"h3 {host}", $"https://{host}/", outcomes);
+                await Task.WhenAll(Http3Hosts.SelectMany(host => Enumerable.Range(0, Repeat).Select(
+                    _ => StepAsync(session, $"h3 {host}", $"https://{host}/", outcomes))));
+            }
+            else
+            {
+                foreach (var host in Http3Hosts)
+                {
+                    await StepAsync(session, $"h3 {host}", $"https://{host}/", outcomes);
+                }
             }
         }));
 

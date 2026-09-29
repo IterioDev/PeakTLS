@@ -302,6 +302,8 @@ TlsClient.TlsQuicOptions.MaximumAssociationAttempts.get -> int
 TlsClient.TlsQuicOptions.MaximumAssociationAttempts.set -> void
 TlsClient.TlsQuicOptions.BindSessionThroughMasque.get -> bool
 TlsClient.TlsQuicOptions.BindSessionThroughMasque.set -> void
+TlsClient.TlsQuicOptions.MasqueTunnelsPerConnection.get -> int
+TlsClient.TlsQuicOptions.MasqueTunnelsPerConnection.set -> void
 TlsClient.TlsQuicOptions.Proxy.get -> TlsClient.TlsProxy?
 TlsClient.TlsQuicOptions.Proxy.set -> void
 TlsClient.TlsQuicOptions.AssociationSilenceDeadline.get -> System.TimeSpan

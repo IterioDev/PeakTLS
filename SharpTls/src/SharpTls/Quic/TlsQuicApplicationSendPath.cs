@@ -914,7 +914,11 @@ internal sealed partial class TlsQuicConnection
         // RFC 9000 s12.3 gives 0-RTT and 1-RTT one packet number space, which is the space
         // this counter's Application slot is; s12.3 also forbids reusing a number in it.
         PacketNumber = _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application]++,
-        PacketNumberEncodedLength = _options.Spec.PacketNumberEncodedLength,
+
+        // The number the line above just took: member initializers run in textual order.
+        PacketNumberEncodedLength = PacketNumberLengthFor(
+            TlsQuicEncryptionLevel.Application,
+            _nextPacketNumber[(int)TlsQuicEncryptionLevel.Application] - 1),
         LargestAcknowledged = _acks.LargestAcked(TlsQuicEncryptionLevel.Application),
 
         // SPIN BIT: RFC 9000 s17.4's latency spin bit is a passive-measurement aid, not part

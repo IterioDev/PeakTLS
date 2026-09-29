@@ -4,19 +4,18 @@ using SharpTls.Quic;
 
 namespace TlsClient;
 
-/// <summary>A session's MASQUE state, keyed by proxy session identity: the one outer connection
-/// every h3 dial on that session shares, the MASQUE-first binding of a sticky session the TCP
+/// <summary>A session's MASQUE state, keyed by proxy session identity: the pool of outer
+/// connections its h3 dials open tunnels on, the MASQUE-first binding of a sticky session the TCP
 /// proxy shares with the MASQUE proxy, and the memory of an exit that proved unable to carry
 /// UDP.</summary>
 /// <remarks>
-/// <para>ONE OUTER CONNECTION PER PROXY SESSION. RFC 9298 lets one HTTP/3 connection carry any
-/// number of CONNECT-UDP tunnels, one request stream each, so every inner dial on a session
-/// opens a tunnel on the session's outer connection instead of dialling the proxy front again:
-/// one outer handshake per session rather than one per origin. Two hundred sessions in lockstep
-/// were putting five or six bursts of two hundred outer handshakes onto one proxy front from
-/// one address, and the front went silent under them. An outer that has ended (its idle
-/// timeout, a proxy close, a failure) is replaced by the next dial; a dial in flight is shared
-/// by every caller that arrives during it.</para>
+/// <para>A POOL OF OUTER CONNECTIONS PER PROXY SESSION. RFC 9298 lets one HTTP/3 connection
+/// carry any number of CONNECT-UDP tunnels, and an outer whose tunnel has ended is reused by the
+/// next dial, so sequential dials skip the outer handshake. Concurrent ones each get their own by
+/// default (<see cref="TlsQuicOptions.MasqueTunnelsPerConnection"/>): measured 2026-09-29 with
+/// every tunnel of a session on one outer, the downloads shared one congestion window at the
+/// proxy and 200 tunnel opens a run went unanswered behind them. An outer that has ended is
+/// dropped from the pool and disposed; a dial in flight counts as taken.</para>
 /// <para>THE ORDER OF FIRST USE DECIDES THE EXIT. Measured 2026-09-28 against Oxylabs
 /// residential proxies with one sticky session id shared by <see cref="TlsSessionOptions.Proxy"/>
 /// (SOCKS5) and <see cref="TlsQuicOptions.Proxy"/> (MASQUE): a session whose first use was the
@@ -42,12 +41,32 @@ namespace TlsClient;
 /// </remarks>
 internal sealed class MasqueSessionBinding : IAsyncDisposable
 {
+    /// <summary>One outer connection of a session's pool, or the dial producing it, and how
+    /// many dials hold it while their tunnel opens.</summary>
+    internal sealed class PooledOuter(Task<ITlsQuicMasqueConnection> dial)
+    {
+        public Task<ITlsQuicMasqueConnection> Dial { get; } = dial;
+
+        /// <summary>Leases not yet released: dials between taking this outer and their open
+        /// finishing. Under the binding's lock.</summary>
+        public int Opening { get; set; }
+
+        /// <summary>Whether this outer cannot take another tunnel: its leases and its open
+        /// tunnels reach <paramref name="capacity"/>. A dial still in flight counts its leases
+        /// only.</summary>
+        public bool IsFull(int capacity) =>
+            Opening + (Dial.IsCompletedSuccessfully ? Dial.Result.TunnelCount : 0) >= capacity;
+
+        /// <summary>Whether this outer is past use: its dial failed, or it has ended.</summary>
+        public bool IsDead =>
+            Dial.IsFaulted || Dial.IsCanceled || (Dial.IsCompletedSuccessfully && Dial.Result.IsClosed);
+    }
+
     /// <summary>One proxy session's state.</summary>
     private sealed class Session
     {
-        /// <summary>The outer connection, or the dial producing it; a faulted dial is replaced
-        /// by the next caller.</summary>
-        public Task<ITlsQuicMasqueConnection>? Outer { get; set; }
+        /// <summary>The session's outer connections.</summary>
+        public List<PooledOuter> Outers { get; } = [];
 
         /// <summary>The MASQUE-first binding; a completed task is a bound session.</summary>
         public Task? Binding { get; set; }
@@ -56,6 +75,35 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
         public TlsQuicProxyException? Failure { get; set; }
 
         public long FailedAt { get; set; }
+    }
+
+    /// <summary>An outer connection held for one tunnel open. Disposing it, once the open has
+    /// finished either way, lets the pool count the tunnel through the connection instead.
+    /// </summary>
+    internal sealed class OuterLease : IDisposable
+    {
+        private readonly MasqueSessionBinding _owner;
+        private readonly PooledOuter _pooled;
+        private int _released;
+
+        internal OuterLease(MasqueSessionBinding owner, PooledOuter pooled, ITlsQuicMasqueConnection connection)
+        {
+            _owner = owner;
+            _pooled = pooled;
+            Connection = connection;
+        }
+
+        /// <summary>The outer connection.</summary>
+        public ITlsQuicMasqueConnection Connection { get; }
+
+        /// <summary>Releases the hold. Idempotent.</summary>
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                _owner.Release(_pooled);
+            }
+        }
     }
 
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
@@ -112,11 +160,16 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
     /// <param name="sent">Datagrams the tunnel carried in.</param>
     /// <param name="received">Datagrams the tunnel carried back.</param>
     /// <param name="outerClosed">Whether the outer connection had ended.</param>
+    /// <param name="backlog">Datagrams still queued in the tunnel behind the outer.</param>
     /// <returns>The named failure, or <see langword="null"/> when the exit is not convicted.</returns>
     internal static TlsQuicProxyException? JudgeSilence(
-        Exception failure, string host, ulong sent, ulong received, bool outerClosed)
+        Exception failure, string host, ulong sent, ulong received, bool outerClosed, int backlog)
     {
-        if (sent == 0 || received > 0 || outerClosed)
+        // A BACKLOG IS OUR SIDE. Datagrams the inner connection handed the tunnel that never
+        // reached the outer mean its retransmissions were stuck here, so the exit saw two
+        // datagrams where a deadline's worth of probes should have gone: a live report of
+        // 2026-09-29 convicted a session on exactly that, behind a jammed shared outer.
+        if (sent == 0 || received > 0 || outerClosed || backlog > 0)
         {
             return null;
         }
@@ -129,6 +182,27 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
                 + $"a fresh proxy session reaches a different exit. ({failure.GetType().Name}: "
                 + $"{failure.Message})");
     }
+
+    /// <summary>Whether a tunnel open that failed on a reused outer connection says the outer
+    /// itself is stale: the open went unanswered (refused at its deadline, or closed) and
+    /// nothing at all arrived on the connection meanwhile. A proxy that answered anything, a
+    /// 522 included, is there, and discarding its connection would end every other tunnel on
+    /// it. An outer that has already ended is replaced by the next dial without this.</summary>
+    /// <param name="failure">What the open threw.</param>
+    /// <param name="reused">Whether the outer had carried an open before this one.</param>
+    /// <param name="closed">Whether the outer has ended.</param>
+    /// <param name="receivedBefore">The outer's received datagrams when the open began.</param>
+    /// <param name="receivedAfter">The same count when it failed.</param>
+    /// <returns>Whether to discard the outer and dial again.</returns>
+    internal static bool IsStale(
+        Exception failure, bool reused, bool closed, int receivedBefore, int receivedAfter) =>
+        reused
+            && !closed
+            && receivedAfter == receivedBefore
+            && failure is TlsQuicProxyException
+            {
+                Error: TlsQuicProxyError.MasqueTunnelClosed or TlsQuicProxyError.MasqueTunnelRefused,
+            };
 
     /// <summary>Whether an inner dial that failed through a tunnel is dialled again on a fresh
     /// one: its handshake ran out of its deadline, something did come back through the tunnel
@@ -155,51 +229,87 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
         return false;
     }
 
-    /// <summary>The session's outer connection, dialled now if it has none or the one it had
-    /// has ended. Callers arriving during a dial share it.</summary>
-    /// <remarks>The dial runs under its own deadlines rather than a caller's token: a caller
-    /// that gives up leaves a dial the next caller will find finished, not one it cancelled for
-    /// everyone.</remarks>
-    internal async ValueTask<ITlsQuicMasqueConnection> GetOuterAsync(
+    /// <summary>An outer connection for one tunnel open: one of the session's with room for it
+    /// (<see cref="TlsQuicOptions.MasqueTunnelsPerConnection"/>), or a new dial when none has.
+    /// Dispose the lease once the open has finished.</summary>
+    /// <remarks>
+    /// <para>AN IDLE OUTER IS REUSED, a busy one is not. A dial whose tunnels have all ended leaves
+    /// its outer to the next dial, so sequential dials pay one outer handshake between them;
+    /// concurrent ones each get their own, so one download does not share a congestion window
+    /// with, or queue ahead of, another dial's traffic.</para>
+    /// <para>The dial runs under its own deadlines rather than a caller's token: a caller that
+    /// gives up leaves a dial the next caller finds finished, not one it cancelled for everyone.
+    /// Outers that have ended are dropped from the pool and disposed here.</para>
+    /// </remarks>
+    internal async ValueTask<OuterLease> GetOuterAsync(
         TlsProxy masque, TlsSessionConfiguration configuration, CancellationToken cancellationToken)
     {
-        Task<ITlsQuicMasqueConnection> dial;
-        ITlsQuicMasqueConnection? retired = null;
+        var capacity = Math.Max(1, configuration.Quic.MasqueTunnelsPerConnection);
+        PooledOuter chosen;
+        List<ITlsQuicMasqueConnection> retired = [];
         lock (_sessions)
         {
             var session = SessionFor(masque);
-            if (session.Outer is { IsCompletedSuccessfully: true } ended && ended.Result.IsClosed)
+            for (var index = session.Outers.Count - 1; index >= 0; index--)
             {
-                retired = ended.Result;
-                session.Outer = null;
+                var pooled = session.Outers[index];
+                if (pooled.IsDead && pooled.Opening == 0)
+                {
+                    session.Outers.RemoveAt(index);
+                    if (pooled.Dial.IsCompletedSuccessfully)
+                    {
+                        retired.Add(pooled.Dial.Result);
+                    }
+                }
             }
-            if (session.Outer is null || session.Outer.IsFaulted || session.Outer.IsCanceled)
-            {
-                session.Outer = DialAndReportAsync(masque, configuration);
-            }
-            dial = session.Outer;
+
+            // Oldest first: an established outer before one still dialling, and before a new dial.
+            chosen = session.Outers.FirstOrDefault(pooled => !pooled.IsDead && !pooled.IsFull(capacity))
+                ?? AddOuter(session, masque, configuration);
+            chosen.Opening++;
         }
-        if (retired is not null)
+        foreach (var outer in retired)
         {
-            await retired.DisposeAsync().ConfigureAwait(false);
+            await outer.DisposeAsync().ConfigureAwait(false);
         }
-        return await dial.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var connection = await chosen.Dial.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return new OuterLease(this, chosen, connection);
+        }
+        catch (Exception)
+        {
+            Release(chosen);
+            throw;
+        }
     }
 
-    /// <summary>Drops <paramref name="outer"/> as the session's connection, if it still is,
-    /// and disposes it: for an outer that is not <see cref="ITlsQuicMasqueConnection.IsClosed"/>
-    /// but refused or ended a tunnel open, which is what a proxy that silently forgot the
-    /// connection looks like. The next dial gets a fresh one.</summary>
+    private PooledOuter AddOuter(Session session, TlsProxy masque, TlsSessionConfiguration configuration)
+    {
+        var pooled = new PooledOuter(DialAndReportAsync(masque, configuration));
+        session.Outers.Add(pooled);
+        return pooled;
+    }
+
+    private void Release(PooledOuter pooled)
+    {
+        lock (_sessions)
+        {
+            pooled.Opening--;
+        }
+    }
+
+    /// <summary>Drops <paramref name="outer"/> from the session's pool and disposes it: for an
+    /// outer that is not <see cref="ITlsQuicMasqueConnection.IsClosed"/> but let an open go
+    /// unanswered with nothing arriving meanwhile, which is what a proxy that silently forgot the
+    /// connection looks like (<see cref="IsStale"/>). The next dial gets a fresh one.</summary>
     internal async ValueTask DiscardAsync(TlsProxy masque, ITlsQuicMasqueConnection outer)
     {
         lock (_sessions)
         {
-            var session = SessionFor(masque);
-            if (session.Outer is { IsCompletedSuccessfully: true } current
-                && ReferenceEquals(current.Result, outer))
-            {
-                session.Outer = null;
-            }
+            SessionFor(masque).Outers.RemoveAll(pooled =>
+                pooled.Dial.IsCompletedSuccessfully && ReferenceEquals(pooled.Dial.Result, outer));
         }
         await outer.DisposeAsync().ConfigureAwait(false);
     }
@@ -282,7 +392,7 @@ internal sealed class MasqueSessionBinding : IAsyncDisposable
         List<Task<ITlsQuicMasqueConnection>> outers;
         lock (_sessions)
         {
-            outers = [.. _sessions.Values.Select(s => s.Outer).OfType<Task<ITlsQuicMasqueConnection>>()];
+            outers = [.. _sessions.Values.SelectMany(session => session.Outers).Select(pooled => pooled.Dial)];
             _sessions.Clear();
         }
         foreach (var outer in outers)

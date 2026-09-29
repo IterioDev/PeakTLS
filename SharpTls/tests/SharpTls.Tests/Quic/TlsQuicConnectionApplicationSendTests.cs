@@ -102,6 +102,70 @@ public sealed partial class TlsQuicConnectionTests
         Assert.Equal(oneRtt + 1, connection.NextPacketNumber(TlsQuicEncryptionLevel.Application));
     }
 
+    // A LIVE RUN OF 2026-09-29: every h3 request to open.spotify.com and api.spotify.com died
+    // with "Packet number 135 needs at least 2 bytes against a largest acknowledged of 6". A
+    // client downloading a large response sends ACK-only packets, which RFC 9000 s13.2.1 forbids
+    // the server to acknowledge, so its packet numbers run ahead of its largest acknowledged.
+    // The Spotify preset fixes the width at the capture's one byte, and Appendix A.2 makes that
+    // a floor the sender must widen past - "at least twice as large as the difference between
+    // the packet number and the largest acknowledged" - so a width knob is the width until
+    // A.2 needs more, never a refusal to send.
+    [Fact]
+    public async Task APacketNumberWidthKnobWidensWhenAppendixATwoNeedsMore()
+    {
+        using var cancellation = new CancellationTokenSource(TestTimeout);
+        using var pki = TestPki.Create();
+        using var credential = Credential(pki);
+        var (clientTransport, serverTransport) = InMemoryDatagramTransport.CreatePair();
+        var spec = Spec();
+        spec = new TlsQuicConnectionSpec
+        {
+            PacketNumberEncodedLength = 1,
+            DestinationConnectionIdLength = spec.DestinationConnectionIdLength,
+            LocalFlowControl = spec.LocalFlowControl,
+            TransportParameters = spec.TransportParameters,
+            AesGcmConfidentialityLimit = spec.AesGcmConfidentialityLimit,
+        };
+        await using var connection = Connection(clientTransport, serverTransport, pki, spec);
+        await using var server = Server(credential, connection.OriginalDestinationConnectionId);
+        await using var serverPeer = LoopbackQuicPeer.ForServer(
+            serverTransport, clientTransport.LocalEndPoint, server, Spec());
+
+        await connection.StartAsync(cancellation.Token);
+        Assert.True(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        Assert.False(await connection.PumpOnceAsync(cancellation.Token));
+        Assert.False(await serverPeer.PumpOnceAsync(SentAt, cancellation.Token));
+        await serverPeer.SendHandshakeDoneAsync(SentAt, cancellation.Token);
+        Assert.True(await connection.PumpOnceAsync(cancellation.Token));
+        var first = connection.NextPacketNumber(TlsQuicEncryptionLevel.Application);
+
+        // A PING at a time, each answered by an ACK-only packet the peer never acknowledges,
+        // until this connection has sent 200 1-RTT packets past the first with no
+        // acknowledgement of any of them. One byte reaches 127 unacknowledged; two carry on.
+        while (connection.NextPacketNumber(TlsQuicEncryptionLevel.Application) < first + 200)
+        {
+            await serverPeer.SendOneRttRawFrameAsync([0x01], cancellation.Token);
+            await connection.PumpOnceAsync(cancellation.Token);
+        }
+
+        Assert.Null(connection.LargestAcknowledged(TlsQuicEncryptionLevel.Application));
+
+        // THE PACKET NUMBER LENGTH IS HIDDEN BY HEADER PROTECTION, so the evidence that the
+        // widened packets are well formed is the peer opening them: the last one it read is
+        // the last one sent, which is also the number it would decode wrongly from one byte.
+        // Every datagram the connection sent is waiting in the peer's inbox, the last one
+        // included, so this loop stops on it and never pumps an empty inbox; a packet the peer
+        // cannot open leaves it short, and the test's timeout says so.
+        while ((serverPeer.LargestApplicationPacketNumberReceived ?? 0)
+            < connection.NextPacketNumber(TlsQuicEncryptionLevel.Application) - 1)
+        {
+            await serverPeer.PumpOnceAsync(SentAt, cancellation.Token);
+        }
+        Assert.Equal(
+            connection.NextPacketNumber(TlsQuicEncryptionLevel.Application) - 1,
+            serverPeer.LargestApplicationPacketNumberReceived);
+    }
+
     [Fact]
     public async Task OnlyOneHandshakeDoneArrivesBecauseTheOneRttPacketIsAcknowledged()
     {

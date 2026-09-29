@@ -35,6 +35,12 @@ All notable changes to both packages in this repository are documented here, Sha
 
 ### Fixed
 
+- `TlsQuicConnectionSpec.PacketNumberEncodedLength` is the width a packet number is written in
+  until RFC 9000 Appendix A.2 needs more, then wider. It was used as an exact width, so a preset
+  pinning the capture's one byte refused to send once 128 or more of its packets were
+  unacknowledged, which a client downloading a large response reaches through its ACK-only
+  packets: every h3 request to open.spotify.com and api.spotify.com failed with "Packet number
+  N needs at least 2 bytes".
 - RFC 9114 s4.1.2's content-length check counts the DATA a datagram-carrying exchange has
   already dropped. A proxy's 522 with a body, its DATA arriving a pump before its FIN, was
   judged malformed (H3_MESSAGE_ERROR, 0x10e), and that closed the whole outer MASQUE connection
@@ -141,14 +147,21 @@ All notable changes to both packages in this repository are documented here, Sha
   bound through MASQUE before its first TCP proxy connect (`Quic.BindSessionThroughMasque`,
   default on; connect event `MasqueSessionBound`), because a session first used through the
   SOCKS5 front lands on an exit that cannot carry UDP.
-- One outer MASQUE connection per proxy session (per username), shared by every h3 dial on it
-  and reported once as `MasqueConnectionOpened`; each inner connection is one CONNECT-UDP tunnel
-  on it, so several origins cost one outer handshake instead of one each. An outer that has
-  ended is replaced by the next dial; one that refuses or ends a tunnel open after having carried
-  tunnels is replaced once. An exit that proved unable to carry UDP (`MasqueExitSilent`:
+- A pool of outer MASQUE connections per proxy session (per username): each inner connection
+  is one CONNECT-UDP tunnel on an outer with room, one live tunnel per outer by default
+  (`Quic.MasqueTunnelsPerConnection`), and an outer whose tunnel ended is reused by the next dial,
+  so sequential dials skip the outer handshake while concurrent ones never share a congestion
+  window. A new outer is reported as `MasqueConnectionOpened`. An outer that has ended is
+  replaced; one that let an open go unanswered with nothing arriving meanwhile is discarded. An exit that proved unable to carry UDP (`MasqueExitSilent`:
   datagrams in and nothing back within the inner handshake deadline while the outer stayed alive;
   `RelayDeliveredTlsAlert`; every tunnel of a dial ending with nothing back) is remembered for
   the session, and every later h3 dial on it fails at once with the same error.
+- A MASQUE tunnel open that fails on a reused outer connection discards the outer only when the
+  proxy went silent on it; a 522 or a reset proves the outer alive, and discarding it had ended
+  every other tunnel on it. `MasqueExitSilent` is not given while inner datagrams are still
+  queued behind the outer, which is our side, not the exit.
+- A failed inner handshake's message carries its `PROGRESS:` line, so a log that prints only
+  the outer message still says which direction lost the packets.
 - An inner QUIC handshake through a MASQUE tunnel that runs out of its deadline while traffic
   is coming back (acknowledgements arriving, the server's flight not) is dialled again on a
   fresh tunnel, up to `Quic.MaximumAssociationAttempts` in all. Nothing of the request has been

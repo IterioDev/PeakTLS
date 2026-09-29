@@ -111,6 +111,11 @@ internal sealed class TlsQuicMasqueConnection : ITlsQuicMasqueConnection
     /// yet.</summary>
     public int TunnelsRequested => Volatile.Read(ref _tunnelsRequested);
 
+    /// <inheritdoc/>
+    /// <remarks>Read off the owner's connection from another thread: a whole int, so the read
+    /// is atomic, and a count one pump stale answers "did anything arrive" as well.</remarks>
+    public int DatagramsReceived => _connection.DatagramsReceived;
+
     /// <summary>The outer connection's DATAGRAM frame payload, which every tunnel's ceiling is
     /// derived from.</summary>
     internal int MaximumDatagramFramePayload => _connection.MaximumDatagramFramePayload;

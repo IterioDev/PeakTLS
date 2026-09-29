@@ -127,6 +127,12 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     /// an exit that does not carry UDP to the target.</summary>
     public ulong DatagramsReceived => Volatile.Read(ref _receivedFromTunnel);
 
+    /// <summary>Payloads the inner connection handed this tunnel that have not reached the
+    /// outer connection yet: queued in the channel, or the one the outer's full DATAGRAM queue
+    /// refused. Above zero when a dial fails, the missing answers may be ours never having
+    /// left, not the exit's silence.</summary>
+    public int Backlog => _outbound.Reader.Count + (Volatile.Read(ref _stalled) is null ? 0 : 1);
+
     /// <summary>What was dropped on the way in, by reason, for a diagnostic.</summary>
     internal string DropSummary =>
         $"{_droppedWrongContext} datagram(s) dropped for a context id other than 0, "
@@ -142,7 +148,8 @@ internal sealed class TlsQuicMasqueTransport : ITlsQuicDatagramTransport
     {
         lock (_sentSizes)
         {
-            return $"{DatagramsSent} datagram(s) went in and {DatagramsReceived} came back "
+            return $"{DatagramsSent} datagram(s) went in, {Backlog} still queued behind the outer, "
+                + $"and {DatagramsReceived} came back "
                 + $"(last sizes in: {string.Join(", ", _sentSizes)}; back: "
                 + $"{string.Join(", ", _receivedSizes)}; ceiling {MaxDatagramPayloadSize})";
         }
