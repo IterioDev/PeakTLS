@@ -46,7 +46,7 @@ jobs:
         run: dotnet pack SharpTls/src/SharpTls --configuration Release --output artifacts
       - name: Pack TlsClient
         run: dotnet pack TlsClient-main/src/TlsClient --configuration Release --output artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages
           path: artifacts/*.nupkg
